@@ -7,7 +7,20 @@ use gpui::{App, KeyBinding, actions};
 
 actions!(
     cloud_storage,
-    [Quit, CloseWindow, ToggleSidebar, ToggleInspector,]
+    [
+        Quit,
+        CloseWindow,
+        ToggleSidebar,
+        ToggleInspector,
+        OpenCommandPalette,
+    ]
+);
+
+// 命令面板（⌘K，规范 §22）内部导航：仅通过 context "Palette" 生效（见 bind_keys），
+// 避免与 Input / List 等组件的同键位 Action 冲突。
+actions!(
+    cloud_storage,
+    [PaletteClose, PaletteSelectPrev, PaletteSelectNext,]
 );
 
 // Edit 菜单专用：通过 `MenuItem::os_action` 触发 macOS 原生编辑行为。
@@ -24,5 +37,13 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §7：Sidebar ⌘⌥S、Inspector ⌘⌥I（菜单显示 ⌘ 符号，不是 "Cmd"）
         KeyBinding::new("cmd-alt-s", ToggleSidebar, None),
         KeyBinding::new("cmd-alt-i", ToggleInspector, None),
+        // 命令面板：⌘K 全局打开；↑↓/Esc 收窄到 context "Palette"——
+        // 无 context 的绑定按 keymap 深度规则会压过组件（如 Input）的同键绑定。
+        // 方向键能用的前提：单行 Input 只在 multi_line 下注册 MoveUp/MoveDown，
+        // 未处理时 keymap 会沿绑定列表落到这里的 PaletteSelectPrev/Next。
+        KeyBinding::new("cmd-k", OpenCommandPalette, None),
+        KeyBinding::new("escape", PaletteClose, Some("Palette")),
+        KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
+        KeyBinding::new("down", PaletteSelectNext, Some("Palette")),
     ]);
 }

@@ -3,7 +3,8 @@ use gpui::{Menu, MenuItem, OsAction};
 use gpui_component::Root;
 use object_storage_ui::{self as ui, WorkspaceView};
 use ui::actions::{
-    CloseWindow, Copy, Cut, Paste, Quit, Redo, SelectAll, ToggleInspector, ToggleSidebar, Undo,
+    CloseWindow, Copy, Cut, OpenCommandPalette, Paste, Quit, Redo, SelectAll, ToggleInspector,
+    ToggleSidebar, Undo,
 };
 
 /// macOS 应用菜单（规范 §11/§22：与快捷键共享同一 Action；§26：⌘ 符号随键位自动显示）。
@@ -34,6 +35,8 @@ fn app_menus() -> Vec<Menu> {
         Menu {
             name: "显示".into(),
             items: vec![
+                MenuItem::action("命令面板…", OpenCommandPalette),
+                MenuItem::separator(),
                 MenuItem::action("切换边栏", ToggleSidebar),
                 MenuItem::action("切换检查器", ToggleInspector),
             ],
@@ -66,6 +69,10 @@ fn main() {
                 // 窗口第一层视图必须是 Root。
                 cx.new(|cx| Root::new(workspace, window, cx))
             })?;
+
+            // 终端直启（cargo run）不触发 LaunchServices 激活，主动把应用带到前台，
+            // 否则窗口不可交互。.app 包启动时此调用无副作用（本已在前台）。
+            cx.update(|app| app.activate(true))?;
 
             Ok::<_, anyhow::Error>(())
         })

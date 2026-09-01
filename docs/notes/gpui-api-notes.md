@@ -30,6 +30,87 @@
 - `Window::focus(&FocusHandle)` 在 window.rs:1386；open_window 回调里给根视图设置初始焦点，
   菜单 Action 才能沿焦点链派发到视图。
 
+### 关闭窗口：macOS 15 close 动画陷阱（重要）
+
+**症状**：`Window::remove_window()` → `MacWindow::drop` → gpui 内部 close 任务执行
+`[super close]` 之后，NSWindow 在屏幕上**永远不消失**（进程存活、gpui 注册表已清理、
+CGWindowList OnScreenOnly 仍列出 layer=0 alpha=1.0 的窗口）。
+
+**根因**：macOS 15 上 NSWindow `close` 默认带窗口动画；而 `MacWindow::drop` 在入队 close
+任务的同时会 `window.autorelease()`，close 执行后毫秒级 dealloc，**动画被中途杀死**，
+窗口卡在可见状态。这不是 gpui 特有的 bug 路径，而是「close 动画 × 立即 teardown」
+的组合，任何 NSWindow 子类都可能踩到。
+
+**修复**（两行，见 `crates/ui/src/workspace_view.rs` `handle_close_window`）：
+
+```rust
+// NSWindowAnimationBehaviorNone = 1，禁用 close 动画，[super close] 退化为纯 orderOut
+let _: () = msg_send![win, setAnimationBehavior: 1i64];
+window.remove_window();
+```
+
+实测要点（对比实验保留在 git 历史与本文末尾的实验记录）：
+- 只 `remove_window()`（= close-only）→ 永远可见；
+- 只 `orderOut`（任意时机）→ 窗口消失，但 gpui 注册表未清理，窗口对象泄漏；
+- **setAnimationBehavior(None) + remove_window() → 窗口消失 + 注册表干净 + 进程存活**。
+
+注意：`setAnimationBehavior` 必须在 close 之前设置（handler 里 remove_window 之前即可），
+对之后所有的 close 生效。NSWindow 获取方式见下节「raw-window-handle」。
+
+### 关闭窗口：失败方案存档（勿重复尝试）
+
+以下方案全部实测失败，记录以避免踩坑（2025 年 macOS 15 / gpui 0.2.2）：
+
+| # | 方案 | 结果 |
+|---|---|---|
+| F | remove_window → 延迟 orderOut（retain 保活） | 可见（T2 close 复活窗口） |
+| H | remove_window → 200ms 后对裸 NSWindow 指针 orderOut | **段错误**（dealloc 后悬垂指针；延迟消息必须 retain） |
+| H' | retain + close 先行 → 200ms 后 orderOut | 可见（close 后窗口对 orderOut 免疫） |
+| K | 立即 orderOut → 500ms → remove_window → close | 可见 |
+| L/M | remove_window → drop 后立即 orderOut（0ms/200ms 延迟） | 可见（orderOut 后 ~0ms 内 close 会复活窗口） |
+| N | 立即 orderOut → 2s → remove_window | 可见（渲染器存活时 orderOut 完全无效，连临时消失都没有） |
+| Run B/V1 | vendor 补丁：drop 内 orderOut（+2s 后 close / 不 close） | 隐藏（但需 vendor 补丁，不可接受为正式方案） |
+
+经验教训：
+- **对已 dealloc 的 NSWindow 发消息 = 段错误**（不是 NSException）。gpui 的 drop 会
+  autorelease；延迟消息必须先 `msg_send![win, retain]`，用完 `release` 平衡。
+- **渲染器存活时 orderOut 完全无效**（窗口服务器层面就不消失，非闪现后复活）。
+- close 动画被杀死 → 窗口卡死可见，是 macOS 15 特有行为（14 及以下未验证）。
+- 排查此类问题用 CGWindowList（`CGWindowListCopyWindowInfo` + `.optionOnScreenOnly`，
+  swift 一段脚本即可，无需屏幕录制权限）+ eprintln trace + `exec-launch` 重定向。
+- `screencapture` 需要屏幕录制权限（终端宿主常没有），CGWindowList 不需要。
+- gpui 0.2.2 无 AX 树，无法用 Accessibility 检查 UI。
+- CGEvent `postToPid` 可在无前台权限时向指定进程注入键盘事件（菜单/快捷键自动化测试用）。
+
+### raw-window-handle（获取 NSWindow）
+
+- gpui **不重导出** raw-window-handle；需要时自己加依赖 `raw-window-handle = "0.6"`
+  （与 gpui 0.2.2 的版本一致，trait 才能对上）。
+- gpui 0.2.2 的 `Window` 实现 `HasWindowHandle`（window.rs:4845）——用**新 API**：
+
+```rust
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+let raw = window.window_handle()?.as_raw(); // WindowHandle::as_raw() -> RawWindowHandle (Copy)
+let ns_view = match raw {
+    RawWindowHandle::AppKit(h) => h.ns_view.as_ptr(), // NonNull<c_void>，即 contentView 所在 NSView
+    _ => unreachable!(),
+};
+let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
+```
+
+- 旧 API `HasRawWindowHandle` / `window.raw_window_handle()` 在 rwh 0.6 中已 deprecated
+  （仍在 crate 内兼容），新代码用 `HasWindowHandle`。
+
+### objc 0.2 消息发送陷阱
+
+- 需要 `use objc::{msg_send, sel, sel_impl};`。
+- **没有 `nil` 常量**：用 `std::ptr::null_mut()` 代替。
+- selector 冒号语法：`orderOut:` 是对的；`orderOut_:`（尾下划线风格）会
+  NSInvalidArgumentException 崩溃。
+- 无返回值消息：`let _: () = msg_send![win, orderOut: nil];`（编译器需要类型标注）。
+- retain/release：`let _: () = msg_send![win, retain];` / `msg_send![win, release]`。
+
+
 ### 闭包借用
 - `bool::then(|| self.render(&mut cx))` 这类写法会触发 E0524（两个闭包同时捕获 `&mut cx`）。
   改用普通 `if` 语句分分支构造。

@@ -8,8 +8,9 @@
 //! - Action 处理见 `crate::actions`：⌘⌥S / ⌘⌥I / ⌘W / ⌘Q 与菜单共享同一 Action。
 
 use gpui::{
-    Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement, Pixels, Render,
-    Styled, Window, div, prelude::FluentBuilder, px,
+    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Render, Styled, Window, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -17,7 +18,8 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::actions::{CloseWindow, ToggleInspector, ToggleSidebar};
+use crate::actions::{CloseWindow, OpenCommandPalette, ToggleInspector, ToggleSidebar};
+use crate::command_palette::CommandPaletteView;
 
 /// 左栏折叠后的图标栏宽度（规范：44px Icon Rail）。
 const RAIL_WIDTH: Pixels = px(44.);
@@ -34,6 +36,9 @@ pub struct WorkspaceView {
     focus_handle: FocusHandle,
     sidebar_collapsed: bool,
     inspector_collapsed: bool,
+    /// 当前打开的命令面板（⌘K）。Some 时在根容器上渲染模态遮罩层；
+    /// 面板关闭（open=false）后由此处置 None 并归还焦点。
+    palette: Option<Entity<CommandPaletteView>>,
 }
 
 impl WorkspaceView {
@@ -42,6 +47,7 @@ impl WorkspaceView {
             focus_handle: cx.focus_handle(),
             sidebar_collapsed: false,
             inspector_collapsed: false,
+            palette: None,
         }
     }
 
@@ -62,11 +68,102 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn handle_close_window(&mut self, _: &CloseWindow, window: &mut Window, _: &mut Context<Self>) {
+    fn handle_close_window(
+        &mut self,
+        _: &CloseWindow,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // 关闭窗口（gpui 0.2.2 在 macOS 15 上的绕行方案，实测记录见 docs/notes/gpui-api-notes.md）：
+        //
+        // 根因：macOS 15 上 NSWindow close 默认带窗口动画，而 gpui 的 MacWindow::drop 会在
+        // close 后毫秒级 autorelease（dealloc），把动画中途杀死，窗口卡在可见状态——表现为
+        // close() 永远关不掉窗口。
+        //
+        // 修复：先禁用 close 动画（NSWindowAnimationBehaviorNone），再 remove_window()
+        // （注册表清理 → drop → gpui 内部 close 任务）。无动画的 [super close] 退化为
+        // 纯 orderOut，窗口正常消失，进程与 gpui 窗口注册表状态一致。
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let raw = match window.window_handle() {
+            Ok(h) => h.as_raw(),
+            Err(_) => return,
+        };
+        let ns_view = match raw {
+            RawWindowHandle::AppKit(h) => h.ns_view.as_ptr(),
+            _ => return, // macOS 上不可能走到
+        };
+        unsafe {
+            let view = ns_view as *mut objc::runtime::Object;
+            let win: *mut objc::runtime::Object = msg_send![view, window];
+            if !win.is_null() {
+                let _: () = msg_send![win, setAnimationBehavior: 1i64];
+            }
+        }
         window.remove_window();
     }
 
+    fn handle_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() {
+            return; // 已打开（⌘K 重复触发为无操作）
+        }
+        let palette = cx.new(|cx| CommandPaletteView::new(window, cx));
+        // 面板关闭（open=false）后由观察者丢弃实体并归还焦点。
+        cx.observe_in(&palette, window, Self::handle_palette_changed)
+            .detach();
+        palette.update(cx, |palette, cx| palette.focus_input(window, cx));
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// 面板状态观察：面板自己调用 close() 置 open=false 时，这里收尾——
+    /// 丢弃实体（遮罩与卡片随之消失）并把焦点归还 Workspace 根节点。
+    /// 在 observe 回调里丢弃面板是安全的：回调参数持有的 Entity 让它
+    /// 存活到本次调用结束。
+    fn handle_palette_changed(
+        &mut self,
+        palette: Entity<CommandPaletteView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if palette.read(cx).open() {
+            return; // 过滤/选行等常规通知，不处理
+        }
+        self.palette = None;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
     // ---- 渲染 ----
+
+    /// 命令面板遮罩：点击空白处关闭；卡片自身的 on_mouse_down 会阻止
+    /// 冒泡，所以点卡片内部不会触发这里。
+    fn render_palette_overlay(
+        &self,
+        palette: &Entity<CommandPaletteView>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .occlude() // 挡住下层元素的鼠标交互
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if let Some(palette) = &this.palette {
+                        palette.update(cx, |palette, cx| palette.close(window, cx));
+                    }
+                }),
+            )
+            .child(palette.clone())
+    }
 
     fn render_title_bar(&self, _theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_icon = if self.sidebar_collapsed {
@@ -314,16 +411,24 @@ impl gpui::Focusable for WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        v_flex()
+        let mut root = v_flex()
             .id("workspace")
+            .relative() // 命令面板遮罩层的定位基准
             .size_full()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_toggle_sidebar))
             .on_action(cx.listener(Self::handle_toggle_inspector))
             .on_action(cx.listener(Self::handle_close_window))
+            .on_action(cx.listener(Self::handle_open_command_palette))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
-            .child(self.render_body(&theme, cx))
+            .child(self.render_body(&theme, cx));
+
+        // 命令面板遮罩层：置于根容器之上，挡住下层交互（规范 §22）。
+        if let Some(palette) = self.palette.clone() {
+            root = root.child(self.render_palette_overlay(&palette, &theme, cx));
+        }
+        root
     }
 }

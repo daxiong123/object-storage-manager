@@ -77,7 +77,8 @@ crates/
 | Keychain key | `service = com.<company>.<app>.credentials`，`account = <account_uuid>`（不用账号名） |
 | 本地路径 | `PathBuf`；Cloud Object Key：`String` + `/`。两者严格区分 |
 | Transfer | Sleep/Wake/断网后状态为 `Waiting/Paused` 并恢复，**不得**误标 `Failed`（P0）；事件驱动，不轮询 |
-| ⌘Q vs ⌘W | ⌘W 只关窗口；⌘Q 有 Transfer 时弹确认，默认 `Pause + Persist` |
+| ⌘Q vs ⌘W | ⌘W 只关窗口（**必须先禁用 close 动画再 remove_window**，见下行）；⌘Q 有 Transfer 时弹确认，默认 `Pause + Persist` |
+| 关窗口实现 | macOS 15 close 动画会被 gpui 立即 teardown 杀死 → 窗口卡死可见。`handle_close_window`：`setAnimationBehavior: None` + `remove_window()`；失败方案与机制详见 `docs/notes/gpui-api-notes.md`「关闭窗口」章节，勿重复试错 |
 | 通知 | `UserNotifications.framework`，仅长时间 Transfer 完成/失败、Migration 完成 |
 | 字体 | 系统 SF Pro / SF Mono，不捆绑 Inter |
 | 自动更新 | 架构预留 Updater 边界；Check→Download→Verify→Install→Restart，必须验证签名+校验和 |

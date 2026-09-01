@@ -1,9 +1,11 @@
 pub mod actions;
+pub mod command_palette;
 mod workspace_view;
 
 use gpui::{Bounds, Pixels, WindowOptions};
 use gpui_component::TitleBar;
 
+pub use command_palette::{CommandKind, PaletteCommand, PaletteHandler};
 pub use workspace_view::WorkspaceView;
 
 /// 应用初始化（在 gpui_component::init 之后调用）。
