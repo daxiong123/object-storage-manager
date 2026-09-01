@@ -1,0 +1,4 @@
+# macOS Only · Apple Silicon first（agents.md §2/§9）
+# 最低系统版本决策：macOS 14+（见 agents.md §2）
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"

@@ -15,7 +15,7 @@ UX 标准：如果 Zed / ChatGPT 团队设计一个 OSS Browser，大概就应�
 
 - **macOS Only**。不支持且不考虑 Windows / Linux / Web / iOS / Android。
 - Apple Silicon 是 P0 目标（`aarch64-apple-darwin`）。Universal Binary 可选，非 P0。
-- 最低 macOS 版本：13+ 或 14+，以 GPUI 及依赖的实际要求定，开发前先确认。
+- 最低 macOS 版本：**已定 macOS 14+**（`.cargo/config.toml` 中 `MACOSX_DEPLOYMENT_TARGET=14.0`；GPUI 0.2.2 对下限无更高要求，取规范建议的新版本档）。
 - **禁止**提出"为了以后支持 Windows/Linux 我们应该……"。除非用户主动改变产品目标。
 
 ## 3. 技术选型（硬约束）

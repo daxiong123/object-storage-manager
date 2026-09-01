@@ -1,0 +1,7 @@
+[package]
+name = "object-storage-persistence"
+description = "SQLite 持久化（~/Library/Application Support/），永不存 Secret"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true

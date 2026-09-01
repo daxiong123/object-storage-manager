@@ -1,0 +1,18 @@
+[package]
+name = "object-storage-desktop"
+description = "macOS App 入口：进程启动、窗口创建、生命周期"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "CloudStorage"
+path = "src/main.rs"
+
+[dependencies]
+object-storage-ui = { workspace = true }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+anyhow = { workspace = true }

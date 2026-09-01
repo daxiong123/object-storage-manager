@@ -30,10 +30,13 @@ objc2 / AppKit / Foundation / Security / UserNotifications
 ## 构建
 
 ```bash
-cargo build            # 开发
-cargo build --release  # 主 Target: aarch64-apple-darwin
+cargo build                    # 开发
+cargo build --release          # 主 Target: aarch64-apple-darwin
+cargo run                      # 启动 App（二进制名 CloudStorage）
+cargo fmt --check && cargo clippy --all-targets   # CI 门槛（agents.md §9）
 ```
 
 ## 状态
 
-🚧 规划阶段 — 规范已定，工程搭建进行中。
+🚧 工程骨架已就绪：Cargo workspace（12 crates）+ GPUI 窗口（Unified Titlebar）可构建运行。
+技术栈：`gpui 0.2.2` + `gpui-component 0.5.1`（crates.io 正式版，无 git 依赖）。

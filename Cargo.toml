@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/zhangweijian/object-storage-manager"
+
+[workspace.dependencies]
+# --- UI（macOS Only，GPUI 固定栈，见 agents.md §3）---
+gpui = "0.2.2"
+gpui-component = "0.5.1"
+gpui-component-assets = "0.5.1"
+
+# --- 基础 ---
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+
+# --- 内部 crate ---
+object-storage-desktop = { path = "crates/desktop" }
+object-storage-app = { path = "crates/app" }
+object-storage-domain = { path = "crates/domain" }
+object-storage-core = { path = "crates/storage-core" }
+object-storage-qiniu = { path = "crates/provider-qiniu" }
+object-storage-aliyun = { path = "crates/provider-aliyun" }
+object-storage-transfer = { path = "crates/transfer" }
+object-storage-persistence = { path = "crates/persistence" }
+object-storage-macos = { path = "crates/macos" }
+object-storage-preview = { path = "crates/preview" }
+object-storage-ui = { path = "crates/ui" }
+object-storage-common = { path = "crates/common" }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

@@ -1,0 +1,11 @@
+[package]
+name = "object-storage-ui"
+description = "GPUI views/components：三栏 Workspace、Titlebar、Object Table、Command Palette"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gpui = { workspace = true }
+gpui-component = { workspace = true }

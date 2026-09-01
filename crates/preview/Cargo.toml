@@ -1,0 +1,7 @@
+[package]
+name = "object-storage-preview"
+description = "Preview：常见格式应用内预览，复杂格式走系统 Quick Look"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
