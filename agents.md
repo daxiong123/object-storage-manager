@@ -81,6 +81,11 @@ crates/
 | 通知 | `UserNotifications.framework`，仅长时间 Transfer 完成/失败、Migration 完成 |
 | 字体 | 系统 SF Pro / SF Mono，不捆绑 Inter |
 | 自动更新 | 架构预留 Updater 边界；Check→Download→Verify→Install→Restart，必须验证签名+校验和 |
+| Action 注册点 | 所有跨 菜单/快捷键/右键菜单/工具栏 共用的 Action **只**定义在 `crates/ui/src/actions.rs`（`actions!(cloud_storage, …)`），键位在 `bind_keys(cx)` 统一绑定，不得散落各 view |
+| 全局键位边界 | 不绑定 ⌘X/⌘C/⌘V/⌘A 全局快捷键（会吞文本输入的原生响应链）；Edit 菜单走 `MenuItem::os_action` 触发系统行为 |
+| Quit 处理 | 全局 `cx.on_action`（capture 阶段），不依赖窗口焦点；窗口全关后仍可 ⌘Q。退出确认（默认「暂停并持久化」）待传输引擎落地 |
+| Sidebar/Inspector | **自建视图**，不用 gpui-component `Sidebar`（组件固定 255px/48px，与规范 180/220/360 + 44px rail 冲突）；可拖拽宽度用 gpui-component `resizable`，按布局变体用不同 group id 保持各自记忆宽度 |
+| GPUI API 陷阱 | gpui 0.2.2 / gpui-component 0.5.1 已验证的 API 事实与陷阱清单见 `docs/notes/gpui-api-notes.md`；写 UI 前先查，不凭记忆猜签名 |
 
 ## 6. 目录与数据
 

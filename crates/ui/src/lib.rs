@@ -1,3 +1,4 @@
+pub mod actions;
 mod workspace_view;
 
 use gpui::{Bounds, Pixels, WindowOptions};
@@ -6,8 +7,9 @@ use gpui_component::TitleBar;
 pub use workspace_view::WorkspaceView;
 
 /// 应用初始化（在 gpui_component::init 之后调用）。
-pub fn init(_cx: &mut gpui::App) {
-    // TODO: 注册主题/Accent/Action 等全局 UI 状态。
+pub fn init(cx: &mut gpui::App) {
+    // 全局快捷键（⌘Q / ⌘W / ⌘⌥S / ⌘⌥I）。
+    actions::bind_keys(cx);
 }
 
 /// 主窗口配置：Unified Titlebar（Traffic Lights 与内容一体，agents.md §7）。
