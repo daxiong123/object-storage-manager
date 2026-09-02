@@ -47,7 +47,7 @@ use object_storage_transfer::{
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, Quit, Refresh, ToggleInspector,
-    ToggleSidebar, UploadFiles,
+    ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -621,6 +621,15 @@ impl WorkspaceView {
         self.start_files_upload(cx);
     }
 
+    fn handle_upload_folder(
+        &mut self,
+        _: &UploadFolder,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_folder_upload(cx);
+    }
+
     /// ⌘R：有选中空间则重载当前前缀的对象列表；否则刷新空间/账号。
     fn handle_refresh(&mut self, _: &Refresh, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_bucket.is_some() {
@@ -634,19 +643,15 @@ impl WorkspaceView {
         }
     }
 
-    /// 上传本地文件：gpui `prompt_for_paths`（多选，只要文件）→ 入队。
-    /// 云端 key = 当前前缀 + 文件名；目录上传后续里程碑。
-    fn start_files_upload(&mut self, cx: &mut Context<Self>) {
-        if self.uploading {
-            return;
-        }
+    /// 上传所需的账号 / 空间 / 当前前缀。缺一则提示并返回 None。
+    fn upload_target(&mut self, cx: &mut Context<Self>) -> Option<(String, String, String)> {
         let Some(account_id) = self.selected_account_id.clone() else {
             self.download_message = Some(DownloadMessage {
                 is_error: true,
                 text: "请先选中一个账号和空间再上传".into(),
             });
             cx.notify();
-            return;
+            return None;
         };
         let Some(bucket) = self.selected_bucket.clone() else {
             self.download_message = Some(DownloadMessage {
@@ -654,13 +659,25 @@ impl WorkspaceView {
                 text: "请先选中一个空间再上传".into(),
             });
             cx.notify();
+            return None;
+        };
+        let prefix = self.current_prefix.clone().unwrap_or_default();
+        Some((account_id, bucket, prefix))
+    }
+
+    /// 上传本地文件：gpui `prompt_for_paths`（多选，只要文件）→ 入队。
+    /// 云端 key = 当前前缀 + 文件名。
+    fn start_files_upload(&mut self, cx: &mut Context<Self>) {
+        if self.uploading {
+            return;
+        }
+        let Some((account_id, bucket, prefix)) = self.upload_target(cx) else {
             return;
         };
         self.uploading = true;
         self.download_message = None;
         cx.notify();
 
-        let prefix = self.current_prefix.clone().unwrap_or_default();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -714,6 +731,120 @@ impl WorkspaceView {
                             text: format!("已加入传输队列：{}", names.join("、")),
                         });
                     }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 上传本地目录：`prompt_for_paths`（只要目录）→ 后台递归列举文件 → 入队。
+    /// 云端 key = 当前前缀 + 目录名 + 相对路径（`/` 分隔，含顶层目录名）。
+    fn start_folder_upload(&mut self, cx: &mut Context<Self>) {
+        if self.uploading {
+            return;
+        }
+        let Some((account_id, bucket, prefix)) = self.upload_target(cx) else {
+            return;
+        };
+        self.uploading = true;
+        self.download_message = None;
+        cx.notify();
+
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("上传文件夹".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            enum PanelOutcome {
+                Picked(Vec<PathBuf>),
+                Cancelled,
+                Failed(String),
+            }
+            let outcome = match receiver.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => PanelOutcome::Picked(paths),
+                Ok(Ok(Some(_))) | Ok(Ok(None)) => PanelOutcome::Cancelled,
+                Ok(Err(e)) => PanelOutcome::Failed(format!("无法打开目录面板：{e}")),
+                Err(_) => PanelOutcome::Failed("目录面板结果通道已关闭".into()),
+            };
+
+            let roots = match outcome {
+                PanelOutcome::Picked(paths) => paths,
+                PanelOutcome::Cancelled => {
+                    this.update(cx, |this, cx| {
+                        this.uploading = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                PanelOutcome::Failed(text) => {
+                    this.update(cx, |this, cx| {
+                        this.uploading = false;
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text,
+                        });
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let collected = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut files = Vec::new();
+                    let mut errors = Vec::new();
+                    for root in &roots {
+                        match collect_folder_uploads(root) {
+                            Ok(entries) => files.extend(entries),
+                            Err(e) => errors.push(e),
+                        }
+                    }
+                    (files, errors)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.uploading = false;
+                let (files, errors) = collected;
+                if files.is_empty() {
+                    let text = if errors.is_empty() {
+                        "目录为空，没有可上传的文件".into()
+                    } else {
+                        errors.join("；")
+                    };
+                    this.download_message = Some(DownloadMessage {
+                        is_error: true,
+                        text,
+                    });
+                } else {
+                    let n = files.len();
+                    for entry in files {
+                        let key = format!("{prefix}{}", entry.relative_key);
+                        this.engine.enqueue_upload(
+                            account_id.as_str(),
+                            bucket.as_str(),
+                            key.as_str(),
+                            entry.source,
+                            entry.display_name,
+                        );
+                    }
+                    let mut text = format!("已加入传输队列：{n} 个文件");
+                    if !errors.is_empty() {
+                        text.push_str("；部分目录失败：");
+                        text.push_str(&errors.join("；"));
+                    }
+                    this.download_message = Some(DownloadMessage {
+                        is_error: !errors.is_empty(),
+                        text,
+                    });
                 }
                 cx.notify();
             })
@@ -1709,6 +1840,15 @@ impl WorkspaceView {
                                             this.start_files_upload(cx)
                                         })),
                                 )
+                                .child(
+                                    Button::new("upload-folder")
+                                        .label("文件夹…")
+                                        .disabled(self.uploading)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_folder_upload(cx)
+                                        })),
+                                )
                             }),
                     ),
             );
@@ -1934,6 +2074,73 @@ fn persistable_from_snapshot(tasks: &[TransferTask]) -> Vec<PersistedTransfer> {
         .collect()
 }
 
+/// 目录上传的一条文件：本地路径 + 云端相对 key（`/` 分隔，含顶层目录名）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FolderUploadFile {
+    source: PathBuf,
+    relative_key: String,
+    display_name: String,
+}
+
+fn skip_folder_entry_name(name: &str) -> bool {
+    name == ".DS_Store" || name == ".localized" || name.starts_with("._")
+}
+
+/// 递归收集目录内普通文件。不跟随符号链接。相对 key 以 `/` 连接。
+fn collect_folder_uploads(root: &std::path::Path) -> Result<Vec<FolderUploadFile>, String> {
+    let folder_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("目录名不是合法 UTF-8：{}", root.display()))?;
+    let meta = std::fs::symlink_metadata(root)
+        .map_err(|e| format!("读取 {} 失败：{e}", root.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("不跟随符号链接：{}", root.display()));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{} 不是目录", root.display()));
+    }
+    let mut out = Vec::new();
+    walk_folder(root, folder_name, &mut out)?;
+    Ok(out)
+}
+
+fn walk_folder(
+    dir: &std::path::Path,
+    key_prefix: &str,
+    out: &mut Vec<FolderUploadFile>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("读取目录 {} 失败：{e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取目录项失败：{e}"))?;
+        let name_os = entry.file_name();
+        let name = name_os
+            .to_str()
+            .ok_or_else(|| format!("文件名不是合法 UTF-8：{}", entry.path().display()))?;
+        if skip_folder_entry_name(name) {
+            continue;
+        }
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("读取 {} 类型失败：{e}", entry.path().display()))?;
+        if ft.is_symlink() {
+            continue;
+        }
+        let rel = format!("{key_prefix}/{name}");
+        if ft.is_dir() {
+            walk_folder(&entry.path(), &rel, out)?;
+        } else if ft.is_file() {
+            out.push(FolderUploadFile {
+                source: entry.path(),
+                relative_key: rel,
+                display_name: name.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// 云端 Key 的末段展示名（目录前缀先去掉结尾 `/`）。
 pub fn display_name(key: &str) -> &str {
     let trimmed = key.trim_end_matches('/');
@@ -1983,6 +2190,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_open_add_modal))
             .on_action(cx.listener(Self::handle_download_object))
             .on_action(cx.listener(Self::handle_upload_files))
+            .on_action(cx.listener(Self::handle_upload_folder))
             .on_action(cx.listener(Self::handle_refresh))
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -2043,5 +2251,42 @@ mod tests {
         assert_eq!(&s[13..14], ":");
         // 非法时间戳：原样输出数字，不静默美化
         assert_eq!(format_time(i64::MIN), i64::MIN.to_string());
+    }
+
+    #[test]
+    fn collect_folder_uploads_nested_and_skips_junk() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-folder-up-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = dir.join("photos").join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.join("photos").join("root.jpg"), b"r").unwrap();
+        std::fs::write(nested.join("cat.jpg"), b"c").unwrap();
+        std::fs::write(dir.join("photos").join(".DS_Store"), b"x").unwrap();
+        std::fs::write(dir.join("photos").join(".localized"), b"x").unwrap();
+        std::fs::write(dir.join("photos").join("._hidden"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("photos").join("empty")).unwrap();
+
+        let mut files = collect_folder_uploads(&dir.join("photos")).unwrap();
+        files.sort_by(|a, b| a.relative_key.cmp(&b.relative_key));
+        let keys: Vec<_> = files.iter().map(|f| f.relative_key.as_str()).collect();
+        assert_eq!(keys, ["photos/a/cat.jpg", "photos/root.jpg"]);
+        assert_eq!(files[0].display_name, "cat.jpg");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_folder_uploads_rejects_file() {
+        let path =
+            std::env::temp_dir().join(format!("cloudstorage-not-dir-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let err = collect_folder_uploads(&path).unwrap_err();
+        assert!(err.contains("不是目录"), "实际 {err}");
+        std::fs::remove_file(&path).unwrap();
     }
 }

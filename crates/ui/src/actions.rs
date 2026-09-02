@@ -19,6 +19,8 @@ actions!(
         DownloadObject,
         // 上传本地文件到当前空间：⌘U / 「对象」菜单 / 命令面板 / Inspector
         UploadFiles,
+        // 上传本地目录（递归文件入队）：菜单 / 命令面板 / Inspector
+        UploadFolder,
         // 刷新当前视图：有空间则重载对象列表，否则刷新空间/账号（规范 ⌘R）
         Refresh,
     ]

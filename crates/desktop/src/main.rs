@@ -6,7 +6,7 @@ use object_storage_ui::{self as ui, WorkspaceView};
 use std::sync::Arc;
 use ui::actions::{
     CloseWindow, Copy, Cut, DownloadObject, OpenCommandPalette, Paste, Quit, Redo, Refresh,
-    SelectAll, ToggleInspector, ToggleSidebar, Undo, UploadFiles,
+    SelectAll, ToggleInspector, ToggleSidebar, Undo, UploadFiles, UploadFolder,
 };
 
 /// macOS 应用菜单（规范 §11/§22：与快捷键共享同一 Action；§26：⌘ 符号随键位自动显示）。
@@ -50,6 +50,7 @@ fn app_menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("下载…", DownloadObject),
                 MenuItem::action("上传文件…", UploadFiles),
+                MenuItem::action("上传文件夹…", UploadFolder),
             ],
         },
         Menu {
