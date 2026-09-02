@@ -629,6 +629,7 @@ impl WorkspaceView {
             return;
         };
         let name = display_name(&key).to_string();
+        eprintln!("[preview] requested key={key} bucket={bucket}");
         let mut path = std::env::temp_dir();
         path.push("CloudStorage");
         path.push("preview");
@@ -658,6 +659,10 @@ impl WorkspaceView {
                 .await;
             this.update(cx, |this, cx| {
                 this.previewing = false;
+                eprintln!(
+                    "[preview] download result: {}",
+                    if result.is_ok() { "ok" } else { "error" }
+                );
                 match result {
                     Ok(path) => {
                         if let Err(error) = object_storage_macos::open_with_default_app(&path) {
@@ -2527,6 +2532,7 @@ impl Render for WorkspaceView {
             .id("workspace")
             .relative() // 模态遮罩层的定位基准
             .size_full()
+            .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_toggle_sidebar))
             .on_action(cx.listener(Self::handle_toggle_inspector))
