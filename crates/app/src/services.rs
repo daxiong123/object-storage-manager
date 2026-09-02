@@ -189,6 +189,20 @@ impl AppServices {
         Ok(self.runtime.block_on(provider.delete_object(bucket, key))?)
     }
 
+    /// 生成对象签名 GET URL。返回值含 token，不得写入日志。
+    pub fn signed_get_url(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<String, AppServicesError> {
+        let (_, provider) = self.build_provider(account_id)?;
+        Ok(self
+            .runtime
+            .block_on(provider.signed_get_url(bucket, key, ttl_secs))?)
+    }
+
     /// tokio 运行时句柄（Transfer Engine 用它 spawn 任务 future）。
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()

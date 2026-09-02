@@ -175,6 +175,47 @@ impl QiniuProvider {
         Ok(domains)
     }
 
+    /// 生成带签名的下载 URL。token 含 SK 派生签名，调用方不得写入日志。
+    async fn signed_download_url(
+        &self,
+        bucket: &str,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<reqwest::Url, StorageError> {
+        if bucket.is_empty() {
+            return Err(StorageError::InvalidInput("bucket 不能为空".into()));
+        }
+        if key.is_empty() {
+            return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+        if ttl_secs == 0 {
+            return Err(StorageError::InvalidInput("ttl_secs 必须大于 0".into()));
+        }
+        let domains = self.bucket_domains(bucket).await?;
+        let Some(domain) = domains.first().filter(|d| !d.is_empty()) else {
+            return Err(StorageError::InvalidResponse(format!(
+                "signed_get_url: 空间 {bucket} 未绑定可用下载域名（请在七牛控制台绑定 CDN/测试域名）"
+            )));
+        };
+        let deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| StorageError::InvalidInput(format!("signed_get_url: 系统时间异常: {e}")))?
+            .as_secs()
+            + ttl_secs;
+        let url: reqwest::Url = format!(
+            "{}{}/{}?e={deadline}",
+            self.download_scheme(),
+            domain,
+            sign::percent_encode_path_value(key)
+        )
+        .parse()
+        .map_err(|e| StorageError::InvalidInput(format!("signed_get_url: 下载 URL 不合法: {e}")))?;
+        let token = sign::sign_token(&self.cred, url.as_str().as_bytes());
+        let mut signed_url = url;
+        signed_url.set_query(Some(&format!("e={deadline}&token={token}")));
+        Ok(signed_url)
+    }
+
     /// 下载失败时删除半成品文件；删除也失败则并入错误信息（不静默吞掉）
     async fn download_cleanup_failed(dest: &Path, cause: String) -> StorageError {
         match tokio::fs::remove_file(dest).await {
@@ -391,38 +432,7 @@ impl StorageProvider for QiniuProvider {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
 
-        // 下载域名单独请求 UC（不缓存：域名绑定可能随时变更）
-        let domains = self.bucket_domains(bucket).await?;
-        let Some(domain) = domains.first().filter(|d| !d.is_empty()) else {
-            return Err(StorageError::InvalidResponse(format!(
-                "download_object: 空间 {bucket} 未绑定可用下载域名（请在七牛控制台绑定 CDN/测试域名）"
-            )));
-        };
-
-        // 下载 URL（官方 SDK 对公有/私有空间都签名，这里同样无条件签）：
-        //   {scheme}://{domain}/{path 转义}?e=<deadline>&token=<AK:sig>
-        // 签名数据 = 含 scheme://host 的完整 URL 串（截至 e=，不含 token），
-        // 先 parse 得到 reqwest 实际发送的规范化 URL，再对 `Url::as_str()` 签名，
-        // 保证「签名串 == 发送串」逐字节一致。
-        let deadline = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| StorageError::InvalidInput(format!("download_object: 系统时间异常: {e}")))?
-            .as_secs()
-            + 3600;
-        let url: reqwest::Url = format!(
-            "{}{}/{}?e={deadline}",
-            self.download_scheme(),
-            domain,
-            sign::percent_encode_path_value(key)
-        )
-        .parse()
-        .map_err(|e| {
-            StorageError::InvalidInput(format!("download_object: 下载 URL 不合法: {e}"))
-        })?;
-        let token = sign::sign_token(&self.cred, url.as_str().as_bytes());
-        let mut signed_url = url.clone();
-        // token 里的 `:` 与 base64 padding `=` 都是 query 合法字符，set_query 原样保留
-        signed_url.set_query(Some(&format!("e={deadline}&token={token}")));
+        let signed_url = self.signed_download_url(bucket, key, 3600).await?;
 
         // 下载专用客户端不带总超时（大文件）
         let resp = self
@@ -581,6 +591,18 @@ impl StorageProvider for QiniuProvider {
             .map_err(|e| StorageError::Network(format!("delete_object: {e}")))?;
         let _resp = self.check_status(resp, "delete_object").await?;
         Ok(())
+    }
+
+    async fn signed_get_url(
+        &self,
+        bucket: &str,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<String, StorageError> {
+        Ok(self
+            .signed_download_url(bucket, key, ttl_secs)
+            .await?
+            .to_string())
     }
 }
 
@@ -1062,6 +1084,35 @@ mod tests {
         let provider = test_provider("127.0.0.1:9".parse().unwrap());
         let err = tokio()
             .block_on(provider.delete_object("b1", ""))
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
+    }
+
+    #[test]
+    fn signed_get_url_queries_domains_and_embeds_token() {
+        let (addr, captured) = spawn_mock(200, r#"["cdn.example.com"]"#);
+        let provider = test_provider(addr);
+        let url = tokio()
+            .block_on(provider.signed_get_url("b1", "a/b.png", 3600))
+            .unwrap();
+        assert!(
+            url.starts_with("https://cdn.example.com/a/b.png?e="),
+            "url={url}"
+        );
+        assert!(url.contains("&token=test-ak:"), "url={url}");
+        let req = captured.lock().unwrap().take().unwrap();
+        assert!(
+            req.request_line.starts_with("GET /v2/domains?tbl=b1 "),
+            "request_line={}",
+            req.request_line
+        );
+    }
+
+    #[test]
+    fn signed_get_url_rejects_zero_ttl() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        let err = tokio()
+            .block_on(provider.signed_get_url("b1", "a", 0))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
     }

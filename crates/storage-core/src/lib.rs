@@ -98,6 +98,15 @@ pub trait StorageProvider: Send + Sync {
         bucket: &str,
         key: &str,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// 生成带签名的 GET URL（私有空间必须签名；公有空间同样签名，行为与官方 SDK 一致）。
+    /// `ttl_secs` 是链接有效期。返回值含 token，调用方不得写入日志。
+    fn signed_get_url(
+        &self,
+        bucket: &str,
+        key: &str,
+        ttl_secs: u64,
+    ) -> impl Future<Output = Result<String, StorageError>> + Send;
 }
 
 #[cfg(test)]

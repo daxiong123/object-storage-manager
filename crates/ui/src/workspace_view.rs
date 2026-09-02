@@ -47,8 +47,9 @@ use object_storage_transfer::{
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, DeleteObject, DownloadObject, OpenCommandPalette, PreviewObject, Quit,
-    Refresh, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenCommandPalette,
+    PreviewObject, Quit, Refresh, SaveTextObject, ToggleInspector, ToggleSidebar, UploadFiles,
+    UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -64,6 +65,10 @@ const INSPECTOR_MIN: Pixels = px(280.);
 const INSPECTOR_MAX: Pixels = px(520.);
 /// 对象列表单页条数（七牛列举单页上限内）。
 const OBJECTS_PAGE_LIMIT: u32 = 100;
+/// 签名下载链接有效期（与对象下载签名一致）
+const SIGNED_URL_TTL_SECS: u64 = 3600;
+/// 签名链接写入剪贴板后自动清除（规范 §21）
+const SIGNED_URL_CLIPBOARD_CLEAR_SECS: u64 = 60;
 
 /// 侧栏/内容区的异步加载状态。`Loaded` 不单独建模——数据非空且 state==Idle 即加载完成。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +151,10 @@ pub struct WorkspaceView {
     inspector_tab: InspectorTab,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
+    /// 文本保存覆盖确认 sheet 已弹出
+    save_prompt_open: bool,
+    /// 正在生成并复制签名链接
+    copying_url: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
     download_message: Option<DownloadMessage>,
     /// 传输引擎：下载入队，状态经 watch 令牌事件驱动回填 `transfers`（不轮询）
@@ -249,6 +258,8 @@ impl WorkspaceView {
             preview_open_quicklook: false,
             inspector_tab: InspectorTab::Preview,
             delete_prompt_open: false,
+            save_prompt_open: false,
+            copying_url: false,
             download_message: None,
             engine: Arc::clone(&engine),
             transfers: Vec::new(),
@@ -790,6 +801,143 @@ impl WorkspaceView {
             text: format!("已加入覆盖上传队列：{}", display_name(&object)),
         });
         cx.notify();
+    }
+
+    fn confirm_and_save_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_editor.is_none() {
+            return;
+        }
+        if self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        if self.save_prompt_open || self.delete_prompt_open || self.quit_prompt_open {
+            return;
+        }
+        let name = self
+            .selected_cloud_object()
+            .map(|object| display_name(&object.key).to_string())
+            .unwrap_or_else(|| "对象".into());
+        self.save_prompt_open = true;
+        let message = format!("覆盖“{name}”？");
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some("编辑后的内容将上传并覆盖远端对象，无法撤销。"),
+            &[PromptButton::ok("保存并上传"), PromptButton::cancel("取消")],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let answer = match rx.await {
+                Ok(i) => i,
+                Err(_) => {
+                    this.update(cx, |this, _| this.save_prompt_open = false)
+                        .ok();
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.save_prompt_open = false;
+                if answer == 0 {
+                    this.save_text_edit(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn copy_object_url(&mut self, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        if self.copying_url {
+            return;
+        }
+        let Some(object) = self.selected_cloud_object() else {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "请先选中一个对象再复制链接".into(),
+            });
+            cx.notify();
+            return;
+        };
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let key = object.key.clone();
+        self.copying_url = true;
+        self.download_message = None;
+        cx.notify();
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    services.signed_get_url(&account_id, &bucket, &key, SIGNED_URL_TTL_SECS)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.copying_url = false;
+                match result {
+                    Ok(url) => match object_storage_macos::copy_to_clipboard(&url) {
+                        Ok(()) => {
+                            this.download_message = Some(DownloadMessage {
+                                is_error: false,
+                                text: format!(
+                                    "已复制签名链接（{SIGNED_URL_CLIPBOARD_CLEAR_SECS} 秒后自动从剪贴板清除）"
+                                ),
+                            });
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_secs(
+                                    SIGNED_URL_CLIPBOARD_CLEAR_SECS,
+                                ));
+                                if let Err(error) =
+                                    object_storage_macos::clear_clipboard_if_equals(&url)
+                                {
+                                    eprintln!("[clipboard] 自动清除失败：{error}");
+                                }
+                            });
+                        }
+                        Err(error) => {
+                            this.download_message = Some(DownloadMessage {
+                                is_error: true,
+                                text: format!("写入剪贴板失败：{error}"),
+                            });
+                        }
+                    },
+                    Err(error) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: format!("复制链接失败：{error}"),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn handle_copy_object_url(
+        &mut self,
+        _: &CopyObjectUrl,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_object_url(cx);
+    }
+
+    fn handle_save_text_object(
+        &mut self,
+        _: &SaveTextObject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_and_save_text_edit(window, cx);
     }
 
     fn open_system_preview(&mut self, cx: &mut Context<Self>) {
@@ -2457,8 +2605,8 @@ impl WorkspaceView {
                                                 .label("保存并上传")
                                                 .primary()
                                                 .with_size(Size::Small)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.save_text_edit(cx)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.confirm_and_save_text_edit(window, cx)
                                                 })),
                                         )
                                     } else {
@@ -2528,6 +2676,19 @@ impl WorkspaceView {
                             .gap_2()
                             .when(self.selected_cloud_object().is_some(), |row| {
                                 row.child(
+                                    Button::new("copy-object-url")
+                                        .label(if self.copying_url {
+                                            "复制中…"
+                                        } else {
+                                            "复制链接"
+                                        })
+                                        .disabled(self.copying_url)
+                                        .with_size(Size::Small)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.copy_object_url(cx)),
+                                        ),
+                                )
+                                .child(
                                     Button::new("download-object")
                                         .label(if self.downloading {
                                             "下载中…"
@@ -2988,6 +3149,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_upload_folder))
             .on_action(cx.listener(Self::handle_refresh))
             .on_action(cx.listener(Self::handle_delete_object))
+            .on_action(cx.listener(Self::handle_copy_object_url))
+            .on_action(cx.listener(Self::handle_save_text_object))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))

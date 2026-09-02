@@ -27,6 +27,10 @@ actions!(
         DeleteObject,
         // 预览选中对象：Space / 命令面板
         PreviewObject,
+        // 复制选中对象的签名下载链接：菜单 / 命令面板 / Inspector
+        CopyObjectUrl,
+        // 保存文本编辑并覆盖上传：Inspector「保存并上传」/ ⌘S（Workspace 上下文）
+        SaveTextObject,
     ]
 );
 
@@ -64,6 +68,7 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §43：⌘⌫ 删除；不绑 Delete，避免误触。面板打开时 handler 直接 return。
         KeyBinding::new("cmd-backspace", DeleteObject, None),
         KeyBinding::new("space", PreviewObject, Some("Workspace")),
+        KeyBinding::new("cmd-s", SaveTextObject, Some("Workspace")),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
