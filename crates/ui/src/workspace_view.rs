@@ -37,7 +37,11 @@ use gpui_component::{
 };
 
 use object_storage_app::AppServices;
+use object_storage_core::StorageProvider as _;
 use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
+use object_storage_transfer::{
+    TaskRunner, TransferEngine, TransferRequest, TransferState, TransferTask,
+};
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
@@ -109,8 +113,12 @@ pub struct WorkspaceView {
     selected_object_key: Option<String>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
-    /// 最近一次下载结果提示（成功/失败；失败用 danger 色）
+    /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
     download_message: Option<DownloadMessage>,
+    /// 传输引擎：下载入队，状态经 watch 令牌事件驱动回填 `transfers`（不轮询）
+    engine: Arc<TransferEngine>,
+    /// 引擎任务快照（watch 订阅任务回填；取消/继续/重试直接作用于引擎）
+    transfers: Vec<TransferTask>,
 
     // ---- 串台防护：账号/对象各自的自增代号 ----
     bucket_gen: u64,
@@ -119,6 +127,24 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     pub fn new(services: Arc<AppServices>, cx: &mut Context<Self>) -> Self {
+        // 传输引擎：任务执行体注入 AppServices 下载（provider 构建即锁即放），
+        // 引擎把 future spawn 到 AppServices 的 tokio 运行时上（abort 即断流）。
+        let runner: TaskRunner = {
+            let services = Arc::clone(&services);
+            Arc::new(move |request: TransferRequest| {
+                let services = Arc::clone(&services);
+                Box::pin(async move {
+                    let (_, provider) = services
+                        .build_provider(&request.account_id)
+                        .map_err(|e| e.to_string())?;
+                    provider
+                        .download_object_to_file(&request.bucket, &request.key, &request.dest)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            })
+        };
+        let engine = Arc::new(TransferEngine::new(services.runtime_handle(), runner, 2));
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             sidebar_collapsed: false,
@@ -140,11 +166,38 @@ impl WorkspaceView {
             selected_object_key: None,
             downloading: false,
             download_message: None,
+            engine: Arc::clone(&engine),
+            transfers: Vec::new(),
             bucket_gen: 0,
             object_gen: 0,
         };
         this.load_accounts(cx);
+        Self::subscribe_transfers(engine, cx);
         this
+    }
+
+    /// 订阅引擎状态变更令牌：任何任务状态突变 → 取快照回填 → notify。
+    /// 常驻 async 任务，纯事件驱动（规范禁轮询）。引擎/视图任一消亡即退出。
+    fn subscribe_transfers(engine: Arc<TransferEngine>, cx: &mut Context<Self>) {
+        let mut changes = engine.subscribe();
+        cx.spawn(async move |this, cx| {
+            loop {
+                if changes.changed().await.is_err() {
+                    break; // 引擎已销毁（应用退出路径）
+                }
+                let snapshot = engine.snapshot();
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.transfers = snapshot;
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break; // 视图已释放
+                }
+            }
+        })
+        .detach();
     }
 
     // ---- 异步数据加载（全部经 AppServices 走后台执行器） ----
@@ -386,7 +439,6 @@ impl WorkspaceView {
         let suggested_name = display_name(&key);
         let receiver = cx.prompt_for_new_path(&directory, Some(suggested_name));
 
-        let services = Arc::clone(&self.services);
         cx.spawn(async move |this, cx| {
             // 面板结果在无借用作用域内先归一化，再一次性回主线程提交
             enum PanelOutcome {
@@ -427,30 +479,20 @@ impl WorkspaceView {
                 }
             };
 
-            let dest_bg = dest.clone();
-            let key_bg = key.clone();
-            let result =
-                cx.background_executor()
-                    .spawn(async move {
-                        services.download_object(&account_id, &bucket, &key_bg, &dest_bg)
-                    })
-                    .await;
+            // 入队即返回：排队/进度/结果全部由传输列表呈现（事件驱动）；
+            // 下载从零重传（File::create 截断旧残留），断流续传在传输引擎后续里程碑
             this.update(cx, |this, cx| {
                 this.downloading = false;
-                this.download_message = Some(match result {
-                    Ok(bytes) => DownloadMessage {
-                        is_error: false,
-                        text: format!(
-                            "已下载 {}（{}）→ {}",
-                            display_name(&key),
-                            format_size(bytes),
-                            dest.display()
-                        ),
-                    },
-                    Err(e) => DownloadMessage {
-                        is_error: true,
-                        text: e.to_string(),
-                    },
+                this.engine.enqueue_download(
+                    account_id.as_str(),
+                    bucket.as_str(),
+                    key.as_str(),
+                    dest,
+                    display_name(&key).to_string(),
+                );
+                this.download_message = Some(DownloadMessage {
+                    is_error: false,
+                    text: format!("已加入传输队列：{}", display_name(&key)),
                 });
                 cx.notify();
             })
@@ -1353,6 +1395,110 @@ impl WorkspaceView {
                     .text_color(color)
                     .child(message.text.clone()),
             );
+        }
+
+        // 传输队列（引擎事件驱动快照；取消/继续/重试直接作用于引擎）
+        if !self.transfers.is_empty() {
+            let finished_count = self
+                .transfers
+                .iter()
+                .filter(|task| task.state.is_finished())
+                .count();
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(format!("传输（{}）", self.transfers.len())),
+                            )
+                            .children((finished_count > 0).then(|| {
+                                Button::new("clear-finished-transfers")
+                                    .label("清除已完成")
+                                    .with_size(Size::Small)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.engine.clear_finished();
+                                        this.transfers = this.engine.snapshot();
+                                        cx.notify();
+                                    }))
+                            })),
+                    ),
+            );
+            for (index, task) in self.transfers.iter().enumerate() {
+                let state_color = match task.state {
+                    TransferState::Running => theme.foreground,
+                    TransferState::Failed => theme.danger,
+                    TransferState::Waiting => theme.accent,
+                    _ => theme.muted_foreground,
+                };
+                let mut row = v_flex().px_3().py_1().text_size(px(12.)).child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .child(task.display_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(state_color)
+                                .child(task.state.label().to_string()),
+                        ),
+                );
+                if let Some(error) = &task.error {
+                    row = row.child(
+                        div()
+                            .text_color(theme.danger)
+                            .truncate()
+                            .child(error.clone()),
+                    );
+                }
+                let actions: Vec<(&'static str, &'static str)> = match task.state {
+                    TransferState::Queued | TransferState::Running | TransferState::Waiting => {
+                        vec![("cancel", "取消")]
+                    }
+                    TransferState::Paused => vec![("resume", "继续"), ("cancel", "取消")],
+                    TransferState::Failed | TransferState::Cancelled => vec![("resume", "重试")],
+                    TransferState::Completed => Vec::new(),
+                };
+                if !actions.is_empty() {
+                    let task_id = task.id;
+                    let mut buttons = h_flex().gap_1().pt_1();
+                    for (action, label) in actions {
+                        let id = SharedString::from(format!("transfer-{action}-{index}"));
+                        buttons = buttons.child(
+                            Button::new(id)
+                                .label(label)
+                                .with_size(Size::Small)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    match action {
+                                        "cancel" => {
+                                            this.engine.cancel(task_id);
+                                        }
+                                        _ => {
+                                            this.engine.resume(task_id);
+                                        }
+                                    }
+                                    this.transfers = this.engine.snapshot();
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    row = row.child(buttons);
+                }
+                panel = panel.child(row);
+            }
         }
         panel
     }

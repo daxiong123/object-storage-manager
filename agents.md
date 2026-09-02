@@ -56,7 +56,7 @@ crates/
     storage-core/   Provider abstraction
     provider-qiniu/ Qiniu Kodo
     provider-aliyun/ Aliyun OSS
-    transfer/       Transfer Engine
+    transfer/       Transfer Engine（队列/状态机/watch 事件驱动；runner 闭包由 UI 注入）
     persistence/    SQLite
     macos/          macOS native integration（Keychain/NSWorkspace/QuickLook/Clipboard/通知）
     preview/        Preview
@@ -81,7 +81,7 @@ crates/
 | 本地路径 | `PathBuf`；Cloud Object Key：`String` + `/`。两者严格区分 |
 | Provider trait | `StorageProvider`（`crates/storage-core`）：方法返回 `impl Future + Send`（不用裸 `async fn`，Send 义务显式化，否则无法 spawn 到 tokio/gpui 后台执行器）；非 dyn-safe，上层按服务商 enum 分发 |
 | 七牛签名 | V2 请求签名逐字节核对自官方 SDK 源码并内置官方向量测试（V1 hello/world + V2 X-Qiniu-* 规范化排序）；坑：Base64 必须带 padding、签名用实际发送的原始 query 串、X-Qiniu-* 头名规范化为 Title-Case 后排序、putTime 单位 100ns。详见 `docs/notes/qiniu-api-notes.md`，勿凭记忆重写 |
-| Transfer | Sleep/Wake/断网后状态为 `Waiting/Paused` 并恢复，**不得**误标 `Failed`（P0）；事件驱动，不轮询 |
+| Transfer | Sleep/Wake/断网后状态为 `Waiting/Paused` 并恢复，**不得**误标 `Failed`（P0）；事件驱动，不轮询。已落地：`crates/transfer` 引擎（队列/状态机/并发上限）+ 单测锁死 P0 语义；任务执行体由 UI 层注入 `TaskRunner` 闭包（内调 `AppServices::build_provider` 即锁即放），future spawn 到 AppServices 的 tokio 运行时，暂停/挂起/取消 = `JoinHandle::abort()`（future 在 await 点丢弃即断 reqwest 连接）；attempt 代号丢弃过期完成回调；UI 经 `watch` 令牌订阅快照（无定时器）。系统事件（NSWorkspace/NWPathMonitor）接线与上传、断点续传在后续里程碑 |
 | AppServices 线程模型 | `AccountService` 内含 rusqlite `Connection`（内部 RefCell，非 Sync），直接 `Arc<AppServices>` 进不了 gpui 后台任务（要求 Send+Sync）。连接统一收进 `Mutex<AccountService>`（crates/app/src/services.rs），同一时刻至多一个后台线程用数据库/钥匙串；锁毒化（持锁线程 panic）直接 panic 响报，不静默 |
 | UI 异步编排 | UI 层永不直接调 provider/runtime：一律 `cx.spawn` → `background_executor().spawn` 调 AppServices 阻塞方法（内部 `runtime.block_on`）。并发竞态用代数计数（`bucket_gen`/`object_gen`）丢弃过期结果（last-click-wins）；添加账号模态用 `done/closed` 标志 + `observe_in` 由 WorkspaceView 回收，保存中禁止关闭（防丢成功结果） |
 | UI 冒烟边界 | 无屏幕录制权限 → `kCGWindowName` 恒为 `"(no title)"`，窗口存在性用 `/tmp/winall.swift`（按 OwnerName 过滤）输出非空判断，不能 grep 窗口名；gpui 不建 AX 树，UI 内部交互无法脚本化，只能人肉验证 |
@@ -92,7 +92,7 @@ crates/
 | 自动更新 | 架构预留 Updater 边界；Check→Download→Verify→Install→Restart，必须验证签名+校验和 |
 | Action 注册点 | 所有跨 菜单/快捷键/右键菜单/工具栏 共用的 Action **只**定义在 `crates/ui/src/actions.rs`（`actions!(cloud_storage, …)`），键位在 `bind_keys(cx)` 统一绑定，不得散落各 view |
 | 全局键位边界 | 不绑定 ⌘X/⌘C/⌘V/⌘A 全局快捷键（会吞文本输入的原生响应链）；Edit 菜单走 `MenuItem::os_action` 触发系统行为 |
-| Quit 处理 | 全局 `cx.on_action`（capture 阶段），不依赖窗口焦点；窗口全关后仍可 ⌘Q。退出确认（默认「暂停并持久化」）待传输引擎落地 |
+| Quit 处理 | 全局 `cx.on_action`（capture 阶段），不依赖窗口焦点；窗口全关后仍可 ⌘Q。传输引擎已落地（`crates/transfer`，`suspend_all/resume_all` 可用）；⌘Q 退出确认（默认「暂停并持久化」）待接 Quit 流程 |
 | Sidebar/Inspector | **自建视图**，不用 gpui-component `Sidebar`（组件固定 255px/48px，与规范 180/220/360 + 44px rail 冲突）；可拖拽宽度用 gpui-component `resizable`，按布局变体用不同 group id 保持各自记忆宽度 |
 | GPUI API 陷阱 | gpui 0.2.2 / gpui-component 0.5.1 已验证的 API 事实与陷阱清单见 `docs/notes/gpui-api-notes.md`；写 UI 前先查，不凭记忆猜签名 |
 

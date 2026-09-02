@@ -91,7 +91,10 @@ impl AppServices {
     ///
     /// 缓存淘汰：单条置换——另一个账号首次使用即覆盖旧 SK。账号被删除后缓存
     /// 条目可能仍在内存，但任何使用都会因元数据缺失而 NotFound（不会静默复活）。
-    fn build_provider(
+    ///
+    /// pub 语义：Transfer Engine 的任务执行体（UI 层注入的 runner）在异步任务
+    /// 内调用它取 provider，拿到后立即 drop 返回值里的锁、不保留引用。
+    pub fn build_provider(
         &self,
         account_id: &str,
     ) -> Result<(Account, QiniuProvider), AppServicesError> {
@@ -173,6 +176,11 @@ impl AppServices {
         Ok(self
             .runtime
             .block_on(provider.download_object_to_file(bucket, key, dest))?)
+    }
+
+    /// tokio 运行时句柄（Transfer Engine 用它 spawn 任务 future）。
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
     }
 }
 

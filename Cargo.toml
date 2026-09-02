@@ -24,7 +24,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # --- 网络（spec §68：reqwest + rustls；tokio 异步运行时）---
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
 # 流式下载/上传的 Stream 迭代（reqwest bytes_stream 需要；只用 std 特性，零运行时依赖）
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hmac = "0.12"

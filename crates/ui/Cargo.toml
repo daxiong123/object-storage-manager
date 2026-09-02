@@ -12,5 +12,7 @@ gpui-component = { workspace = true }
 objc = "0.2"
 raw-window-handle = "0.6"
 object-storage-app = { workspace = true }
+object-storage-core = { workspace = true }
 object-storage-domain = { workspace = true }
+object-storage-transfer = { workspace = true }
 chrono = { workspace = true }

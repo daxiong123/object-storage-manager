@@ -5,3 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+
+[dev-dependencies]
+# 引擎测试需要断言超时兜底（time 已在 workspace features 中）
