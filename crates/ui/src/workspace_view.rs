@@ -28,7 +28,7 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
     PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement as _, Styled, Window, div, hsla, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -854,16 +854,22 @@ impl WorkspaceView {
     }
 
     /// Finder / 其它 App 拖入文件：对象浏览区是投放目标（规范 §15）。
-    fn with_file_drop(
-        &self,
-        el: gpui::Div,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    fn with_file_drop(&self, el: gpui::Div, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        // gpui 只在「已有 hover 样式 / 正在拖」时注册 mousemove→notify。
+        // 系统文件拖入前一帧 active_drag 为空，不注册监听 → drag_over 永不刷新。
+        // 空 hover() 让监听常驻；透明 2px 边框避免拖入时布局跳动。
         el.id("object-browser-drop")
+            .border_2()
+            .border_color(hsla(0., 0., 0., 0.))
+            .hover(|style| style)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.handle_dropped_paths(paths.paths(), cx);
             }))
-            .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().accent.opacity(0.12)))
+            .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                style
+                    .border_color(cx.theme().accent)
+                    .bg(cx.theme().accent.opacity(0.18))
+            })
     }
 
     fn enqueue_file_uploads(

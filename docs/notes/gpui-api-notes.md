@@ -127,6 +127,16 @@ window.remove_window();
 - **禁止重入**：`cx.prompt_builder.take()`，二次 `prompt` 会 `unreachable!`。⌘Q 这类入口必须用 flag 防抖。
 - 调用方 `cx.spawn` 里 `rx.await` 后再 `cx.quit()` / 落盘；不要在事件处理器里同步等。
 
+### 系统文件拖放：`ExternalPaths` + `drag_over` 必须配空 `hover`
+
+macOS 文件拖入被翻译成内部 drag（window.rs:3622，`FileDropEvent::Entered` → `active_drag = ExternalPaths`）。
+投放用 `.on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| ...))`。
+
+**陷阱**：`div.rs` 只在 `hover_style.is_some() || active_drag.is_some()` 时注册
+mousemove→`cx.notify`。系统拖入前一帧 `active_drag` 为空，不注册监听，拖入过程
+**不会重绘**，`drag_over` 高亮永远看不见（投放本身仍能触发，因为 MouseUp 走 drop 监听）。
+正解：投放目标加空 `.hover(|s| s)` 让监听常驻；高亮用边框（子元素不透明背景会盖住父级 bg）。
+
 ### raw-window-handle（获取 NSWindow）
 
 - gpui **不重导出** raw-window-handle；需要时自己加依赖 `raw-window-handle = "0.6"`
