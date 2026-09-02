@@ -92,6 +92,12 @@ fn main() {
         cx.spawn(async move |cx| {
             let bounds = cx.update(|app| Bounds::centered(None, size(px(1280.), px(820.)), app))?;
             cx.open_window(ui::window_options(bounds), |window, cx| {
+                // 外观跟随 System（规范 §7）：窗口创建后同步一次主题模式。
+                // Subscription 已在窗口存续期内保持订阅（窗口关闭即失效），
+                // 无需持有；忽略未使用警告。
+                let _subscription = window.observe_window_appearance(|window, cx| {
+                    ui::observe_appearance(window, cx);
+                });
                 let workspace = cx.new(|cx| WorkspaceView::new(Arc::clone(&services), cx));
                 // 菜单 Action 经焦点链派发：初始焦点置于 Workspace 根节点。
                 window.focus(&workspace.focus_handle(cx));

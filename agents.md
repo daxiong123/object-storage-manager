@@ -116,6 +116,7 @@ crates/
 - Context Menu 顺序参考 Finder，Delete 放最底。Menu Bar：App/File/Edit/View/Object/Transfer/Window/Help；同一 Action 必须在 Menu / Context Menu / Toolbar / 快捷键 / Command Palette 共用。
 - 外观跟随 System（监听变化）；低饱和 Accent，自有视觉身份（图标不得拼接七牛+阿里云 Logo）。
 - Retina 全适配；Trackpad 滚动平滑（虚拟列表不得丢惯性/跳跃）。
+- **UI 设计基调（参考 [OpenChamber](https://github.com/openchamber/openchamber) theme-system，已落地 `crates/ui/src/theme.rs`）**：语义 token 四族——surface（background/foreground/muted/elevated/border）、interactive（hover/active/selection/focusRing）、status（error/warning/success/info，只用于真实反馈）、primary（主 CTA）。铁律：UI 代码只用 `cx.theme()` 语义字段，禁止硬编码 hex/hsla；hover 只给可交互元素；**selection ≠ primary**（选中态用 selection/sidebar_accent，不用 primary/accent 色）。主色为低饱和青蓝（hue 210），亮/暗两套（`CloudStorage Light/Dark`），经 `Theme::apply_config` 写入全局，`observe_window_appearance` 跟随系统切换。
 
 ## 8. 性能指标（必须用 Instruments 测量，不许猜）
 
