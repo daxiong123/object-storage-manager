@@ -58,7 +58,7 @@ crates/
     provider-aliyun/ Aliyun OSS
     transfer/       Transfer Engine
     persistence/    SQLite
-    macos/          macOS native integration（Keychain/Panel/Workspace/QuickLook/Clipboard/通知）
+    macos/          macOS native integration（Keychain/NSWorkspace/QuickLook/Clipboard/通知）
     preview/        Preview
     ui/             GPUI views/components
     common/         small shared utilities
@@ -70,7 +70,7 @@ crates/
 
 | 领域 | 决策 |
 |---|---|
-| 文件选择 | 只用 `NSOpenPanel` / `NSSavePanel`，禁止自造 |
+| 文件选择 | 只用 gpui 平台 API：`cx.prompt_for_new_path`（保存）/ `cx.prompt_for_paths`（打开），结果经 oneshot 异步回传；**禁止在事件处理器里同步 `runModal`**——模态循环重入 gpui `App` RefCell 借用 → "RefCell already borrowed" 闪退（详见 docs/notes/gpui-api-notes.md「文件对话框」；crates/macos 不再封装面板，panel.rs 已删） |
 | 剪贴板 | `NSPasteboard`；Signed URL 可配置 N 秒自动清除 |
 | Open With / Show in Finder | `NSWorkspace`；远端 Object 下载到临时目录再打开 |
 | 预览 | 常见格式应用内；PDF/Office/视频走系统 Quick Look，不自建 Preview Engine |

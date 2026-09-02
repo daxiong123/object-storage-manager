@@ -17,9 +17,11 @@
 
 // 本文件 handle_close_window 里的 objc msg_send! 宏内部会检查
 // `cfg(feature = "cargo-clippy")`（宏兼容性开关），在 rustc 1.80+ 的
-// check-cfg 机制下产生已知误报警告；就地静音，细节同 macos/src/panel.rs。
+// check-cfg 机制下产生已知误报警告；就地静音（先例：gpui 平台层自身
+// 也如此封装 objc 调用，文件对话框等直接用 gpui API，不自建 NSPanel）。
 #![allow(unexpected_cfgs)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
@@ -42,7 +44,6 @@ use crate::actions::{
     AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, ToggleInspector, ToggleSidebar,
 };
 use crate::command_palette::CommandPaletteView;
-use object_storage_macos::run_save_panel;
 
 /// 左栏折叠后的图标栏宽度（规范：44px Icon Rail）。
 const RAIL_WIDTH: Pixels = px(44.);
@@ -353,13 +354,20 @@ impl WorkspaceView {
         })
     }
 
-    /// 下载选中对象：主线程弹原生「存储为」拿目标路径 → 后台执行
-    /// AppServices 下载（阻塞式，见 agents.md §5 线程模型）。用户取消 = 无操作。
+    /// 下载选中对象：gpui 平台保存面板（`cx.prompt_for_new_path`，异步回调）
+    /// 拿目标路径 → 后台执行 AppServices 下载（阻塞式，见 agents.md §5 线程模型）。
+    /// 用户取消 = 无操作。
+    ///
+    /// 为什么必须用 gpui 平台 API、不能在事件处理器里同步 `runModal`：
+    /// 模态循环期间 AppKit 事件会重入 gpui（borrow App RefCell），而外层处理器
+    /// 还持有借用 → "RefCell already borrowed" panic 闪退。gpui 自带的面板从
+    /// foreground executor 任务发起 `beginWithCompletionHandler:`，结果经
+    /// oneshot 回传，天生规避重入。详见 docs/notes/gpui-api-notes.md「文件对话框」。
     fn start_object_download(&mut self, cx: &mut Context<Self>) {
         if self.downloading {
             return; // 防重入
         }
-        let Some(object) = self.selected_cloud_object().cloned() else {
+        let Some(key) = self.selected_cloud_object().map(|o| o.key.clone()) else {
             return; // 未选中对象：无操作（按钮本应置灰）
         };
         let Some(account_id) = self.selected_account_id.clone() else {
@@ -369,19 +377,58 @@ impl WorkspaceView {
             return;
         };
 
-        // 主线程弹 NSSavePanel；取消是正常流程不是错误，静默返回
-        let Some(dest) = run_save_panel(display_name(&object.key)) else {
-            return;
-        };
-
         self.downloading = true;
         self.download_message = None;
         cx.notify();
 
+        // 面板初始目录：用户主目录（HOME 缺失时退化到根目录，仅影响初始位置）
+        let directory = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let suggested_name = display_name(&key);
+        let receiver = cx.prompt_for_new_path(&directory, Some(suggested_name));
+
         let services = Arc::clone(&self.services);
-        let dest_bg = dest.clone();
-        let key_bg = object.key.clone();
         cx.spawn(async move |this, cx| {
+            // 面板结果在无借用作用域内先归一化，再一次性回主线程提交
+            enum PanelOutcome {
+                Picked(PathBuf),
+                Cancelled,
+                Failed(String),
+            }
+            let outcome = match receiver.await {
+                Ok(Ok(Some(dest))) => PanelOutcome::Picked(dest),
+                Ok(Ok(None)) => PanelOutcome::Cancelled,
+                Ok(Err(e)) => PanelOutcome::Failed(format!("无法打开存储面板：{e}")),
+                Err(_) => PanelOutcome::Failed("存储面板结果通道已关闭".into()),
+            };
+
+            let dest = match outcome {
+                PanelOutcome::Picked(dest) => dest,
+                PanelOutcome::Cancelled => {
+                    // 用户取消：正常流程，静默复位
+                    this.update(cx, |this, cx| {
+                        this.downloading = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                PanelOutcome::Failed(text) => {
+                    // 面板层异常：明确呈现，不静默（Fail Fast 的 UI 面）
+                    this.update(cx, |this, cx| {
+                        this.downloading = false;
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text,
+                        });
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let dest_bg = dest.clone();
+            let key_bg = key.clone();
             let result =
                 cx.background_executor()
                     .spawn(async move {
@@ -395,7 +442,7 @@ impl WorkspaceView {
                         is_error: false,
                         text: format!(
                             "已下载 {}（{}）→ {}",
-                            display_name(&object.key),
+                            display_name(&key),
                             format_size(bytes),
                             dest.display()
                         ),

@@ -673,6 +673,11 @@ NSOpenPanel
 
 不要自己做文件选择器。
 
+实现载体：gpui 平台 API `cx.prompt_for_new_path` / `cx.prompt_for_paths`
+（内部即原生面板，`beginWithCompletionHandler:` 异步回调）。禁止在事件处理器里
+同步 `runModal`：模态循环会重入 gpui `App` 借用，触发
+"RefCell already borrowed" 闪退（详见 docs/notes/gpui-api-notes.md「文件对话框」）。
+
 ---
 
 # 17. 文件选择器
@@ -709,6 +714,9 @@ NSSavePanel
 ```
 
 或选择 Download Folder。
+
+下载的实现载体同样是 gpui 平台 API（`cx.prompt_for_new_path`，异步 oneshot 回传），
+取消 = `Ok(None)` 正常分支；禁止事件处理器内同步 `runModal`（重入闪退，同上）。
 
 ---
 

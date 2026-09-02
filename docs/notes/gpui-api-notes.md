@@ -30,6 +30,37 @@
 - `Window::focus(&FocusHandle)` 在 window.rs:1386；open_window 回调里给根视图设置初始焦点，
   菜单 Action 才能沿焦点链派发到视图。
 
+### 文件对话框：必须走 gpui 平台 API，禁止自建 runModal（重要，有闪退案例）
+
+**症状**：在 gpui 事件处理器（on_click / on_action 监听器）里同步调 NSSavePanel 的
+`runModal` → 面板能弹出、也能选目录，但确定/取消瞬间闪退。
+日志：`thread 'main' panicked at gpui-0.2.2/src/app.rs:676:39: RefCell already borrowed`
+随后 `failed to initiate panic, error 3, aborting`。
+
+**根因**：事件处理器本身运行在 gpui 的 `App` RefCell 借用作用域内；`runModal` 起
+嵌套事件循环，模态期间的 AppKit 事件（激活/窗口通知/绘制）回调试图重新进入 gpui
+（再 borrow `App`）→ 重入借用冲突 → panic。与「选了什么」无关，面板一关就炸。
+
+**正解**（gpui 自带，平台层实现已规避重入）：
+- `App::prompt_for_new_path(directory: &Path, suggested_name: Option<&str>)
+  -> oneshot::Receiver<anyhow::Result<Option<PathBuf>>>`（app.rs:1115，保存面板）。
+- `App::prompt_for_paths(PathPromptOptions)`（打开/选目录，app.rs:1116 附近）。
+- `Context<T>` Deref 到 `App`，实体处理器里直接 `cx.prompt_for_new_path(...)`。
+- macOS 实现（platform/mac/platform.rs）：从 **foreground executor 任务**发起
+  `beginWithCompletionHandler:`（异步回调，非阻塞 runModal），结果经 oneshot 回传。
+  任务轮询不在借用作用域内，模态期间 AppKit 事件可正常借用 gpui，不冲突。
+- 结果语义：`Ok(Ok(Some(path)))` 选中；`Ok(Ok(None))` 用户取消（正常流程，静默）；
+  `Ok(Err(e))` 面板层错误；`Err(_)` oneshot 关闭（应用退出中等异常时序）。
+- 附带修复：macOS 15 Sequoia 保存面板会额外追加扩展名的系统 bug
+  （zed#16969）gpui 内部已按 OS 版本打补丁，自建实现则要自己踩一遍。
+- 初始目录传用户主目录即可：`std::env::home_dir()`（Rust 1.85+ 已解除废弃）。
+
+**反面教材存档**：本项目 milestone (d) 曾在 `crates/macos/src/panel.rs` 自建
+`run_save_panel`（runModal + 手写 delegate），实测选完目录必闪退；已删除，由
+gpui 平台 API 取代。教训：**凡是起嵌套 runloop 的东西（模态面板、拖放会话、
+上下文菜单跟踪）都不能在事件处理器/更新作用域内同步调用**，要么走 gpui 提供的
+异步 API，要么把调用挪进 `cx.spawn` 任务轮询（无借用作用域）。
+
 ### 关闭窗口：macOS 15 close 动画陷阱（重要）
 
 **症状**：`Window::remove_window()` → `MacWindow::drop` → gpui 内部 close 任务执行
