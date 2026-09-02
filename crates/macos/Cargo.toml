@@ -10,3 +10,5 @@ repository.workspace = true
 security-framework = { workspace = true }
 security-framework-sys = { workspace = true }
 thiserror = { workspace = true }
+objc = "0.2"
+block = "0.1"

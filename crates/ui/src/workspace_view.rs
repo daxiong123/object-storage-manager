@@ -145,6 +145,27 @@ impl WorkspaceView {
             })
         };
         let engine = Arc::new(TransferEngine::new(services.runtime_handle(), runner, 2));
+
+        // 系统事件 → 传输引擎（spec §25/§26，P0）。
+        // - 睡眠（NSWorkspaceWillSleepNotification）→ suspend_all
+        // - 网络断开（NWPathMonitor 非 satisfied）→ suspend_all
+        // - 网络恢复（satisfied）→ resume_all
+        // - 唤醒（didWake）故意不动：等网络满意事件再恢复，避免唤醒瞬间
+        //   网络未就绪把重排队任务打成 Failed（P0 场景，见 macos 模块文档）
+        // 回调只碰引擎（Send+Sync，无 gpui 实体），UI 经 watch 订阅自动刷新。
+        // 约束：WorkspaceView 单窗口一次性创建，重复 new 会叠加监视器。
+        let engine_sleep = Arc::clone(&engine);
+        let engine_down = Arc::clone(&engine);
+        let engine_up = Arc::clone(&engine);
+        object_storage_macos::start_sleep_wake_monitor(
+            Box::new(move || engine_sleep.suspend_all()),
+            Box::new(|| {}), // 唤醒不直接恢复，理由见上
+        );
+        object_storage_macos::start_network_monitor(
+            Box::new(move || engine_down.suspend_all()),
+            Box::new(move || engine_up.resume_all()),
+        );
+
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             sidebar_collapsed: false,

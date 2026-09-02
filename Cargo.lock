@@ -3989,6 +3989,8 @@ version = "0.1.0"
 name = "object-storage-macos"
 version = "0.1.0"
 dependencies = [
+ "block",
+ "objc",
  "security-framework",
  "security-framework-sys",
  "thiserror 2.0.20",
@@ -4042,6 +4044,7 @@ dependencies = [
  "object-storage-app",
  "object-storage-core",
  "object-storage-domain",
+ "object-storage-macos",
  "object-storage-transfer",
  "raw-window-handle",
 ]
