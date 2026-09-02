@@ -25,7 +25,10 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// 进度通知最短间隔：块回调可能每 64KiB 一次，不能每次都 bump watch（会拖垮 UI）。
+const MIN_PROGRESS_NOTIFY: Duration = Duration::from_millis(100);
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -119,6 +122,55 @@ pub enum TransferOp {
     Upload,
 }
 
+/// 任务进度回写。可从 runner 的 future 里调用；**禁止在 runner 闭包的同步部分调用**
+/// （pump 持锁调用 runner 构造 future，同步 report 会自锁）。
+#[derive(Clone)]
+pub struct ProgressSink {
+    inner: Arc<EngineInner>,
+    id: TransferId,
+    attempt: u64,
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgressSink")
+            .field("id", &self.id)
+            .field("attempt", &self.attempt)
+            .finish()
+    }
+}
+
+impl ProgressSink {
+    /// 回写已完成字节。总大小未知传 `None`。过期 attempt / 已移除任务直接丢弃。
+    pub fn report(&self, done: u64, total: Option<u64>) {
+        let notify = {
+            let mut st = self.inner.lock();
+            let Some(slot) = st.slot_mut(self.id) else {
+                return;
+            };
+            if slot.attempt != self.attempt {
+                return;
+            }
+            slot.task.bytes_done = done;
+            slot.task.bytes_total = total;
+            let now = Instant::now();
+            let due = slot
+                .last_progress_notify
+                .is_none_or(|t| now.duration_since(t) >= MIN_PROGRESS_NOTIFY)
+                || total.is_some_and(|t| done >= t);
+            if due {
+                slot.last_progress_notify = Some(now);
+                true
+            } else {
+                false
+            }
+        };
+        if notify {
+            let _ = self.inner.changes.send(());
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferRequest {
     pub account_id: String,
@@ -126,6 +178,7 @@ pub struct TransferRequest {
     pub key: String,
     pub dest: PathBuf,
     pub op: TransferOp,
+    pub progress: ProgressSink,
 }
 
 /// 任务执行体：引擎把 future spawn 到调用方提供的 tokio 运行时上。
@@ -151,6 +204,10 @@ pub struct TransferTask {
     pub error: Option<String>,
     pub enqueued_at_millis: u64,
     pub finished_at_millis: Option<u64>,
+    /// 本轮已传输字节（暂停/重试会清零，因为当前实现从零重传）
+    pub bytes_done: u64,
+    /// 已知总大小（上传=本地文件长度；下载=Content-Length，可能未知）
+    pub bytes_total: Option<u64>,
 }
 
 struct TaskSlot {
@@ -159,6 +216,7 @@ struct TaskSlot {
     handle: Option<JoinHandle<()>>,
     /// 当前运行尝试代号：完成回调据此丢弃过期结果（防旧 abort 竞态覆盖新状态）
     attempt: u64,
+    last_progress_notify: Option<Instant>,
 }
 
 struct EngineState {
@@ -215,10 +273,12 @@ impl EngineInner {
             slot.handle = None;
             let now = now_millis();
             match result {
-                Ok(_) => {
+                Ok(n) => {
                     slot.task.state = TransferState::Completed;
                     slot.task.error = None;
                     slot.task.finished_at_millis = Some(now);
+                    slot.task.bytes_done = n;
+                    slot.task.bytes_total = Some(n);
                 }
                 Err(message) => {
                     slot.task.state = TransferState::Failed;
@@ -255,6 +315,13 @@ impl EngineInner {
                 .find(|slot| slot.task.id == id)
                 .map(|slot| slot.task.kind.clone())
                 .expect("上方刚确认任务存在");
+            st.next_attempt += 1;
+            let attempt = st.next_attempt;
+            let progress = ProgressSink {
+                inner: Arc::clone(self),
+                id,
+                attempt,
+            };
             let request = match &kind {
                 TransferKind::Download {
                     account_id,
@@ -267,6 +334,7 @@ impl EngineInner {
                     key: key.clone(),
                     dest: dest.clone(),
                     op: TransferOp::Download,
+                    progress: progress.clone(),
                 },
                 TransferKind::Upload {
                     account_id,
@@ -279,13 +347,15 @@ impl EngineInner {
                     key: key.clone(),
                     dest: source.clone(),
                     op: TransferOp::Upload,
+                    progress,
                 },
             };
-            st.next_attempt += 1;
-            let attempt = st.next_attempt;
             let slot = st.slot_mut(id).expect("上方刚确认任务存在");
             slot.attempt = attempt;
             slot.task.state = TransferState::Running;
+            slot.task.bytes_done = 0;
+            slot.task.bytes_total = None;
+            slot.last_progress_notify = None;
             let future = (self.runner)(request);
             let engine = Arc::clone(self);
             // wrapper：fut 结束后回引擎登记结果；引擎 abort wrapper 即中止 fut
@@ -358,9 +428,12 @@ impl TransferEngine {
                 error: None,
                 enqueued_at_millis: now_millis(),
                 finished_at_millis: None,
+                bytes_done: 0,
+                bytes_total: None,
             },
             handle: None,
             attempt: 0,
+            last_progress_notify: None,
         });
         st.order.push_back(id);
         drop(st);
@@ -394,9 +467,12 @@ impl TransferEngine {
                 error: None,
                 enqueued_at_millis: now_millis(),
                 finished_at_millis: None,
+                bytes_done: 0,
+                bytes_total: None,
             },
             handle: None,
             attempt: 0,
+            last_progress_notify: None,
         });
         st.order.push_back(id);
         drop(st);
@@ -960,5 +1036,37 @@ mod tests {
             engine.snapshot()[0].kind,
             TransferKind::Upload { .. }
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn progress_sink_updates_snapshot_while_running() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let gate_r = Arc::clone(&gate);
+        let runner: TaskRunner = Arc::new(move |req: TransferRequest| {
+            let gate = Arc::clone(&gate_r);
+            Box::pin(async move {
+                req.progress.report(50, Some(200));
+                gate.notified().await;
+                Ok(7)
+            })
+        });
+        let engine = TransferEngine::new(tokio::runtime::Handle::current(), runner, 1);
+        engine.enqueue_upload("a1", "bkt", "p.bin", PathBuf::from("/tmp/p.bin"), "p.bin");
+        wait_for(&engine, 2000, |tasks| {
+            tasks.iter().any(|t| {
+                t.state == TransferState::Running
+                    && t.bytes_done == 50
+                    && t.bytes_total == Some(200)
+            })
+        })
+        .await;
+        gate.notify_one();
+        wait_for(&engine, 2000, |tasks| {
+            tasks.iter().any(|t| t.state == TransferState::Completed)
+        })
+        .await;
+        let task = &engine.snapshot()[0];
+        assert_eq!(task.bytes_done, 7); // complete 用 Ok(n) 覆盖最终值
+        assert_eq!(task.bytes_total, Some(7));
     }
 }

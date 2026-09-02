@@ -13,6 +13,11 @@ use object_storage_domain::{Bucket, ListObjectsRequest, ObjectPage, ProviderKind
 use thiserror::Error;
 
 use std::future::Future;
+use std::sync::Arc;
+
+/// 字节进度回调：`(已完成, 总大小)`。总大小在上传时已知；下载可能没有 Content-Length。
+/// 调用方（传输引擎）负责节流通知 UI，本层每块都可回调。
+pub type ByteProgress = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
 /// 存储层统一错误
 ///
@@ -73,6 +78,7 @@ pub trait StorageProvider: Send + Sync {
         bucket: &str,
         key: &str,
         dest: &std::path::Path,
+        progress: Option<ByteProgress>,
     ) -> impl Future<Output = Result<u64, StorageError>> + Send;
 
     /// 流式上传本地文件到对象，返回上传的字节数。
@@ -83,6 +89,7 @@ pub trait StorageProvider: Send + Sync {
         bucket: &str,
         key: &str,
         source: &std::path::Path,
+        progress: Option<ByteProgress>,
     ) -> impl Future<Output = Result<u64, StorageError>> + Send;
 }
 

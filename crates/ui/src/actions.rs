@@ -19,6 +19,8 @@ actions!(
         DownloadObject,
         // 上传本地文件到当前空间：⌘U / 「对象」菜单 / 命令面板 / Inspector
         UploadFiles,
+        // 刷新当前视图：有空间则重载对象列表，否则刷新空间/账号（规范 ⌘R）
+        Refresh,
     ]
 );
 
@@ -52,6 +54,7 @@ pub fn bind_keys(cx: &mut App) {
         // 方向键能用的前提：单行 Input 只在 multi_line 下注册 MoveUp/MoveDown，
         // 未处理时 keymap 会沿绑定列表落到这里的 PaletteSelectPrev/Next。
         KeyBinding::new("cmd-u", UploadFiles, None),
+        KeyBinding::new("cmd-r", Refresh, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),

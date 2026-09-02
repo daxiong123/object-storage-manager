@@ -175,7 +175,7 @@ impl AppServices {
         let (_, provider) = self.build_provider(account_id)?;
         Ok(self
             .runtime
-            .block_on(provider.download_object_to_file(bucket, key, dest))?)
+            .block_on(provider.download_object_to_file(bucket, key, dest, None))?)
     }
 
     /// tokio 运行时句柄（Transfer Engine 用它 spawn 任务 future）。

@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
-use object_storage_core::{StorageError, StorageProvider};
+use object_storage_core::{ByteProgress, StorageError, StorageProvider};
 use object_storage_domain::{
     Bucket, CloudObject, ListObjectsRequest, ListingEntry, ObjectPage, ProviderKind,
 };
@@ -362,6 +362,7 @@ impl StorageProvider for QiniuProvider {
         bucket: &str,
         key: &str,
         dest: &Path,
+        progress: Option<ByteProgress>,
     ) -> Result<u64, StorageError> {
         if bucket.is_empty() {
             return Err(StorageError::InvalidInput("bucket 不能为空".into()));
@@ -411,6 +412,7 @@ impl StorageProvider for QiniuProvider {
             .await
             .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
         let resp = self.check_status(resp, "download_object").await?;
+        let content_len = resp.content_length();
 
         // 流式落盘：分块写，不驻留整文件（内存红线，agents.md §2）。
         // 中途失败则清理半成品文件后响报（错误永不静默）。
@@ -432,6 +434,9 @@ impl StorageProvider for QiniuProvider {
                 );
             }
             total += chunk.len() as u64;
+            if let Some(cb) = &progress {
+                cb(total, content_len);
+            }
         }
         if let Err(e) = file.flush().await {
             return Err(
@@ -446,6 +451,7 @@ impl StorageProvider for QiniuProvider {
         bucket: &str,
         key: &str,
         source: &Path,
+        progress: Option<ByteProgress>,
     ) -> Result<u64, StorageError> {
         if bucket.is_empty() {
             return Err(StorageError::InvalidInput("bucket 不能为空".into()));
@@ -486,17 +492,31 @@ impl StorageProvider for QiniuProvider {
             .to_string();
 
         // 64KiB 分块读盘，wrap_stream 喂给 multipart；已知长度让 reqwest 算 Content-Length。
-        let stream = futures_util::stream::unfold(file, |mut file| async move {
-            let mut buf = vec![0u8; 64 * 1024];
-            match file.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    Some((Ok::<_, std::io::Error>(buf), file))
+        // 进度按「已交给 HTTP body 的字节」计（与实际上传进度同阶）。
+        if let Some(cb) = &progress {
+            cb(0, Some(file_len));
+        }
+        let stream = futures_util::stream::unfold(
+            (file, 0u64, progress, file_len),
+            |(mut file, done, progress, file_len)| async move {
+                let mut buf = vec![0u8; 64 * 1024];
+                match file.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        let done = done + n as u64;
+                        if let Some(cb) = &progress {
+                            cb(done, Some(file_len));
+                        }
+                        Some((
+                            Ok::<_, std::io::Error>(buf),
+                            (file, done, progress, file_len),
+                        ))
+                    }
+                    Err(e) => Some((Err(e), (file, done, progress, file_len))),
                 }
-                Err(e) => Some((Err(e), file)),
-            }
-        });
+            },
+        );
         let part = reqwest::multipart::Part::stream_with_length(
             reqwest::Body::wrap_stream(stream),
             file_len,
@@ -814,7 +834,7 @@ mod tests {
 
         let (total, dl_req) = tokio().block_on(async {
             let total = provider
-                .download_object_to_file("b1", "a/b c.txt", &dest)
+                .download_object_to_file("b1", "a/b c.txt", &dest, None)
                 .await
                 .unwrap();
             (total, captured_b.lock().unwrap().take().unwrap())
@@ -892,7 +912,7 @@ mod tests {
         let dest = dir.join("out.bin");
 
         let err = tokio()
-            .block_on(provider.download_object_to_file("b1", "k", &dest))
+            .block_on(provider.download_object_to_file("b1", "k", &dest, None))
             .unwrap_err();
         match &err {
             StorageError::Api { status, message } => {
@@ -913,6 +933,7 @@ mod tests {
                 "b1",
                 "",
                 &std::env::temp_dir().join("nope"),
+                None,
             ))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
@@ -935,7 +956,7 @@ mod tests {
         std::fs::write(&src, b"hello-upload").unwrap();
 
         let n = tokio()
-            .block_on(provider.upload_object_from_file("b1", "dir/a.bin", &src))
+            .block_on(provider.upload_object_from_file("b1", "dir/a.bin", &src, None))
             .unwrap();
         assert_eq!(n, 12);
 
@@ -962,7 +983,7 @@ mod tests {
     fn upload_rejects_empty_key_before_network() {
         let provider = test_provider("127.0.0.1:9".parse().unwrap());
         let err = tokio()
-            .block_on(provider.upload_object_from_file("b1", "", Path::new("/tmp/x")))
+            .block_on(provider.upload_object_from_file("b1", "", Path::new("/tmp/x"), None))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
     }

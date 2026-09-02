@@ -32,12 +32,12 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
-    button::ButtonVariants as _, h_flex, resizable::h_resizable, resizable::resizable_panel,
-    spinner::Spinner, v_flex,
+    button::ButtonVariants as _, h_flex, progress::Progress, resizable::h_resizable,
+    resizable::resizable_panel, spinner::Spinner, v_flex,
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
-use object_storage_core::StorageProvider as _;
+use object_storage_core::{ByteProgress, StorageProvider as _};
 use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
 use object_storage_transfer::{
     TaskRunner, TransferEngine, TransferKind, TransferOp, TransferRequest, TransferState,
@@ -46,7 +46,7 @@ use object_storage_transfer::{
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, Quit, ToggleInspector,
+    AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, Quit, Refresh, ToggleInspector,
     ToggleSidebar, UploadFiles,
 };
 use crate::command_palette::CommandPaletteView;
@@ -143,13 +143,26 @@ impl WorkspaceView {
                     let (_, provider) = services
                         .build_provider(&request.account_id)
                         .map_err(|e| e.to_string())?;
+                    let progress = request.progress.clone();
+                    let cb: ByteProgress =
+                        Arc::new(move |done, total| progress.report(done, total));
                     match request.op {
                         TransferOp::Download => provider
-                            .download_object_to_file(&request.bucket, &request.key, &request.dest)
+                            .download_object_to_file(
+                                &request.bucket,
+                                &request.key,
+                                &request.dest,
+                                Some(cb),
+                            )
                             .await
                             .map_err(|e| e.to_string()),
                         TransferOp::Upload => provider
-                            .upload_object_from_file(&request.bucket, &request.key, &request.dest)
+                            .upload_object_from_file(
+                                &request.bucket,
+                                &request.key,
+                                &request.dest,
+                                Some(cb),
+                            )
                             .await
                             .map_err(|e| e.to_string()),
                     }
@@ -606,6 +619,19 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.start_files_upload(cx);
+    }
+
+    /// ⌘R：有选中空间则重载当前前缀的对象列表；否则刷新空间/账号。
+    fn handle_refresh(&mut self, _: &Refresh, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_bucket.is_some() {
+            self.reload_objects(cx);
+        } else if self.selected_account_id.is_some() {
+            self.buckets_state = AsyncState::Loading;
+            cx.notify();
+            self.start_bucket_load(cx);
+        } else {
+            self.load_accounts(cx);
+        }
     }
 
     /// 上传本地文件：gpui `prompt_for_paths`（多选，只要文件）→ 入队。
@@ -1762,6 +1788,32 @@ impl WorkspaceView {
                                 .child(task.state.label().to_string()),
                         ),
                 );
+                if task.state == TransferState::Running
+                    || (task.bytes_done > 0 && !task.state.is_finished())
+                {
+                    let pct = match task.bytes_total {
+                        Some(total) if total > 0 => (task.bytes_done as f32 / total as f32) * 100.0,
+                        _ => 0.0,
+                    };
+                    let label = match task.bytes_total {
+                        Some(total) => {
+                            format!("{} / {}", format_size(task.bytes_done), format_size(total))
+                        }
+                        None if task.bytes_done > 0 => format_size(task.bytes_done),
+                        None => String::new(),
+                    };
+                    row = row.child(
+                        v_flex()
+                            .gap_1()
+                            .child(Progress::new().h(px(4.)).value(pct))
+                            .children((!label.is_empty()).then(|| {
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(label)
+                            })),
+                    );
+                }
                 if let Some(error) = &task.error {
                     row = row.child(
                         div()
@@ -1931,6 +1983,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_open_add_modal))
             .on_action(cx.listener(Self::handle_download_object))
             .on_action(cx.listener(Self::handle_upload_files))
+            .on_action(cx.listener(Self::handle_refresh))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
