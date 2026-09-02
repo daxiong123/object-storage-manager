@@ -1,4 +1,10 @@
-//! SQLite 持久化（~/Library/Application Support/），永不存 Secret
+//! SQLite 持久化（`~/Library/Application Support/CloudStorage/`），永不存 Secret
 //!
-//! TODO: 按 agents.md 的职责边界逐步实现。
-//! 红线：SQLite 永远不保存 Secret，Secret 只进 macOS Keychain（agents.md §5/§6）。
+//! 红线（agents.md §6 / spec §18/§58）：
+//! - Secret 只进 macOS Keychain，本 crate 的任何表**不建 Secret 列**，
+//!   并有 schema 回归测试把守（`schema_has_no_secret_column`）
+//! - 默认路径符合 macOS 规范（`dirs::data_dir()`），不乱写 `~/.app/`
+
+mod accounts;
+
+pub use accounts::{AccountRepository, PersistenceError, default_db_path};

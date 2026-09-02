@@ -27,6 +27,13 @@ hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
 
+# --- macOS 原生 / 持久化 ---
+security-framework = "3"
+security-framework-sys = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+
 # --- 内部 crate ---
 object-storage-desktop = { path = "crates/desktop" }
 object-storage-app = { path = "crates/app" }

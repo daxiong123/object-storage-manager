@@ -21,7 +21,7 @@ use object_storage_domain::{
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
 
-use sign::QiniuCredential;
+pub use sign::QiniuCredential;
 
 /// 官方 UC 服务端点（空间管理）
 const DEFAULT_UC_ENDPOINT: &str = "https://uc.qiniuapi.com";

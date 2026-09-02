@@ -22,6 +22,23 @@ impl ProviderKind {
             ProviderKind::Aliyun => "阿里云 OSS",
         }
     }
+
+    /// 持久化编码（SQLite accounts.provider 列）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderKind::Qiniu => "qiniu",
+            ProviderKind::Aliyun => "aliyun",
+        }
+    }
+
+    /// 持久化解码；未知值 = 数据损坏，由调用方 Fail Fast
+    pub fn from_str_opt(value: &str) -> Option<Self> {
+        match value {
+            "qiniu" => Some(ProviderKind::Qiniu),
+            "aliyun" => Some(ProviderKind::Aliyun),
+            _ => None,
+        }
+    }
 }
 
 /// 存储空间（Bucket）
@@ -33,6 +50,25 @@ pub struct Bucket {
     pub kind: ProviderKind,
     /// 区域（如七牛 z0 / OSS cn-hangzhou），列表 API 可能不返回，故为 Option
     pub region: Option<String>,
+}
+
+/// 存储账号：一个账号对应一个云服务商的凭证身份
+///
+/// 红线（spec §18/§19）：本结构**永不携带 Secret**——SecretKey 只存
+/// macOS Keychain（account = 本结构的 `id`）。`access_key`（AK）不是
+/// Secret（签名请求头中明文出现），可以存 SQLite。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    /// UUID v4，同时作为 Keychain 条目的 account key（spec §19）
+    pub id: String,
+    /// 显示名（可修改，不作任何存储主键）
+    pub name: String,
+    /// 服务商
+    pub provider: ProviderKind,
+    /// Access Key（非 Secret，可持久化）
+    pub access_key: String,
+    /// 创建时间（Unix epoch 毫秒）
+    pub created_at_millis: i64,
 }
 
 /// 云端对象
@@ -133,5 +169,16 @@ mod tests {
         assert_eq!(req.bucket, "demo");
         assert_eq!(req.limit, 100);
         assert_eq!(req.prefix, None);
+    }
+
+    #[test]
+    fn provider_kind_persistence_roundtrip() {
+        for kind in [ProviderKind::Qiniu, ProviderKind::Aliyun] {
+            assert_eq!(ProviderKind::from_str_opt(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ProviderKind::from_str_opt("gcp"), None);
+        assert_eq!(ProviderKind::from_str_opt(""), None);
+        assert_eq!(ProviderKind::Qiniu.as_str(), "qiniu");
+        assert_eq!(ProviderKind::Aliyun.as_str(), "aliyun");
     }
 }
