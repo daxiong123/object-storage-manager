@@ -33,6 +33,14 @@ pub enum PersistenceError {
         #[source]
         source: std::io::Error,
     },
+    #[error("设置读写失败（{path}）：{source}")]
+    SettingsIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("设置文件解析失败（{path}）：{message}")]
+    SettingsParse { path: PathBuf, message: String },
 }
 
 /// 建表语句。红线：**没有 Secret 列**（Secret 在 macOS Keychain，spec §18）
@@ -223,14 +231,20 @@ impl AccountRepository {
 
 /// 默认数据库路径：`~/Library/Application Support/CloudStorage/database.sqlite`
 ///（spec §58；目录不存在则创建）
-pub fn default_db_path() -> Result<PathBuf, PersistenceError> {
+/// 应用数据目录（`~/Library/Application Support/CloudStorage/`），
+/// 不存在则创建。settings.json 与 database.sqlite 共用此目录。
+pub fn default_data_dir() -> Result<PathBuf, PersistenceError> {
     let base = dirs::data_dir().ok_or(PersistenceError::DataDir)?;
     let dir = base.join("CloudStorage");
     std::fs::create_dir_all(&dir).map_err(|source| PersistenceError::CreateDataDir {
         dir: dir.clone(),
         source,
     })?;
-    Ok(dir.join("database.sqlite"))
+    Ok(dir)
+}
+
+pub fn default_db_path() -> Result<PathBuf, PersistenceError> {
+    Ok(default_data_dir()?.join("database.sqlite"))
 }
 
 #[cfg(test)]

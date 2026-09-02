@@ -16,5 +16,6 @@ object-storage-core = { workspace = true }
 object-storage-domain = { workspace = true }
 object-storage-macos = { workspace = true }
 object-storage-transfer = { workspace = true }
+object-storage-persistence = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true }

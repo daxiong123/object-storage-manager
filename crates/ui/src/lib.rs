@@ -1,7 +1,8 @@
 pub mod account_modal;
 pub mod actions;
 pub mod command_palette;
-mod theme;
+pub mod settings_modal;
+pub mod theme;
 mod workspace_view;
 
 use gpui::{Bounds, Pixels, WindowOptions};
@@ -9,6 +10,7 @@ use gpui_component::TitleBar;
 
 pub use account_modal::AddAccountModal;
 pub use command_palette::{CommandKind, PaletteCommand, PaletteHandler};
+pub use settings_modal::SettingsModal;
 pub use theme::observe_appearance;
 pub use workspace_view::WorkspaceView;
 

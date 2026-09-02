@@ -50,11 +50,12 @@ use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
-    DownloadObject, OpenCommandPalette, PreviewObject, Quit, Refresh, RenameObject, SaveTextObject,
-    SelectBucketByName, SelectObjectAll, ToggleInspector, ToggleObjectFilter, ToggleSidebar,
-    UploadFiles, UploadFolder,
+    DownloadObject, OpenCommandPalette, OpenSettings, PreviewObject, Quit, Refresh, RenameObject,
+    SaveTextObject, SelectBucketByName, SelectObjectAll, ToggleInspector, ToggleObjectFilter,
+    ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
+use crate::settings_modal::SettingsModal;
 
 /// 左栏折叠后的图标栏宽度（规范：44px Icon Rail）。
 const RAIL_WIDTH: Pixels = px(44.);
@@ -68,10 +69,8 @@ const INSPECTOR_MIN: Pixels = px(280.);
 const INSPECTOR_MAX: Pixels = px(520.);
 /// 对象列表单页条数（七牛列举单页上限内）。
 const OBJECTS_PAGE_LIMIT: u32 = 100;
-/// 签名下载链接有效期（与对象下载签名一致）
-const SIGNED_URL_TTL_SECS: u64 = 3600;
-/// 签名链接写入剪贴板后自动清除（规范 §21）
-const SIGNED_URL_CLIPBOARD_CLEAR_SECS: u64 = 60;
+// 签名链接 TTL / 剪贴板清除秒数不再用编译期常量：运行时取 self.settings
+// （settings.json，⌘, 可改；默认值见 object-storage-persistence）。
 
 /// 侧栏/内容区的异步加载状态。`Loaded` 不单独建模——数据非空且 state==Idle 即加载完成。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +158,12 @@ pub struct WorkspaceView {
     object_filter: Option<Entity<InputState>>,
     /// 过滤命中缓存（render 时由 filter_entries 计算；None = 未开启过滤）。
     filtered_ix: Option<Vec<usize>>,
+    /// 应用设置（settings.json 快照；⌘, 可改）。
+    settings: object_storage_persistence::Settings,
+    /// settings.json 路径（模态展示与保存用）。
+    settings_path: PathBuf,
+    /// 设置模态（⌘,）。Some 时渲染遮罩。
+    settings_modal: Option<Entity<SettingsModal>>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -318,6 +323,15 @@ pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> V
 
 impl WorkspaceView {
     pub fn new(services: Arc<AppServices>, cx: &mut Context<Self>) -> Self {
+        // 设置（settings.json）：损坏必须显式报错退出（Fail Fast），
+        // 与数据库打不开同级——不能静默重置吞掉用户的自定义配置。
+        let (settings, settings_path) = {
+            let path = object_storage_persistence::settings_path()
+                .expect("无法定位设置文件目录（Application Support）");
+            let settings = object_storage_persistence::Settings::load_at(path.clone())
+                .unwrap_or_else(|error| panic!("设置文件损坏或不可读（{path:?}）：{error}"));
+            (settings, path)
+        };
         // 传输引擎：任务执行体注入 AppServices 下载（provider 构建即锁即放），
         // 引擎把 future spawn 到 AppServices 的 tokio 运行时上（abort 即断流）。
         let runner: TaskRunner = {
@@ -402,6 +416,9 @@ impl WorkspaceView {
             renaming_busy: false,
             object_filter: None,
             filtered_ix: None,
+            settings,
+            settings_path,
+            settings_modal: None,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -1163,6 +1180,7 @@ impl WorkspaceView {
             self.selected_account_id.as_deref(),
             self.selected_bucket.as_deref(),
             self.selected_cloud_object(),
+            self.settings.signed_url_ttl_secs,
         ) {
             Ok(request) => request,
             Err(message) => {
@@ -1171,6 +1189,7 @@ impl WorkspaceView {
                 return;
             }
         };
+        let clear_secs = self.settings.clipboard_clear_secs;
         self.copying_url = true;
         self.download_message = None;
         cx.notify();
@@ -1192,22 +1211,25 @@ impl WorkspaceView {
                 match result {
                     Ok(url) => match object_storage_macos::copy_to_clipboard(&url) {
                         Ok(()) => {
+                            let clear_note = if clear_secs > 0 {
+                                format!("（{clear_secs} 秒后自动从剪贴板清除）")
+                            } else {
+                                String::new()
+                            };
                             this.download_message = Some(DownloadMessage {
                                 is_error: false,
-                                text: format!(
-                                    "已复制签名链接（{SIGNED_URL_CLIPBOARD_CLEAR_SECS} 秒后自动从剪贴板清除）"
-                                ),
+                                text: format!("已复制签名链接{clear_note}"),
                             });
-                            std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_secs(
-                                    SIGNED_URL_CLIPBOARD_CLEAR_SECS,
-                                ));
-                                if let Err(error) =
-                                    object_storage_macos::clear_clipboard_if_equals(&url)
-                                {
-                                    eprintln!("[clipboard] 自动清除失败：{error}");
-                                }
-                            });
+                            if clear_secs > 0 {
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_secs(clear_secs));
+                                    if let Err(error) =
+                                        object_storage_macos::clear_clipboard_if_equals(&url)
+                                    {
+                                        eprintln!("[clipboard] 自动清除失败：{error}");
+                                    }
+                                });
+                            }
                         }
                         Err(error) => {
                             this.download_message = Some(DownloadMessage {
@@ -2182,10 +2204,90 @@ impl WorkspaceView {
             .child(modal.clone())
     }
 
+    /// 设置模态遮罩（结构与添加账号一致）。
+    fn render_settings_modal_overlay(
+        &self,
+        modal: &Entity<SettingsModal>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    let Some(modal) = &this.settings_modal else {
+                        return;
+                    };
+                    if !modal.read(cx).saving() {
+                        modal.update(cx, SettingsModal::close);
+                    }
+                }),
+            )
+            .child(modal.clone())
+    }
+
     // ---- Action 处理（与菜单/快捷键共享） ----
 
     fn handle_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        cx.notify();
+    }
+
+    /// ⌘,：打开设置模态。
+    fn handle_open_settings(
+        &mut self,
+        _: &OpenSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_modal.is_some() || self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        let path = self.settings_path.clone();
+        let settings = self.settings.clone();
+        let modal = cx.new(|cx| SettingsModal::new(settings, path, window, cx));
+        cx.observe_in(&modal, window, Self::handle_settings_modal_changed)
+            .detach();
+        modal.update(cx, |modal, cx| modal.focus_first(window, cx));
+        self.settings_modal = Some(modal);
+        cx.notify();
+    }
+
+    /// 设置模态观察：saved（保存成功 → 应用并丢弃）/ closed（取消）后丢弃实体。
+    fn handle_settings_modal_changed(
+        &mut self,
+        modal: Entity<SettingsModal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (closed, saved) = {
+            let m = modal.read(cx);
+            (m.closed(), m.done().cloned())
+        };
+        if !closed && saved.is_none() {
+            return;
+        }
+        self.settings_modal = None;
+        window.focus(&self.focus_handle);
+        if let Some((settings, changed)) = saved {
+            self.settings = settings;
+            if changed {
+                self.download_message = Some(DownloadMessage {
+                    is_error: false,
+                    text: format!(
+                        "设置已保存：签名链接 {} 秒，剪贴板清除 {} 秒（对之后的复制生效）",
+                        self.settings.signed_url_ttl_secs, self.settings.clipboard_clear_secs
+                    ),
+                });
+            }
+        }
         cx.notify();
     }
 
@@ -3668,34 +3770,38 @@ impl WorkspaceView {
                 if task.state == TransferState::Running
                     || (task.bytes_done > 0 && !task.state.is_finished())
                 {
-                    let pct = match task.bytes_total {
-                        Some(total) if total > 0 => (task.bytes_done as f32 / total as f32) * 100.0,
-                        _ => 0.0,
-                    };
-                    let label = match task.bytes_total {
-                        Some(total) => {
-                            format!("{} / {}", format_size(task.bytes_done), format_size(total))
-                        }
-                        None if task.bytes_done > 0 => format_size(task.bytes_done),
-                        None => String::new(),
-                    };
+                    let (pct, label) = transfer_progress_text(task);
                     row = row.child(
                         v_flex()
                             .gap_1()
                             .child(Progress::new().h(px(4.)).value(pct))
-                            .children((!label.is_empty()).then(|| {
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme.muted_foreground)
-                                    .child(label)
-                            })),
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(theme.muted_foreground)
+                                            .child(label),
+                                    )
+                                    // 百分比只在已知总量时展示（未知总量算不出）
+                                    .children(transfer_percent(task).map(|p| {
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!("{p:.1}%"))
+                                    })),
+                            ),
                     );
                 }
                 if let Some(error) = &task.error {
+                    // 失败原因完整展示：长错误换行不截断（用户需要据此排查，
+                    // 比如签名/权限错误的关键细节都在尾部）
                     row = row.child(
                         div()
                             .text_color(theme.danger)
-                            .truncate()
+                            .text_size(px(11.))
+                            .line_height(gpui::DefiniteLength::Fraction(1.4))
                             .child(error.clone()),
                     );
                 }
@@ -4004,6 +4110,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_toggle_object_filter))
             .on_action(cx.listener(Self::handle_dismiss_filter))
             .on_action(cx.listener(Self::handle_select_bucket_by_name))
+            .on_action(cx.listener(Self::handle_open_settings))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
@@ -4013,11 +4120,34 @@ impl Render for WorkspaceView {
         if let Some(modal) = self.add_modal.clone() {
             root = root.child(self.render_add_modal_overlay(&modal, &theme, cx));
         }
+        if let Some(modal) = self.settings_modal.clone() {
+            root = root.child(self.render_settings_modal_overlay(&modal, &theme, cx));
+        }
         if let Some(palette) = self.palette.clone() {
             root = root.child(self.render_palette_overlay(&palette, &theme, cx));
         }
         root
     }
+}
+
+/// 传输进度条文本：已知总量 → "已完成 / 总量"；未知但有字节 → 字节数。
+fn transfer_progress_text(task: &TransferTask) -> (f32, String) {
+    let pct = transfer_percent(task).unwrap_or(0.0);
+    let label = match task.bytes_total {
+        Some(total) => format!("{} / {}", format_size(task.bytes_done), format_size(total)),
+        None if task.bytes_done > 0 => format_size(task.bytes_done),
+        None => String::new(),
+    };
+    (pct, label)
+}
+
+/// 传输完成百分比（0..100）；总量未知或为 0 时返回 None（不算百分比）。
+fn transfer_percent(task: &TransferTask) -> Option<f32> {
+    let total = task.bytes_total?;
+    if total == 0 {
+        return None;
+    }
+    Some((task.bytes_done as f32 / total as f32) * 100.0)
 }
 
 /// 删除确认里的明细摘要：单对象为空串（标题已含名字）；多对象列出
@@ -4043,6 +4173,7 @@ fn copy_object_url_request(
     account_id: Option<&str>,
     bucket: Option<&str>,
     object: Option<&CloudObject>,
+    ttl_secs: u64,
 ) -> Result<CopyObjectUrlRequest, DownloadMessage> {
     let Some(object) = object else {
         return Err(DownloadMessage {
@@ -4060,7 +4191,7 @@ fn copy_object_url_request(
         account_id: account_id.to_string(),
         bucket: bucket.to_string(),
         key: object.key.clone(),
-        ttl_secs: SIGNED_URL_TTL_SECS,
+        ttl_secs,
     })
 }
 
@@ -4426,7 +4557,8 @@ mod tests {
 
     #[test]
     fn copy_object_url_request_requires_selected_object() {
-        let err = copy_object_url_request(Some("account-1"), Some("bucket-1"), None).unwrap_err();
+        let err =
+            copy_object_url_request(Some("account-1"), Some("bucket-1"), None, 3600).unwrap_err();
         assert_eq!(
             err,
             DownloadMessage {
@@ -4437,7 +4569,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_object_url_request_uses_current_selection_and_default_ttl() {
+    fn copy_object_url_request_uses_current_selection_and_configured_ttl() {
         let object = CloudObject {
             key: "report/a b.pdf".into(),
             size: 42,
@@ -4445,15 +4577,17 @@ mod tests {
             etag: Some("etag".into()),
             put_time_millis: 1,
         };
+        // TTL 来自设置（⌘, 可改），不再取编译期常量
         let request =
-            copy_object_url_request(Some("account-1"), Some("bucket-1"), Some(&object)).unwrap();
+            copy_object_url_request(Some("account-1"), Some("bucket-1"), Some(&object), 600)
+                .unwrap();
         assert_eq!(
             request,
             CopyObjectUrlRequest {
                 account_id: "account-1".into(),
                 bucket: "bucket-1".into(),
                 key: "report/a b.pdf".into(),
-                ttl_secs: SIGNED_URL_TTL_SECS,
+                ttl_secs: 600,
             }
         );
     }

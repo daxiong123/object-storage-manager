@@ -21,8 +21,8 @@ use gpui_component::{
 };
 
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, PaletteClose,
-    PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenSettings,
+    PaletteClose, PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject,
     SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
 };
 
@@ -121,6 +121,12 @@ impl CommandPaletteView {
             PaletteCommand::action("退出 CloudStorage", Box::new(Quit)).keywords(&["quit", "exit"]),
             PaletteCommand::action("添加账号", Box::new(AddAccount))
                 .keywords(&["account", "add", "qiniu"]),
+            PaletteCommand::action("设置…", Box::new(OpenSettings)).keywords(&[
+                "settings",
+                "preferences",
+                "ttl",
+                "clipboard",
+            ]),
             PaletteCommand::action("下载对象…", Box::new(DownloadObject))
                 .keywords(&["download", "object"]),
             PaletteCommand::action("上传文件…", Box::new(UploadFiles))

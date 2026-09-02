@@ -11,3 +11,5 @@ object-storage-domain = { workspace = true }
 rusqlite = { workspace = true }
 dirs = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

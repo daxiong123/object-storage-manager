@@ -6,7 +6,9 @@
 //! - 默认路径符合 macOS 规范（`dirs::data_dir()`），不乱写 `~/.app/`
 
 mod accounts;
+mod settings;
 mod transfers;
 
-pub use accounts::{AccountRepository, PersistenceError, default_db_path};
+pub use accounts::{AccountRepository, PersistenceError, default_data_dir, default_db_path};
+pub use settings::{CLIPBOARD_CLEAR_DEFAULT, SIGNED_URL_TTL_DEFAULT, Settings, settings_path};
 pub use transfers::PersistedTransfer;

@@ -43,6 +43,8 @@ actions!(
         RenameObject,
         // 过滤当前对象列表：⌘F（仅 Workspace 上下文；再按 ⌘F / Esc 关闭）
         ToggleObjectFilter,
+        // 打开设置：⌘,（菜单 / 快捷键共享）
+        OpenSettings,
     ]
 );
 
@@ -97,6 +99,8 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 ⌘F：过滤当前对象列表。Workspace context 绑定，输入框聚焦时
         // 不触发（输入组件原生响应链优先）。
         KeyBinding::new("cmd-f", ToggleObjectFilter, Some("Workspace")),
+        // 规范 ⌘,：设置。
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
