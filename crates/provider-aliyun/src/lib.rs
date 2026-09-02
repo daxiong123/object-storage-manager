@@ -89,10 +89,16 @@ impl AliyunProvider {
         if self.test_mode {
             return Ok(DEFAULT_LOCATION.to_string());
         }
-        // path-style：Host 用地域标准入口（oss-cn-xxx.aliyuncs.com），
-        // 不要用 `{bucket}.oss.aliyuncs.com`——OSS 会 403「Your host is invalid」。
+        // 三级域名 + 地域标准 Host：`{bucket}.oss-cn-xxx.aliyuncs.com/?location`
+        // path-style 会被拒（must use OSS third level domain）；
+        // `{bucket}.oss.aliyuncs.com` 也会被拒（Your host is invalid）。
         let mut url = self.service_base.clone();
-        url.set_path(&format!("/{bucket}"));
+        let Some(svc_host) = url.host_str().map(str::to_string) else {
+            return Err(StorageError::InvalidInput("OSS 端点缺少 host".into()));
+        };
+        url.set_host(Some(&format!("{bucket}.{svc_host}")))
+            .map_err(|e| StorageError::InvalidInput(format!("location host 不合法: {e}")))?;
+        url.set_path("/");
         url.set_query(Some("location"));
         let resource = sign::canonicalized_resource(bucket, None, &[("location", "")]);
         let (date, auth) = self.signed_headers("GET", "", &resource)?;
@@ -268,7 +274,16 @@ impl StorageProvider for AliyunProvider {
         if request.limit == 0 {
             return Err(StorageError::InvalidInput("limit 必须大于 0".into()));
         }
-        let location = self.bucket_location(&request.bucket).await?;
+        let location = match request.region.as_deref().filter(|s| !s.is_empty()) {
+            Some(region) => {
+                if region.starts_with("oss-") {
+                    region.to_string()
+                } else {
+                    format!("oss-{region}")
+                }
+            }
+            None => self.bucket_location(&request.bucket).await?,
+        };
         let mut url = self.object_url(&request.bucket, &location, "")?;
         let mut sub: Vec<(String, String)> = Vec::new();
         if let Some(prefix) = &request.prefix {
@@ -760,6 +775,7 @@ mod tests {
                 delimiter: Some("/".into()),
                 marker: None,
                 limit: 100,
+                region: None,
             }))
             .unwrap();
         assert_eq!(page.entries.len(), 2);

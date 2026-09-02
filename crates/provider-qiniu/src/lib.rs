@@ -752,6 +752,7 @@ mod tests {
             delimiter: None,
             marker: None,
             limit: 100,
+            region: None,
         };
         let page = tokio().block_on(provider.list_objects(request)).unwrap();
 

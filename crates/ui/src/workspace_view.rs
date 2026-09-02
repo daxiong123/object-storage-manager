@@ -530,6 +530,11 @@ impl WorkspaceView {
         let Some(bucket) = self.selected_bucket.clone() else {
             return;
         };
+        let region = self
+            .buckets
+            .iter()
+            .find(|b| b.name == bucket)
+            .and_then(|b| b.region.clone());
         let prefix = self.current_prefix.clone();
         let services = Arc::clone(&self.services);
 
@@ -540,6 +545,7 @@ impl WorkspaceView {
                 delimiter: Some("/".into()),
                 marker,
                 limit: OBJECTS_PAGE_LIMIT,
+                region,
             };
             let result = cx
                 .background_executor()

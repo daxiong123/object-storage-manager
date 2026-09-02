@@ -111,6 +111,8 @@ pub struct ListObjectsRequest {
     pub marker: Option<String>,
     /// 单页条数上限（Provider 负责校验合法范围）
     pub limit: u32,
+    /// 阿里云地域（如 `oss-cn-shanghai`）。ListBuckets 已返回时带上，避免再查 Location。
+    pub region: Option<String>,
 }
 
 impl ListObjectsRequest {
@@ -122,6 +124,7 @@ impl ListObjectsRequest {
             delimiter: None,
             marker: None,
             limit: 100,
+            region: None,
         }
     }
 }
