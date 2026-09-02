@@ -52,11 +52,14 @@ impl PaletteCommand {
         }
     }
 
-    pub fn handler(title: impl Into<SharedString>, handler: PaletteHandler) -> Self {
+    pub fn handler<F>(title: impl Into<SharedString>, handler: F) -> Self
+    where
+        F: Fn(&mut Window, &mut App) + 'static,
+    {
         Self {
             title: title.into(),
             keywords: Vec::new(),
-            kind: CommandKind::Handler(handler),
+            kind: CommandKind::Handler(Rc::new(handler)),
         }
     }
 
@@ -82,12 +85,19 @@ pub struct CommandPaletteView {
 }
 
 impl CommandPaletteView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `extra`：调用方注入的动态命令（如「跳转到 Bucket」，命令面板本身
+    /// 无动态数据源，由 WorkspaceView 打开时按当前账号的 bucket 列表生成，
+    /// 每次打开都是全新面板 = 天然最新）。
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, extra: Vec<PaletteCommand>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索命令…"));
         cx.subscribe_in(&input, window, Self::on_input_event)
             .detach();
 
-        let commands = Self::default_commands();
+        let mut commands = Self::default_commands();
+        // 动态命令排在前（输入词为空时可见性最高；有查询词时按相关度自然排序）
+        for cmd in extra.into_iter().rev() {
+            commands.insert(0, cmd);
+        }
         let filtered = (0..commands.len()).collect();
         Self {
             input,

@@ -5,6 +5,12 @@
 
 use gpui::{App, KeyBinding, actions};
 
+/// 带数据的 Action：跳转到指定 Bucket（命令面板动态命令用）。
+/// `no_json`：仅进程内分发，不需要 schema 反序列化。
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = cloud_storage, no_json)]
+pub struct SelectBucketByName(pub String);
+
 actions!(
     cloud_storage,
     [
@@ -35,6 +41,8 @@ actions!(
         SelectObjectAll,
         // 行内重命名：Return（仅 Workspace 上下文，Finder 式，不弹 Dialog）
         RenameObject,
+        // 过滤当前对象列表：⌘F（仅 Workspace 上下文；再按 ⌘F / Esc 关闭）
+        ToggleObjectFilter,
     ]
 );
 
@@ -52,6 +60,9 @@ actions!(cloud_storage, [DismissModal]);
 // 行内重命名的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
 // 未设 clean_on_escape，Esc 由 Input escape() propagate 到这里。
 actions!(cloud_storage, [DismissRename]);
+
+// 对象列表过滤的关闭（Esc）：仅通过 context "ObjectFilter" 生效。
+actions!(cloud_storage, [DismissFilter]);
 
 // Edit 菜单专用：通过 `MenuItem::os_action` 触发 macOS 原生编辑行为。
 //
@@ -83,11 +94,15 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §42：Return 进 Inline Rename（Finder 式）。绑定 Workspace context，
         // 命令面板输入框聚焦时 Return 由面板自己的 PressEnter 处理，不受影响。
         KeyBinding::new("enter", RenameObject, Some("Workspace")),
+        // 规范 ⌘F：过滤当前对象列表。Workspace context 绑定，输入框聚焦时
+        // 不触发（输入组件原生响应链优先）。
+        KeyBinding::new("cmd-f", ToggleObjectFilter, Some("Workspace")),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
         KeyBinding::new("down", PaletteSelectNext, Some("Palette")),
         KeyBinding::new("escape", DismissModal, Some("AccountModal")),
         KeyBinding::new("escape", DismissRename, Some("Renaming")),
+        KeyBinding::new("escape", DismissFilter, Some("ObjectFilter")),
     ]);
 }

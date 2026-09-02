@@ -46,11 +46,13 @@ use object_storage_transfer::{
     TransferTask,
 };
 
+use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissRename, DownloadObject,
-    OpenCommandPalette, PreviewObject, Quit, Refresh, RenameObject, SaveTextObject,
-    SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
+    DownloadObject, OpenCommandPalette, PreviewObject, Quit, Refresh, RenameObject, SaveTextObject,
+    SelectBucketByName, SelectObjectAll, ToggleInspector, ToggleObjectFilter, ToggleSidebar,
+    UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -153,6 +155,10 @@ pub struct WorkspaceView {
     renaming: Option<(String, Entity<InputState>)>,
     /// rename 后台执行中（防重入）。
     renaming_busy: bool,
+    /// ⌘F 过滤：Some = 过滤开启（查询词在输入框实体里）。
+    object_filter: Option<Entity<InputState>>,
+    /// 过滤命中缓存（render 时由 filter_entries 计算；None = 未开启过滤）。
+    filtered_ix: Option<Vec<usize>>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -292,6 +298,24 @@ pub(crate) fn rename_target_key(current_key: &str, new_name: &str) -> Result<Str
     }
 }
 
+/// ⌘F 过滤：大小写不敏感子串匹配。命中对象 key 或目录前缀名任意即保留。
+/// `None` query = 不过滤。返回保留项下标（指向 entries）。
+pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> Vec<usize> {
+    let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+        return (0..entries.len()).collect();
+    };
+    let needle = q.to_lowercase();
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| match entry {
+            ListingEntry::Object(o) => o.key.to_lowercase().contains(&needle),
+            ListingEntry::CommonPrefix(p) => p.to_lowercase().contains(&needle),
+        })
+        .map(|(ix, _)| ix)
+        .collect()
+}
+
 impl WorkspaceView {
     pub fn new(services: Arc<AppServices>, cx: &mut Context<Self>) -> Self {
         // 传输引擎：任务执行体注入 AppServices 下载（provider 构建即锁即放），
@@ -376,6 +400,8 @@ impl WorkspaceView {
             selection_anchor: None,
             renaming: None,
             renaming_busy: false,
+            object_filter: None,
+            filtered_ix: None,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -603,6 +629,10 @@ impl WorkspaceView {
         self.next_marker = None;
         self.current_prefix = None;
         self.clear_object_selection();
+        // 过滤命中缓存基于 entries，数据已换直接作废缓存与过滤条
+        // （跳桶是重上下文切换，Finder 同样不保留过滤）。
+        self.object_filter = None;
+        self.filtered_ix = None;
         self.download_message = None;
     }
 
@@ -611,6 +641,9 @@ impl WorkspaceView {
         self.entries.clear();
         self.next_marker = None;
         self.clear_object_selection();
+        // entries 将重建：作废过滤命中缓存（过滤条保留，加载完成后
+        // refresh_filter 会按新数据重算；用同一词继续过滤是用户预期）
+        self.filtered_ix = None;
         self.download_message = None;
         self.objects_state = AsyncState::Loading;
         cx.notify();
@@ -703,6 +736,9 @@ impl WorkspaceView {
                         }
                         this.next_marker = marker;
                         this.objects_state = AsyncState::Idle;
+                        // 过滤条开着时按新 entries 重算命中（refresh_filter
+                        // 对未开启过滤是 no-op）
+                        this.refresh_filter(cx);
                     }
                     Err(e) => {
                         // 整页失败清空；翻页失败保留已加载数据（见 render_objects）
@@ -1484,6 +1520,71 @@ impl WorkspaceView {
         }
     }
 
+    /// ⌘F：开/关对象列表过滤。开启时焦点入过滤框；关闭时清空查询。
+    fn handle_toggle_object_filter(
+        &mut self,
+        _: &ToggleObjectFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        if self.selected_bucket.is_none() {
+            return;
+        }
+        if self.object_filter.is_some() {
+            // 已开启 → 关闭（Esc 走 DismissFilter 也到这）
+            self.close_object_filter(window, cx);
+            return;
+        }
+        let editor = cx.new(|cx| InputState::new(window, cx).placeholder("过滤当前列表…"));
+        cx.subscribe_in(&editor, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                this.refresh_filter(cx);
+            }
+        })
+        .detach();
+        let focus_editor = editor.clone();
+        focus_editor.update(cx, |state, cx| state.focus(window, cx));
+        self.object_filter = Some(editor);
+        self.refresh_filter(cx);
+        cx.notify();
+    }
+
+    /// 关闭过滤：清空查询与命中缓存，焦点归还 Workspace。
+    fn close_object_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.object_filter.take().is_some() {
+            self.filtered_ix = None;
+            self.focus_handle.focus(window);
+            cx.notify();
+        }
+    }
+
+    /// 依据输入框当前值重算过滤命中缓存。
+    fn refresh_filter(&mut self, cx: &mut Context<Self>) {
+        let query = self
+            .object_filter
+            .as_ref()
+            .map(|editor| editor.read(cx).value().to_string());
+        self.filtered_ix = query
+            .as_deref()
+            .map(|q| filter_entries(&self.entries, Some(q)));
+        cx.notify();
+    }
+
+    /// Esc 关闭过滤（context "ObjectFilter"）。
+    fn handle_dismiss_filter(
+        &mut self,
+        _: &DismissFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.object_filter.is_some() {
+            self.close_object_filter(window, cx);
+        }
+    }
+
     fn handle_upload_files(
         &mut self,
         _: &UploadFiles,
@@ -2239,13 +2340,42 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return; // 已打开（⌘K 重复触发为无操作）
         }
-        let palette = cx.new(|cx| CommandPaletteView::new(window, cx));
+        let extra = self.bucket_jump_commands();
+        let palette = cx.new(|cx| CommandPaletteView::new(window, cx, extra));
         // 面板关闭（open=false）后由观察者丢弃实体并归还焦点。
         cx.observe_in(&palette, window, Self::handle_palette_changed)
             .detach();
         palette.update(cx, |palette, cx| palette.focus_input(window, cx));
         self.palette = Some(palette);
         cx.notify();
+    }
+
+    /// 「跳转到 Bucket」动态命令：当前账号下的每个空间一条，点击即选中
+    /// （触发对象列表加载）。命令面板每次打开都重建，此处数据天然最新。
+    /// 分发带数据的 `SelectBucketByName` Action，由 WorkspaceView 统一处理。
+    fn bucket_jump_commands(&self) -> Vec<PaletteCommand> {
+        self.buckets
+            .iter()
+            .map(|bucket| {
+                let name = bucket.name.clone();
+                PaletteCommand::handler(
+                    format!("跳转：{name}"),
+                    move |_window: &mut gpui::Window, cx: &mut gpui::App| {
+                        cx.dispatch_action(&SelectBucketByName(name.clone()));
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// 命令面板「跳转：Bucket」入口（等价于侧栏点击：换桶 + 清对象区）。
+    fn handle_select_bucket_by_name(
+        &mut self,
+        action: &SelectBucketByName,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_bucket(&action.0, cx);
     }
 
     /// 面板状态观察：面板自己调用 close() 置 open=false 时，这里收尾——
@@ -2747,6 +2877,10 @@ impl WorkspaceView {
                 .child(self.render_content_toolbar(theme, &bucket, cx)),
             cx,
         );
+        // ⌘F 过滤条（开启时出现在 toolbar 与列表之间）
+        if let Some(bar) = self.render_filter_bar(theme, cx) {
+            content = content.child(bar);
+        }
 
         if self.objects_state == AsyncState::Loading && self.entries.is_empty() {
             content = content.child(
@@ -2804,6 +2938,44 @@ impl WorkspaceView {
 
         content = content.child(self.render_object_list(theme, cx));
         content.into_any_element()
+    }
+
+    /// ⌘F 过滤条：输入框 + 命中统计。context "ObjectFilter" 接 Esc 关闭。
+    fn render_filter_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let editor = self.object_filter.as_ref()?.clone();
+        let total = self.entries.len();
+        let matched = self.filtered_ix.as_ref().map(Vec::len).unwrap_or(total);
+        let stats = if matched == total {
+            format!("共 {total} 项")
+        } else {
+            format!("匹配 {matched} / 共 {total} 项")
+        };
+        Some(
+            h_flex()
+                .key_context("ObjectFilter")
+                .w_full()
+                .px_3()
+                .py_1()
+                .gap_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().flex_1().min_w_0().child(Input::new(&editor).small()))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child(stats),
+                )
+                .child(
+                    Button::new("filter-close")
+                        .icon(Icon::new(IconName::Close))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_object_filter(window, cx);
+                        })),
+                ),
+        )
     }
 
     /// 内容区工具行：桶名 + 当前前缀 + 返回上一级 / 刷新。
@@ -2873,7 +3045,32 @@ impl WorkspaceView {
             );
         }
 
-        for (ix, entry) in self.entries.iter().enumerate() {
+        // ⌘F 过滤开启时只渲染命中项；命中为空给出明确空态。
+        // 过滤只影响展示：entries 全集与选择集合不动（Finder 语义）。
+        let visible: Vec<(usize, &ListingEntry)> = match &self.filtered_ix {
+            Some(ix) => ix
+                .iter()
+                .filter_map(|&ix| self.entries.get(ix).map(|e| (ix, e)))
+                .collect(),
+            None => self.entries.iter().enumerate().collect(),
+        };
+        if self.filtered_ix.is_some() && visible.is_empty() {
+            list = list.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::Search))
+                    .child("没有匹配的对象"),
+            );
+            return list.into_any_element();
+        }
+
+        for (ix, entry) in visible {
             match entry {
                 ListingEntry::CommonPrefix(prefix) => {
                     let label = display_name(prefix).to_string();
@@ -3804,6 +4001,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_select_all))
             .on_action(cx.listener(Self::handle_rename_object))
             .on_action(cx.listener(Self::handle_dismiss_rename))
+            .on_action(cx.listener(Self::handle_toggle_object_filter))
+            .on_action(cx.listener(Self::handle_dismiss_filter))
+            .on_action(cx.listener(Self::handle_select_bucket_by_name))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
@@ -4176,6 +4376,52 @@ mod tests {
             "a/.gitignore"
         );
         assert_eq!(rename_target_key("a/b.tar.gz", "c.zip").unwrap(), "a/c.zip");
+    }
+
+    fn entry_object(key: &str) -> ListingEntry {
+        ListingEntry::Object(CloudObject {
+            key: key.into(),
+            size: 1,
+            mime_type: None,
+            etag: None,
+            put_time_millis: 0,
+        })
+    }
+
+    #[test]
+    fn filter_entries_none_or_blank_keeps_all() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("dir/".into()),
+            entry_object("a/b.txt"),
+        ];
+        assert_eq!(filter_entries(&entries, None), vec![0, 1]);
+        assert_eq!(filter_entries(&entries, Some("")), vec![0, 1]);
+        assert_eq!(filter_entries(&entries, Some("   ")), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_entries_matches_key_and_prefix_case_insensitive() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("Photos/".into()),
+            entry_object("photos/2024/a.jpg"),
+            entry_object("docs/readme.md"),
+        ];
+        // 大小写不敏感：photos 同时命中目录前缀与对象 key
+        assert_eq!(filter_entries(&entries, Some("photos")), vec![0, 1]);
+        // 文件名片段
+        assert_eq!(filter_entries(&entries, Some("readme")), vec![2]);
+        // 无命中
+        assert!(filter_entries(&entries, Some("不存在的词")).is_empty());
+    }
+
+    #[test]
+    fn filter_entries_keeps_original_order() {
+        let entries = vec![
+            entry_object("b.txt"),
+            ListingEntry::CommonPrefix("a/".into()),
+            entry_object("a/c.txt"),
+        ];
+        assert_eq!(filter_entries(&entries, Some("a")), vec![1, 2]);
     }
 
     #[test]
