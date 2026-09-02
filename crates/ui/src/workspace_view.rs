@@ -2107,6 +2107,7 @@ impl WorkspaceView {
             ],
         };
 
+        let selected = self.selected_cloud_object();
         let mut panel = v_flex()
             .h_full()
             .w_full()
@@ -2122,8 +2123,101 @@ impl WorkspaceView {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .border_b_1()
                     .border_color(theme.border)
-                    .child("检查器"),
+                    .child(
+                        selected
+                            .map(|object| display_name(&object.key).to_string())
+                            .unwrap_or_else(|| "检查器".into()),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_2()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(theme.foreground)
+                            .child("预览"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_2()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("详情"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_2()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("元数据"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_2()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("版本"),
+                    ),
             );
+
+        if let Some(object) = selected {
+            panel = panel.child(
+                v_flex()
+                    .mx_3()
+                    .mt_3()
+                    .gap_2()
+                    .items_center()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.sidebar)
+                    .p_3()
+                    .child(
+                        Icon::new(IconName::File)
+                            .text_color(theme.accent)
+                            .text_size(px(30.)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .child(display_name(&object.key).to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                object
+                                    .mime_type
+                                    .clone()
+                                    .unwrap_or_else(|| "未知类型".into()),
+                            ),
+                    )
+                    .child(
+                        Button::new("preview-object-inspector")
+                            .label(if self.previewing {
+                                "准备预览…"
+                            } else {
+                                "预览"
+                            })
+                            .disabled(self.previewing)
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_object_preview(cx))),
+                    ),
+            );
+        }
         for (label, value) in rows {
             panel = panel.child(
                 h_flex()
