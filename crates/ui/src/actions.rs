@@ -31,6 +31,8 @@ actions!(
         CopyObjectUrl,
         // 保存文本编辑并覆盖上传：Inspector「保存并上传」/ ⌘S（Workspace 上下文）
         SaveTextObject,
+        // 全选当前对象列表：⌘A（仅 Workspace 上下文，不吞文本输入的原生响应链）
+        SelectObjectAll,
     ]
 );
 
@@ -69,6 +71,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-backspace", DeleteObject, None),
         KeyBinding::new("space", PreviewObject, Some("Workspace")),
         KeyBinding::new("cmd-s", SaveTextObject, Some("Workspace")),
+        // 规范 §7：⌘A 全选当前对象列表。绑定在 Workspace context（非全局），
+        // 命令面板/输入框聚焦时按键由组件原生响应链处理，不会被吞。
+        KeyBinding::new("cmd-a", SelectObjectAll, Some("Workspace")),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),

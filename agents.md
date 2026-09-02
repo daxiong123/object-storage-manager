@@ -91,7 +91,8 @@ crates/
 | 字体 | 系统 SF Pro / SF Mono，不捆绑 Inter |
 | 自动更新 | 架构预留 Updater 边界；Check→Download→Verify→Install→Restart，必须验证签名+校验和 |
 | Action 注册点 | 所有跨 菜单/快捷键/右键菜单/工具栏 共用的 Action **只**定义在 `crates/ui/src/actions.rs`（`actions!(cloud_storage, …)`），键位在 `bind_keys(cx)` 统一绑定，不得散落各 view |
-| 全局键位边界 | 不绑定 ⌘X/⌘C/⌘V/⌘A 全局快捷键（会吞文本输入的原生响应链）；Edit 菜单走 `MenuItem::os_action` 触发系统行为 |
+| 全局键位边界 | 不绑定 ⌘X/⌘C/⌘V/⌘A 全局快捷键（会吞文本输入的原生响应链）；Edit 菜单走 `MenuItem::os_action` 触发系统行为。⌘A 全选走 **Workspace context 绑定**（`SelectObjectAll`），命令面板/输入框聚焦时由组件原生响应链处理 |
+| 对象多选 | `selected_object_keys: IndexSet<String>`（有序）+ `selection_anchor`（⇧ 范围起点）+ `selected_object_key`（主选=集合最后一项，Inspector/预览兼容）。语义决策在纯函数 `apply_object_selection`（workspace_view.rs，单测锁死）；⇧Click 分支先于 ⌘Click（⌘⇧=增量范围）。批量删除：确认一次（标题报数量，明细列前 3 个名）→ 后台逐项删，失败逐项可见不中断；批量下载（多选≥2）：`prompt_for_paths(directories:true, multiple:false)` 选目标目录 → 逐项入队 |
 | Quit 处理 | 全局 `cx.on_action` 在 **bubble 末尾**（源码 `app.rs:1696`，不是 capture）：有窗口时 `WorkspaceView::handle_quit` 先处理，窗口全关后仍可 ⌘Q。有活动传输时走 gpui `window.prompt`（NSAlert sheet + oneshot，**禁止 runModal**）三按钮：暂停并退出（默认 Return）/ 取消（Esc）/ 立即退出；暂停并退出把活动任务写入 SQLite `transfers` 表（无 Secret 列）后 `cx.quit()`，下次启动 `take_transfers` 入队恢复（paused 保持暂停，其余自动继续）；立即退出 `clear_transfers` 后退出；落盘失败 Fail Fast 不退出 |
 | Sidebar/Inspector | **自建视图**，不用 gpui-component `Sidebar`（组件固定 255px/48px，与规范 180/220/360 + 44px rail 冲突）；可拖拽宽度用 gpui-component `resizable`，按布局变体用不同 group id 保持各自记忆宽度 |
 | GPUI API 陷阱 | gpui 0.2.2 / gpui-component 0.5.1 已验证的 API 事实与陷阱清单见 `docs/notes/gpui-api-notes.md`；写 UI 前先查，不凭记忆猜签名 |

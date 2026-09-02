@@ -4051,6 +4051,7 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui-component",
+ "indexmap",
  "objc",
  "object-storage-app",
  "object-storage-core",

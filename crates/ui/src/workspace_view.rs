@@ -48,8 +48,8 @@ use object_storage_transfer::{
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenCommandPalette,
-    PreviewObject, Quit, Refresh, SaveTextObject, ToggleInspector, ToggleSidebar, UploadFiles,
-    UploadFolder,
+    PreviewObject, Quit, Refresh, SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar,
+    UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -143,6 +143,11 @@ pub struct WorkspaceView {
     current_prefix: Option<String>,
     /// 检查器选中的对象 Key（entries 内查找）
     selected_object_key: Option<String>,
+    /// 多选集合（规范 §7：Click/⌘Click/⇧Click/⌘A）。有序去重；
+    /// `selected_object_key` 始终是其中最后一项（主选），供 Inspector/预览。
+    selected_object_keys: indexmap::IndexSet<String>,
+    /// 范围选择锚点（entries 下标；上次普通/⌘点击的对象）。
+    selection_anchor: Option<usize>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -177,6 +182,89 @@ pub struct WorkspaceView {
     // ---- 串台防护：账号/对象各自的自增代号 ----
     bucket_gen: u64,
     object_gen: u64,
+}
+
+/// 对象多选语义（规范 §7：Click / ⌘Click / ⇧Click / ⌘A）的纯决策逻辑。
+///
+/// 独立成自由函数以便单测：输入当前选中集合、按键修饰符与点击位置，
+/// 输出新选中集合与是否触发预览（仅普通 Click 主选行为触发预览）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectSelectionIntent {
+    /// ⌘Click：切换点击项的选中态（不改变其它项）。
+    pub command: bool,
+    /// ⇧Click：从锚点到点击项的范围选择（⌘⇧ 同理，增量）。
+    pub shift: bool,
+    /// ⌘A：全选当前列表可见对象。
+    pub select_all: bool,
+    /// 是否点了空白处（清空选择；列表空白处点击才传 true）。
+    pub clicked_empty: bool,
+    /// 点击项在 entries（含 CommonPrefixes）中的下标；⌘A / 空白点击时为 None。
+    pub clicked_index: Option<usize>,
+}
+
+/// 点击命中的条目类型：对象参与多选，目录前缀不参与（点击即下钻）。
+pub(crate) enum ClickedEntry {
+    Object(String),
+    /// 目录前缀点击：命中项不进选择集合；载荷 key 仅为语义完整性保留。
+    CommonPrefix(#[allow(dead_code)] String),
+    None,
+}
+
+/// 计算点击后的选中集合。`ordered_keys` 是当前列表中全部对象 key
+/// （按展示顺序，不含目录前缀）；`selection` 是当前选中集合（有序）；
+/// `anchor` 是范围选择的起点（上次普通/⌘点击的对象下标）。
+pub(crate) fn apply_object_selection(
+    intent: ObjectSelectionIntent,
+    ordered_keys: &[String],
+    selection: &indexmap::IndexSet<String>,
+    anchor: Option<usize>,
+    clicked: ClickedEntry,
+) -> (indexmap::IndexSet<String>, Option<usize>, bool) {
+    // 返回 (新选中集合, 新锚点, 是否触发预览)
+    if intent.select_all {
+        let all: indexmap::IndexSet<String> = ordered_keys.iter().cloned().collect();
+        return (all, anchor, false);
+    }
+    if intent.clicked_empty {
+        return (indexmap::IndexSet::new(), None, false);
+    }
+    match clicked {
+        ClickedEntry::CommonPrefix(_) => (selection.clone(), anchor, false),
+        ClickedEntry::None => (indexmap::IndexSet::new(), None, false),
+        ClickedEntry::Object(key) => {
+            let Some(ix) = intent.clicked_index else {
+                return (selection.clone(), anchor, false);
+            };
+            if intent.shift {
+                // ⇧Click：锚点→点击项范围；⌘⇧ 增量（保留原选择），纯 ⇧ 重置为范围
+                let start = anchor.unwrap_or(ix).min(ix);
+                let end = anchor.unwrap_or(ix).max(ix);
+                let mut next = if intent.command {
+                    selection.clone()
+                } else {
+                    indexmap::IndexSet::new()
+                };
+                for key in ordered_keys[start..=end].iter() {
+                    next.insert(key.clone());
+                }
+                return (next, anchor, false);
+            }
+            if intent.command {
+                // ⌘Click：切换；锚点更新为点击项（Finder 语义）
+                let mut next = selection.clone();
+                if next.shift_remove(&key) {
+                    // 取消选中：锚点仍指向点击项
+                    return (next, Some(ix), false);
+                }
+                next.insert(key);
+                return (next, Some(ix), false);
+            }
+            // 普通 Click：单选主选，触发预览
+            let mut next = indexmap::IndexSet::new();
+            next.insert(key);
+            (next, Some(ix), true)
+        }
+    }
 }
 
 impl WorkspaceView {
@@ -259,6 +347,8 @@ impl WorkspaceView {
             next_marker: None,
             current_prefix: None,
             selected_object_key: None,
+            selected_object_keys: indexmap::IndexSet::new(),
+            selection_anchor: None,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -485,7 +575,7 @@ impl WorkspaceView {
         self.loading_more = false;
         self.next_marker = None;
         self.current_prefix = None;
-        self.selected_object_key = None;
+        self.clear_object_selection();
         self.download_message = None;
     }
 
@@ -493,11 +583,18 @@ impl WorkspaceView {
     fn reload_objects(&mut self, cx: &mut Context<Self>) {
         self.entries.clear();
         self.next_marker = None;
-        self.selected_object_key = None;
+        self.clear_object_selection();
         self.download_message = None;
         self.objects_state = AsyncState::Loading;
         cx.notify();
         self.request_objects(None, cx);
+    }
+
+    /// 清空多选与主选（切桶/翻页/删除后）。
+    fn clear_object_selection(&mut self) {
+        self.selected_object_key = None;
+        self.selected_object_keys.clear();
+        self.selection_anchor = None;
     }
 
     /// 下钻到某个目录前缀。
@@ -615,6 +712,11 @@ impl WorkspaceView {
         if self.downloading {
             return; // 防重入
         }
+        // 多选（≥2）走批量目录流程；单选维持原保存面板。
+        if self.selected_object_keys.len() > 1 {
+            self.start_batch_download(cx);
+            return;
+        }
         let Some(key) = self.selected_cloud_object().map(|o| o.key.clone()) else {
             return; // 未选中对象：无操作（按钮本应置灰）
         };
@@ -688,6 +790,101 @@ impl WorkspaceView {
                 this.download_message = Some(DownloadMessage {
                     is_error: false,
                     text: format!("已加入传输队列：{}", display_name(&key)),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 批量下载（多选 ≥2）：先选目标目录（gpui `prompt_for_paths`
+    /// `directories: true, multiple: false`）→ 逐项入队到该目录。
+    /// 目标文件名 = display_name(key)；重名由传输引擎按路径覆盖写（File::create）。
+    fn start_batch_download(&mut self, cx: &mut Context<Self>) {
+        if self.downloading {
+            return;
+        }
+        let keys: Vec<String> = self.selected_object_keys.iter().cloned().collect();
+        if keys.len() < 2 {
+            return;
+        }
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        self.downloading = true;
+        self.download_message = None;
+        cx.notify();
+
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择下载目录".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            enum PanelOutcome {
+                Picked(PathBuf),
+                Cancelled,
+                Failed(String),
+            }
+            let outcome = match receiver.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(dir) => PanelOutcome::Picked(dir),
+                    None => PanelOutcome::Cancelled,
+                },
+                Ok(Ok(None)) => PanelOutcome::Cancelled,
+                Ok(Err(e)) => PanelOutcome::Failed(format!("无法打开目录面板：{e}")),
+                Err(_) => PanelOutcome::Failed("目录面板结果通道已关闭".into()),
+            };
+
+            let dest_dir = match outcome {
+                PanelOutcome::Picked(dir) => dir,
+                PanelOutcome::Cancelled => {
+                    this.update(cx, |this, cx| {
+                        this.downloading = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                PanelOutcome::Failed(text) => {
+                    this.update(cx, |this, cx| {
+                        this.downloading = false;
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text,
+                        });
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            this.update(cx, |this, cx| {
+                this.downloading = false;
+                for key in &keys {
+                    let name = display_name(key).to_string();
+                    this.engine.enqueue_download(
+                        account_id.as_str(),
+                        bucket.as_str(),
+                        key.as_str(),
+                        dest_dir.join(&name),
+                        name,
+                    );
+                }
+                this.download_message = Some(DownloadMessage {
+                    is_error: false,
+                    text: format!(
+                        "已加入传输队列：{} 个对象 → {}",
+                        keys.len(),
+                        dest_dir.display()
+                    ),
                 });
                 cx.notify();
             })
@@ -1025,6 +1222,87 @@ impl WorkspaceView {
         self.start_object_download(cx);
     }
 
+    /// 对象行点击 → 多选语义（规范 §7）。纯决策在 `apply_object_selection`，
+    /// 这里只负责取上下文 + 回写状态 + 普通点击触发预览。
+    fn handle_object_row_click(
+        &mut self,
+        ix: usize,
+        clicked: ClickedEntry,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let intent = ObjectSelectionIntent {
+            command: modifiers.platform,
+            shift: modifiers.shift,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(ix),
+        };
+        let ordered_keys: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                ListingEntry::Object(o) => Some(o.key.clone()),
+                ListingEntry::CommonPrefix(_) => None,
+            })
+            .collect();
+        let (next, anchor, preview) = apply_object_selection(
+            intent,
+            &ordered_keys,
+            &self.selected_object_keys,
+            self.selection_anchor,
+            clicked,
+        );
+        self.selected_object_keys = next;
+        self.selected_object_key = self.selected_object_keys.last().cloned();
+        self.selection_anchor = anchor;
+        if preview {
+            self.start_object_preview(cx);
+        }
+        cx.notify();
+    }
+
+    /// ⌘A：全选当前列表中的对象（不含目录前缀）。命令面板/模态打开时忽略。
+    fn handle_select_all(
+        &mut self,
+        _: &SelectObjectAll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        if self.selected_bucket.is_none() {
+            return;
+        }
+        let intent = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: true,
+            clicked_empty: false,
+            clicked_index: None,
+        };
+        let ordered_keys: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                ListingEntry::Object(o) => Some(o.key.clone()),
+                ListingEntry::CommonPrefix(_) => None,
+            })
+            .collect();
+        let (next, anchor, _) = apply_object_selection(
+            intent,
+            &ordered_keys,
+            &self.selected_object_keys,
+            self.selection_anchor,
+            ClickedEntry::None,
+        );
+        self.selected_object_keys = next;
+        self.selected_object_key = self.selected_object_keys.last().cloned();
+        self.selection_anchor = anchor;
+        cx.notify();
+    }
+
     fn handle_upload_files(
         &mut self,
         _: &UploadFiles,
@@ -1053,6 +1331,7 @@ impl WorkspaceView {
     }
 
     /// 远端删除必须确认（规范 §43，无废纸篓）。⌘⌫ / 菜单 / Inspector 共用。
+    /// 支持多选：选中多项时逐项删除，失败逐项可见（不静默）。
     fn confirm_and_delete_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.add_modal.is_some() {
             return;
@@ -1060,25 +1339,37 @@ impl WorkspaceView {
         if self.deleting || self.delete_prompt_open || self.quit_prompt_open {
             return;
         }
-        let Some(object) = self.selected_cloud_object() else {
+        // 多选集合（主选兼容：单选时两者一致）
+        let keys: Vec<String> = if self.selected_object_keys.is_empty() {
+            self.selected_cloud_object()
+                .map(|o| vec![o.key.clone()])
+                .unwrap_or_default()
+        } else {
+            self.selected_object_keys.iter().cloned().collect()
+        };
+        if keys.is_empty() {
             self.download_message = Some(DownloadMessage {
                 is_error: true,
                 text: "请先选中一个对象再删除".into(),
             });
             cx.notify();
             return;
-        };
+        }
         let Some(account_id) = self.selected_account_id.clone() else {
             return;
         };
         let Some(bucket) = self.selected_bucket.clone() else {
             return;
         };
-        let key = object.key.clone();
-        let name = display_name(&key).to_string();
+        let count = keys.len();
+        let summary = delete_summary(&keys);
         self.delete_prompt_open = true;
-        let message = format!("删除“{name}”？");
-        let detail = format!("将从空间 {bucket} 永久删除，无法撤销。");
+        let message = if count == 1 {
+            format!("删除“{}”？", display_name(&keys[0]))
+        } else {
+            format!("删除 {count} 个对象？")
+        };
+        let detail = format!("将从空间 {bucket} 永久删除{summary}，无法撤销。");
         let rx = window.prompt(
             PromptLevel::Warning,
             &message,
@@ -1108,26 +1399,59 @@ impl WorkspaceView {
                 cx.notify();
             })
             .ok();
-            let result = cx
+            // 逐项删除（多选批量 = 循环单删）：任一失败不中断剩余项，
+            // 结束后汇总成功/失败明细，失败逐项可见（不静默）。
+            let results = cx
                 .background_executor()
-                .spawn(async move { services.delete_object(&account_id, &bucket, &key) })
+                .spawn(async move {
+                    let mut ok = Vec::new();
+                    let mut failed = Vec::new();
+                    for key in keys {
+                        match services.delete_object(&account_id, &bucket, &key) {
+                            Ok(()) => ok.push(key),
+                            Err(e) => failed.push((key, e.to_string())),
+                        }
+                    }
+                    (ok, failed)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.deleting = false;
-                match result {
-                    Ok(()) => {
-                        this.reload_objects(cx);
-                        this.download_message = Some(DownloadMessage {
-                            is_error: false,
-                            text: format!("已删除 {name}"),
-                        });
-                    }
-                    Err(e) => {
-                        this.download_message = Some(DownloadMessage {
-                            is_error: true,
-                            text: format!("删除失败：{e}"),
-                        });
-                    }
+                let (ok, failed) = results;
+                if !ok.is_empty() {
+                    this.clear_object_selection();
+                    this.reload_objects(cx);
+                }
+                if failed.is_empty() {
+                    let text = if ok.len() == 1 {
+                        format!("已删除 {}", display_name(&ok[0]))
+                    } else {
+                        format!("已删除 {} 个对象", ok.len())
+                    };
+                    this.download_message = Some(DownloadMessage {
+                        is_error: false,
+                        text,
+                    });
+                } else {
+                    let failed_text = failed
+                        .iter()
+                        .map(|(key, err)| format!("{}：{err}", display_name(key)))
+                        .collect::<Vec<_>>()
+                        .join("；");
+                    let text = if ok.is_empty() {
+                        format!("删除失败：{failed_text}")
+                    } else {
+                        format!(
+                            "已删除 {} 个，失败 {} 个：{}",
+                            ok.len(),
+                            failed.len(),
+                            failed_text
+                        )
+                    };
+                    this.download_message = Some(DownloadMessage {
+                        is_error: true,
+                        text,
+                    });
                 }
                 cx.notify();
             })
@@ -2383,15 +2707,22 @@ impl WorkspaceView {
                             .gap_2()
                             .text_size(px(13.))
                             .hover(|row| row.bg(theme.accent))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_prefix(prefix.clone(), cx)
+                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                                // 目录点击 = 下钻；经统一选择路径保留选中集合
+                                this.handle_object_row_click(
+                                    ix,
+                                    ClickedEntry::CommonPrefix(prefix.clone()),
+                                    event.modifiers(),
+                                    cx,
+                                );
+                                this.open_prefix(prefix.clone(), cx);
                             }))
                             .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
                             .child(div().truncate().child(label)),
                     );
                 }
                 ListingEntry::Object(object) => {
-                    let selected = self.selected_object_key.as_deref() == Some(object.key.as_str());
+                    let selected = self.selected_object_keys.contains(&object.key);
                     let key = object.key.clone();
                     let size = format_size(object.size);
                     let time = format_time(object.put_time_millis);
@@ -2404,13 +2735,18 @@ impl WorkspaceView {
                             .rounded(px(6.))
                             .gap_2()
                             .text_size(px(13.))
-                            .when(selected, |row| row.bg(theme.accent))
+                            // selection ≠ primary（agents.md §7）：选中用 list_active，
+                            // hover 是可交互反馈用 accent
+                            .when(selected, |row| row.bg(theme.list_active))
                             .hover(|row| row.bg(theme.accent))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                                 eprintln!("[preview] selected key={key}");
-                                this.selected_object_key = Some(key.clone());
-                                this.start_object_preview(cx);
-                                cx.notify();
+                                this.handle_object_row_click(
+                                    ix,
+                                    ClickedEntry::Object(key.clone()),
+                                    event.modifiers(),
+                                    cx,
+                                );
                             }))
                             .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
                             .child(
@@ -3260,6 +3596,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_delete_object))
             .on_action(cx.listener(Self::handle_copy_object_url))
             .on_action(cx.listener(Self::handle_save_text_object))
+            .on_action(cx.listener(Self::handle_select_all))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
@@ -3273,6 +3610,25 @@ impl Render for WorkspaceView {
             root = root.child(self.render_palette_overlay(&palette, &theme, cx));
         }
         root
+    }
+}
+
+/// 删除确认里的明细摘要：单对象为空串（标题已含名字）；多对象列出
+/// 前几个名字，超出截断（确认框不放长列表）。
+fn delete_summary(keys: &[String]) -> String {
+    const MAX_NAMES: usize = 3;
+    if keys.len() <= 1 {
+        return String::new();
+    }
+    let names: Vec<String> = keys
+        .iter()
+        .take(MAX_NAMES)
+        .map(|k| display_name(k).to_string())
+        .collect();
+    if keys.len() > MAX_NAMES {
+        format!("（{} 等 {} 个）", names.join("、"), keys.len())
+    } else {
+        format!("（{}）", names.join("、"))
     }
 }
 
@@ -3390,6 +3746,191 @@ mod tests {
         assert_eq!(preview_kind("config.json"), PreviewKind::Text);
         assert_eq!(preview_kind("specs.pdf"), PreviewKind::System);
         assert_eq!(preview_kind("movie.mp4"), PreviewKind::System);
+    }
+
+    #[test]
+    fn selection_pure_logic_single_click_selects_and_previews() {
+        let keys = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let current: indexmap::IndexSet<String> = ["b".to_string()].into_iter().collect();
+        let intent = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(2),
+        };
+        let (next, anchor, preview) = apply_object_selection(
+            intent,
+            &keys,
+            &current,
+            Some(1),
+            ClickedEntry::Object("c".into()),
+        );
+        assert_eq!(next.len(), 1);
+        assert!(next.contains("c"));
+        assert_eq!(anchor, Some(2));
+        assert!(preview, "普通点击应触发预览");
+    }
+
+    #[test]
+    fn selection_pure_logic_command_click_toggles() {
+        let keys = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let current: indexmap::IndexSet<String> =
+            ["a".to_string(), "b".to_string()].into_iter().collect();
+        // ⌘Click 已选中的 b → 取消
+        let intent = ObjectSelectionIntent {
+            command: true,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(1),
+        };
+        let (next, anchor, preview) = apply_object_selection(
+            intent,
+            &keys,
+            &current,
+            Some(1),
+            ClickedEntry::Object("b".into()),
+        );
+        assert_eq!(next.len(), 1);
+        assert!(next.contains("a"));
+        assert_eq!(anchor, Some(1));
+        assert!(!preview);
+
+        // ⌘Click 未选中的 c → 追加
+        let intent = ObjectSelectionIntent {
+            command: true,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(2),
+        };
+        let (next, _, preview) = apply_object_selection(
+            intent,
+            &keys,
+            &current,
+            Some(0),
+            ClickedEntry::Object("c".into()),
+        );
+        assert_eq!(next.len(), 3);
+        assert!(!preview);
+    }
+
+    #[test]
+    fn selection_pure_logic_shift_click_range_selects() {
+        let keys = (0..5).map(|i| i.to_string()).collect::<Vec<_>>();
+        let current: indexmap::IndexSet<String> = ["1".to_string()].into_iter().collect();
+        // 锚点 1，⇧Click 3 → 选 1..=3
+        let intent = ObjectSelectionIntent {
+            command: false,
+            shift: true,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(3),
+        };
+        let (next, anchor, preview) = apply_object_selection(
+            intent,
+            &keys,
+            &current,
+            Some(1),
+            ClickedEntry::Object("3".into()),
+        );
+        assert_eq!(next.len(), 3);
+        assert!(next.contains("1") && next.contains("2") && next.contains("3"));
+        assert_eq!(anchor, Some(1), "⇧Click 不改变锚点");
+        assert!(!preview);
+
+        // ⌘⇧Click：增量（追加范围，不清空原选择）
+        let intent = ObjectSelectionIntent {
+            command: true,
+            shift: true,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(4),
+        };
+        let (next, _, _) = apply_object_selection(
+            intent,
+            &keys,
+            &current,
+            Some(1),
+            ClickedEntry::Object("4".into()),
+        );
+        assert_eq!(next.len(), 4);
+        assert!(next.contains("1"), "原选中保留");
+    }
+
+    #[test]
+    fn selection_pure_logic_select_all_and_empty_click() {
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let current: indexmap::IndexSet<String> = ["a".to_string()].into_iter().collect();
+        // ⌘A 全选
+        let intent = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: true,
+            clicked_empty: false,
+            clicked_index: None,
+        };
+        let (next, _, preview) =
+            apply_object_selection(intent, &keys, &current, None, ClickedEntry::None);
+        assert_eq!(next.len(), 2);
+        assert!(!preview);
+
+        // 点击空白清空
+        let intent = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: false,
+            clicked_empty: true,
+            clicked_index: None,
+        };
+        let (next, anchor, _) =
+            apply_object_selection(intent, &keys, &current, Some(0), ClickedEntry::None);
+        assert!(next.is_empty());
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn selection_pure_logic_prefix_click_keeps_selection() {
+        let keys = vec!["a".to_string()];
+        let current: indexmap::IndexSet<String> = ["a".to_string()].into_iter().collect();
+        let intent = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(0),
+        };
+        // 点目录前缀：不改变选择、不触发预览（目录点击是下钻）
+        let (next, anchor, preview) = apply_object_selection(
+            intent,
+            &keys,
+            &current,
+            Some(0),
+            ClickedEntry::CommonPrefix("dir/".into()),
+        );
+        assert_eq!(next, current);
+        assert_eq!(anchor, Some(0));
+        assert!(!preview);
+    }
+
+    #[test]
+    fn delete_summary_lists_names_for_multiple() {
+        assert_eq!(delete_summary(&["a/b.txt".into()]), "");
+        assert_eq!(
+            delete_summary(&["a/1.txt".into(), "b/2.txt".into()]),
+            "（1.txt、2.txt）"
+        );
+        let many: Vec<String> = ["1", "2", "3", "4", "5"]
+            .iter()
+            .map(|s| format!("x/{s}.txt"))
+            .collect();
+        assert_eq!(delete_summary(&many), "（1.txt、2.txt、3.txt 等 5 个）");
+    }
+
+    #[test]
+    fn delete_summary_handles_missing_extensions() {
+        assert_eq!(delete_summary(&["a/b".into(), "c".into()]), "（b、c）");
     }
 
     #[test]
