@@ -22,7 +22,7 @@ use gpui_component::{
 
 use crate::actions::{
     AddAccount, CloseWindow, DownloadObject, PaletteClose, PaletteSelectNext, PaletteSelectPrev,
-    Quit, ToggleInspector, ToggleSidebar,
+    Quit, ToggleInspector, ToggleSidebar, UploadFiles,
 };
 
 /// 自定义命令处理器（无键位提示）。
@@ -112,6 +112,8 @@ impl CommandPaletteView {
                 .keywords(&["account", "add", "qiniu"]),
             PaletteCommand::action("下载对象…", Box::new(DownloadObject))
                 .keywords(&["download", "object"]),
+            PaletteCommand::action("上传文件…", Box::new(UploadFiles))
+                .keywords(&["upload", "file"]),
         ]
     }
 

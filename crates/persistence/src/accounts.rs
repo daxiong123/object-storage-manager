@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE TABLE IF NOT EXISTS transfers (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind                TEXT NOT NULL CHECK (kind IN ('download')),
+    kind                TEXT NOT NULL CHECK (kind IN ('download', 'upload')),
     account_id          TEXT NOT NULL,
     bucket              TEXT NOT NULL,
     object_key          TEXT NOT NULL,
@@ -113,6 +113,7 @@ impl AccountRepository {
             .map_err(|source| PersistenceError::Query {
                 op: "建表", source
             })?;
+        crate::transfers::migrate_transfers_allow_upload(&conn)?;
         Ok(Self { conn })
     }
 
@@ -126,6 +127,7 @@ impl AccountRepository {
             .map_err(|source| PersistenceError::Query {
                 op: "建表", source
             })?;
+        crate::transfers::migrate_transfers_allow_upload(&conn)?;
         Ok(Self { conn })
     }
 

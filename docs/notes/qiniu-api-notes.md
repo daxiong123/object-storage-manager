@@ -35,12 +35,20 @@ Host: host[:port]\n
 - V2：GET `http://upload.qiniup.com/mkfile/sdf.jpg`，headers `x-qiniu-bbb: AAA`、`x-qiniu-aaa: CCC`，
   `Credential::new("ak","sk")` → `Qiniu ak:arPKqUn6T6DrnHhygbFS40PGBgY=`
 
-## 3. 管理 API（本里程碑实现）
+## 3. 管理 API / 上传（已实现）
 
 | 操作 | 端点 | 鉴权 | 返回 |
 |---|---|---|---|
 | 列举空间 | UC `GET https://uc.qiniuapi.com/buckets` | V2 | bucket 名字符串数组 |
 | 列举文件 | RSF `GET https://rsf.qbox.me/list?bucket=&marker=&limit=&prefix=&delimiter=` | V2 | `{marker, items[], commonPrefixes[]}` |
+| 表单上传 | Up `POST https://upload.qiniup.com/`（默认华东/智能；区域域名后续按 UC `/v4/query`） | **上传凭证**（非 V2 请求签名） | `{hash,key}` |
+
+### 上传凭证（官方 `Credential::sign_with_data`）
+
+- policy JSON：`{"scope":"bucket:key","deadline":<unix>}`（serde 序列化，key 内特殊字符走 JSON 转义）
+- token = `AK:sign(base64(policy)):base64(policy)`，HMAC-SHA1 + URL_SAFE **带 padding**
+- 官方向量已内置：`sign_with_data(b"hello")` = `abcdefghklmnopq:BZYt5uVRy1RVt5ZTXbaIt2ROVMA=:aGVsbG8=`
+- 表单字段：`token` / `key` / `file`（流式 Part，已知 Content-Length）。**不要**再带 `Authorization` 头。
 
 - `limit` 合法范围 **1–1000**；provider 校验超出报 `InvalidInput`。
 - `items[]` 元素：`key, hash, fsize, mimeType, putTime, type, status`。

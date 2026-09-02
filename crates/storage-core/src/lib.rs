@@ -74,6 +74,16 @@ pub trait StorageProvider: Send + Sync {
         key: &str,
         dest: &std::path::Path,
     ) -> impl Future<Output = Result<u64, StorageError>> + Send;
+
+    /// 流式上传本地文件到对象，返回上传的字节数。
+    ///
+    /// 内存红线：分块读盘，**绝不把整个文件读进 `Vec<u8>`**。
+    fn upload_object_from_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        source: &std::path::Path,
+    ) -> impl Future<Output = Result<u64, StorageError>> + Send;
 }
 
 #[cfg(test)]

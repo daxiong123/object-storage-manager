@@ -92,7 +92,7 @@ impl TransferState {
     }
 }
 
-/// 任务类型。上传将在后续里程碑加入；下载携带云端三元组与本地目的地。
+/// 任务类型。下载 / 上传都携带云端三元组与一条本地路径。
 #[derive(Debug, Clone)]
 pub enum TransferKind {
     /// 下载远端对象到本地文件（`dest` 为本地 `PathBuf`，`key` 为云端 `String`）
@@ -102,15 +102,30 @@ pub enum TransferKind {
         key: String,
         dest: PathBuf,
     },
+    /// 上传本地文件到远端对象（`source` 为本地 `PathBuf`）
+    Upload {
+        account_id: String,
+        bucket: String,
+        key: String,
+        source: PathBuf,
+    },
 }
 
-/// 引擎调用 runner 时提取的执行参数（与 TransferKind::Download 一一对应）。
+/// 引擎调用 runner 时提取的执行参数。
+/// `dest` 对下载是目标文件、对上传是源文件（都是本地 PathBuf）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferOp {
+    Download,
+    Upload,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferRequest {
     pub account_id: String,
     pub bucket: String,
     pub key: String,
     pub dest: PathBuf,
+    pub op: TransferOp,
 }
 
 /// 任务执行体：引擎把 future spawn 到调用方提供的 tokio 运行时上。
@@ -240,17 +255,31 @@ impl EngineInner {
                 .find(|slot| slot.task.id == id)
                 .map(|slot| slot.task.kind.clone())
                 .expect("上方刚确认任务存在");
-            let TransferKind::Download {
-                account_id,
-                bucket,
-                key,
-                dest,
-            } = &kind; // 单变体模式必然匹配；新增 Upload 变体时此处编译报错即提醒处理
-            let request = TransferRequest {
-                account_id: account_id.clone(),
-                bucket: bucket.clone(),
-                key: key.clone(),
-                dest: dest.clone(),
+            let request = match &kind {
+                TransferKind::Download {
+                    account_id,
+                    bucket,
+                    key,
+                    dest,
+                } => TransferRequest {
+                    account_id: account_id.clone(),
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    dest: dest.clone(),
+                    op: TransferOp::Download,
+                },
+                TransferKind::Upload {
+                    account_id,
+                    bucket,
+                    key,
+                    source,
+                } => TransferRequest {
+                    account_id: account_id.clone(),
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    dest: source.clone(),
+                    op: TransferOp::Upload,
+                },
             };
             st.next_attempt += 1;
             let attempt = st.next_attempt;
@@ -323,6 +352,42 @@ impl TransferEngine {
                     bucket: bucket.into(),
                     key: key.into(),
                     dest,
+                },
+                display_name: display_name.into(),
+                state: TransferState::Queued,
+                error: None,
+                enqueued_at_millis: now_millis(),
+                finished_at_millis: None,
+            },
+            handle: None,
+            attempt: 0,
+        });
+        st.order.push_back(id);
+        drop(st);
+        self.inner.pump_and_notify();
+        id
+    }
+
+    /// 入队一个上传任务，返回任务 id。立即按并发余量启动。
+    pub fn enqueue_upload(
+        &self,
+        account_id: impl Into<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+        source: PathBuf,
+        display_name: impl Into<String>,
+    ) -> TransferId {
+        let mut st = self.inner.lock();
+        st.next_id += 1;
+        let id = TransferId(st.next_id);
+        st.tasks.push(TaskSlot {
+            task: TransferTask {
+                id,
+                kind: TransferKind::Upload {
+                    account_id: account_id.into(),
+                    bucket: bucket.into(),
+                    key: key.into(),
+                    source,
                 },
                 display_name: display_name.into(),
                 state: TransferState::Queued,
@@ -578,7 +643,7 @@ mod tests {
 
     fn download_key(kind: &TransferKind) -> &str {
         match kind {
-            TransferKind::Download { key, .. } => key,
+            TransferKind::Download { key, .. } | TransferKind::Upload { key, .. } => key,
         }
     }
 
@@ -862,5 +927,38 @@ mod tests {
             dest: PathBuf::from("/tmp/cat.jpg"),
         };
         assert_eq!(download_key(&kind), "photos/cat.jpg");
+        let up = TransferKind::Upload {
+            account_id: "a".into(),
+            bucket: "b".into(),
+            key: "photos/cat.jpg".into(),
+            source: PathBuf::from("/tmp/cat.jpg"),
+        };
+        assert_eq!(download_key(&up), "photos/cat.jpg");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enqueue_upload_runs_to_completion() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let engine = TransferEngine::new(
+            tokio::runtime::Handle::current(),
+            instant_runner(Arc::clone(&log)),
+            2,
+        );
+        engine.enqueue_upload(
+            "a1",
+            "bkt",
+            "up.bin",
+            PathBuf::from("/tmp/up.bin"),
+            "up.bin",
+        );
+        wait_for(&engine, 2000, |tasks| {
+            tasks.len() == 1 && tasks[0].state == TransferState::Completed
+        })
+        .await;
+        assert_eq!(log.lock().unwrap().as_slice(), ["up.bin".to_string()]);
+        assert!(matches!(
+            engine.snapshot()[0].kind,
+            TransferKind::Upload { .. }
+        ));
     }
 }

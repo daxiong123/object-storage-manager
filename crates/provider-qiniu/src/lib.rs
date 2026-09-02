@@ -22,7 +22,7 @@ use object_storage_domain::{
 };
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use sign::QiniuCredential;
 
@@ -30,15 +30,20 @@ pub use sign::QiniuCredential;
 const DEFAULT_UC_ENDPOINT: &str = "https://uc.qiniuapi.com";
 /// 官方 RSF 服务端点（列举文件）
 const DEFAULT_RSF_ENDPOINT: &str = "https://rsf.qbox.me";
+/// 官方表单上传入口（华东/智能；区域专用域名后续里程碑按 UC v4/query 解析）
+const DEFAULT_UP_ENDPOINT: &str = "https://upload.qiniup.com";
 
 pub struct QiniuProvider {
     http: reqwest::Client,
     /// 下载专用客户端：不带总超时（30s 总超时会据断大文件下载）；
     /// 连接超时仍在。挂死风险由后续传输引擎接管。
     download_http: reqwest::Client,
+    /// 上传同样不设总超时（大文件可能数十分钟）
+    upload_http: reqwest::Client,
     cred: QiniuCredential,
     uc_base: reqwest::Url,
     rsf_base: reqwest::Url,
+    up_base: reqwest::Url,
     /// 下载域名协议（生产恒为 https；测试指向本地 mock 时切 http）
     download_use_https: bool,
 }
@@ -55,10 +60,22 @@ impl QiniuProvider {
         uc_base: &str,
         rsf_base: &str,
     ) -> Result<Self, StorageError> {
+        Self::with_all_endpoints(cred, uc_base, rsf_base, DEFAULT_UP_ENDPOINT)
+    }
+
+    /// 指定 UC / RSF / 上传端点（测试用）。
+    pub fn with_all_endpoints(
+        cred: QiniuCredential,
+        uc_base: &str,
+        rsf_base: &str,
+        up_base: &str,
+    ) -> Result<Self, StorageError> {
         let uc_base = reqwest::Url::parse(uc_base)
             .map_err(|e| StorageError::InvalidInput(format!("UC 端点不合法: {e}")))?;
         let rsf_base = reqwest::Url::parse(rsf_base)
             .map_err(|e| StorageError::InvalidInput(format!("RSF 端点不合法: {e}")))?;
+        let up_base = reqwest::Url::parse(up_base)
+            .map_err(|e| StorageError::InvalidInput(format!("上传端点不合法: {e}")))?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("CloudStorage/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
@@ -66,19 +83,21 @@ impl QiniuProvider {
             .use_rustls_tls()
             .build()
             .map_err(|e| StorageError::Network(format!("HTTP Client 构建失败: {e}")))?;
-        let download_http = reqwest::Client::builder()
+        let long_http = reqwest::Client::builder()
             .user_agent(concat!("CloudStorage/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
-            // 注意：不设总超时——下载可能持续数十分钟；读阻塞由传输引擎处理
+            // 注意：不设总超时——上下载可能持续数十分钟；读阻塞由传输引擎处理
             .use_rustls_tls()
             .build()
             .map_err(|e| StorageError::Network(format!("HTTP Client 构建失败: {e}")))?;
         Ok(Self {
             http,
-            download_http,
+            download_http: long_http.clone(),
+            upload_http: long_http,
             cred,
             uc_base,
             rsf_base,
+            up_base,
             download_use_https: true,
         })
     }
@@ -194,6 +213,7 @@ impl std::fmt::Debug for QiniuProvider {
             .field("cred", &self.cred)
             .field("uc_base", &self.uc_base.as_str())
             .field("rsf_base", &self.rsf_base.as_str())
+            .field("up_base", &self.up_base.as_str())
             .finish()
     }
 }
@@ -420,6 +440,85 @@ impl StorageProvider for QiniuProvider {
         }
         Ok(total)
     }
+
+    async fn upload_object_from_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        source: &Path,
+    ) -> Result<u64, StorageError> {
+        if bucket.is_empty() {
+            return Err(StorageError::InvalidInput("bucket 不能为空".into()));
+        }
+        if key.is_empty() {
+            return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+        let meta = tokio::fs::metadata(source).await.map_err(|e| {
+            StorageError::Io(format!(
+                "upload_object: 读取本地文件 {} 失败: {e}",
+                source.display()
+            ))
+        })?;
+        if meta.is_dir() {
+            return Err(StorageError::InvalidInput(format!(
+                "upload_object: {} 是目录，本里程碑只上传文件",
+                source.display()
+            )));
+        }
+        let file_len = meta.len();
+        let file = tokio::fs::File::open(source).await.map_err(|e| {
+            StorageError::Io(format!(
+                "upload_object: 打开本地文件 {} 失败: {e}",
+                source.display()
+            ))
+        })?;
+
+        let deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| StorageError::InvalidInput(format!("upload_object: 系统时间异常: {e}")))?
+            .as_secs()
+            + 3600;
+        let token = sign::upload_token(&self.cred, bucket, key, deadline);
+        let file_name = source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        // 64KiB 分块读盘，wrap_stream 喂给 multipart；已知长度让 reqwest 算 Content-Length。
+        let stream = futures_util::stream::unfold(file, |mut file| async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((Ok::<_, std::io::Error>(buf), file))
+                }
+                Err(e) => Some((Err(e), file)),
+            }
+        });
+        let part = reqwest::multipart::Part::stream_with_length(
+            reqwest::Body::wrap_stream(stream),
+            file_len,
+        )
+        .file_name(file_name)
+        .mime_str("application/octet-stream")
+        .map_err(|e| StorageError::InvalidInput(format!("upload_object: MIME 设置失败: {e}")))?;
+        let form = reqwest::multipart::Form::new()
+            .text("token", token)
+            .text("key", key.to_string())
+            .part("file", part);
+
+        let resp = self
+            .upload_http
+            .post(self.up_base.clone())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| StorageError::Network(format!("upload_object: {e}")))?;
+        let _resp = self.check_status(resp, "upload_object").await?;
+        Ok(file_len)
+    }
 }
 
 #[cfg(test)]
@@ -470,7 +569,7 @@ mod tests {
             let text = String::from_utf8_lossy(&buf);
             let mut lines = text.split("\r\n");
             let request_line = lines.next().unwrap_or_default().to_string();
-            let headers = lines
+            let headers: Vec<(String, String)> = lines
                 .by_ref()
                 .take_while(|l| !l.is_empty())
                 .filter_map(|l| {
@@ -478,6 +577,21 @@ mod tests {
                     Some((k.to_string(), v.to_string()))
                 })
                 .collect();
+            // POST multipart 会在头之后继续推 body；不读完客户端可能还在写。
+            if let Some(len) = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Content-Length"))
+                .and_then(|(_, v)| v.parse::<usize>().ok())
+            {
+                let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
+                while buf.len().saturating_sub(header_end) < len {
+                    let n = stream.read(&mut chunk).expect("read body");
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
             *captured_clone.lock().unwrap() = Some(CapturedRequest {
                 request_line,
                 headers,
@@ -495,7 +609,7 @@ mod tests {
     fn test_provider(addr: SocketAddr) -> QiniuProvider {
         let cred = QiniuCredential::new("test-ak", "test-sk").unwrap();
         let base = format!("http://{addr}");
-        QiniuProvider::with_endpoints(cred, &base, &base).unwrap()
+        QiniuProvider::with_all_endpoints(cred, &base, &base, &base).unwrap()
     }
 
     fn tokio() -> tokio::runtime::Runtime {
@@ -800,6 +914,55 @@ mod tests {
                 "",
                 &std::env::temp_dir().join("nope"),
             ))
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
+    }
+
+    #[test]
+    fn upload_form_posts_multipart_without_authorization_header() {
+        let (addr, captured) = spawn_mock(200, r#"{"hash":"etag","key":"dir/a.bin"}"#);
+        let provider = test_provider(addr);
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-up-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("a.bin");
+        std::fs::write(&src, b"hello-upload").unwrap();
+
+        let n = tokio()
+            .block_on(provider.upload_object_from_file("b1", "dir/a.bin", &src))
+            .unwrap();
+        assert_eq!(n, 12);
+
+        let req = captured.lock().unwrap().take().unwrap();
+        assert!(
+            req.request_line.starts_with("POST / HTTP/1.1")
+                || req.request_line.starts_with("POST / HTTP/1.0"),
+            "request_line={}",
+            req.request_line
+        );
+        let ct = req.header("Content-Type").unwrap_or("");
+        assert!(
+            ct.starts_with("multipart/form-data"),
+            "Content-Type 应为 multipart，实际 {ct}"
+        );
+        assert!(
+            req.header("Authorization").is_none(),
+            "表单上传凭证在 body 的 token 字段，不应再带 Authorization"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn upload_rejects_empty_key_before_network() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        let err = tokio()
+            .block_on(provider.upload_object_from_file("b1", "", Path::new("/tmp/x")))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
     }

@@ -3,9 +3,56 @@
 //! 红线：本表**不存 Secret**（无 SK / token 列）；只存云端三元组 + 本地 dest。
 //! SK 仍走 Keychain，恢复后由 AppServices::build_provider 现取。
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::accounts::{AccountRepository, PersistenceError};
+
+/// 已有库的 transfers 表 CHECK 可能只有 `download`。SQLite 不能 ALTER CHECK，
+/// 检测到旧 schema 就整表重建（数据原样搬迁）。
+pub(crate) fn migrate_transfers_allow_upload(conn: &Connection) -> Result<(), PersistenceError> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='transfers'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| PersistenceError::Query {
+            op: "检查 transfers schema",
+            source,
+        })?;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains("'upload'") {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "
+        ALTER TABLE transfers RENAME TO transfers_mig_old;
+        CREATE TABLE transfers (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind                TEXT NOT NULL CHECK (kind IN ('download', 'upload')),
+            account_id          TEXT NOT NULL,
+            bucket              TEXT NOT NULL,
+            object_key          TEXT NOT NULL,
+            dest                TEXT NOT NULL,
+            display_name        TEXT NOT NULL,
+            state               TEXT NOT NULL CHECK (state IN ('queued', 'paused')),
+            enqueued_at_millis  INTEGER NOT NULL
+        );
+        INSERT INTO transfers (kind, account_id, bucket, object_key, dest, display_name, state, enqueued_at_millis)
+            SELECT kind, account_id, bucket, object_key, dest, display_name, state, enqueued_at_millis
+            FROM transfers_mig_old;
+        DROP TABLE transfers_mig_old;
+        ",
+    )
+    .map_err(|source| PersistenceError::Query {
+        op: "升级 transfers 表允许 upload",
+        source,
+    })?;
+    Ok(())
+}
 
 /// 可持久化的一条传输任务（与 transfer crate 解耦：本 crate 不依赖引擎）。
 ///
@@ -71,7 +118,7 @@ fn list_on(conn: &Connection) -> Result<Vec<PersistedTransfer>, PersistenceError
             op: "列举传输队列",
             source,
         })?;
-        if item.kind != "download" {
+        if item.kind != "download" && item.kind != "upload" {
             return Err(PersistenceError::Corrupt(format!(
                 "transfers.kind 非法：{}",
                 item.kind
@@ -223,7 +270,7 @@ mod tests {
     fn unknown_kind_rejected_by_check() {
         let repo = AccountRepository::open_in_memory().unwrap();
         let mut bad = sample("x.bin", "queued");
-        bad.kind = "upload".into();
+        bad.kind = "sync".into();
         assert!(
             repo.replace_transfers(&[bad]).is_err(),
             "CHECK 约束必须拒绝未知 kind"

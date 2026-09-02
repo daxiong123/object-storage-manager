@@ -72,6 +72,28 @@ pub(crate) fn sign_token(cred: &QiniuCredential, sign_data: &[u8]) -> String {
     format!("{}:{}", cred.access_key, sig)
 }
 
+/// 上传凭证：`AK:sign(base64(data)):base64(data)`
+/// （官方 `Credential::sign_with_data`，qiniu-credential 0.2.4）
+pub(crate) fn sign_with_data(cred: &QiniuCredential, data: &[u8]) -> String {
+    let encoded = BASE64_URL_SAFE.encode(data);
+    format!("{}:{}", sign_token(cred, encoded.as_bytes()), encoded)
+}
+
+/// 对象上传凭证。policy = `{"scope":"bucket:key","deadline":unix}`，
+/// JSON 由 serde 序列化（key 内特殊字符走 JSON 转义，Fail Fast 不手拼）。
+pub(crate) fn upload_token(
+    cred: &QiniuCredential,
+    bucket: &str,
+    key: &str,
+    deadline_unix: u64,
+) -> String {
+    let policy = serde_json::json!({
+        "scope": format!("{bucket}:{key}"),
+        "deadline": deadline_unix,
+    });
+    sign_with_data(cred, policy.to_string().as_bytes())
+}
+
 /// 请求签名 V2：`Authorization: Qiniu AK:sig`
 /// （老版 V1 `QBox` 管理凭证在需要时基于 `sign_token` 两行拼出即可）
 pub(crate) fn authorization_v2(cred: &QiniuCredential, sign_data: &[u8]) -> String {
@@ -217,6 +239,27 @@ mod tests {
         assert_eq!(
             sign_token(&cred, b"hello"),
             "abcdefghklmnopq:b84KVc-LroDiz0ebUANfdzSRxa0="
+        );
+    }
+
+    /// 官方向量：`Credential::sign_with_data(b"hello")`
+    /// （qiniu-credential 0.2.4 lib.rs:234）
+    #[test]
+    fn sign_with_data_matches_official_vector_hello() {
+        let cred = QiniuCredential::new("abcdefghklmnopq", "1234567890").unwrap();
+        assert_eq!(
+            sign_with_data(&cred, b"hello"),
+            "abcdefghklmnopq:BZYt5uVRy1RVt5ZTXbaIt2ROVMA=:aGVsbG8="
+        );
+    }
+
+    /// 官方向量：`sign_with_data(b"world")`
+    #[test]
+    fn sign_with_data_matches_official_vector_world() {
+        let cred = QiniuCredential::new("abcdefghklmnopq", "1234567890").unwrap();
+        assert_eq!(
+            sign_with_data(&cred, b"world"),
+            "abcdefghklmnopq:Wpe04qzPphiSZb1u6I0nFn6KpZg=:d29ybGQ="
         );
     }
 

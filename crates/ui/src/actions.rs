@@ -17,6 +17,8 @@ actions!(
         AddAccount,
         // 下载选中对象：Inspector 按钮 / 「对象」菜单 / 命令面板三入口共享
         DownloadObject,
+        // 上传本地文件到当前空间：⌘U / 「对象」菜单 / 命令面板 / Inspector
+        UploadFiles,
     ]
 );
 
@@ -49,6 +51,7 @@ pub fn bind_keys(cx: &mut App) {
         // 无 context 的绑定按 keymap 深度规则会压过组件（如 Input）的同键绑定。
         // 方向键能用的前提：单行 Input 只在 multi_line 下注册 MoveUp/MoveDown，
         // 未处理时 keymap 会沿绑定列表落到这里的 PaletteSelectPrev/Next。
+        KeyBinding::new("cmd-u", UploadFiles, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),

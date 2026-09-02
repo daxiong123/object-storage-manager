@@ -26,9 +26,9 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    PromptButton, PromptLevel, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, prelude::FluentBuilder, px,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
+    PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -40,13 +40,14 @@ use object_storage_app::{AppServices, PersistedTransfer};
 use object_storage_core::StorageProvider as _;
 use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
 use object_storage_transfer::{
-    TaskRunner, TransferEngine, TransferKind, TransferRequest, TransferState, TransferTask,
+    TaskRunner, TransferEngine, TransferKind, TransferOp, TransferRequest, TransferState,
+    TransferTask,
 };
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, Quit, ToggleInspector,
-    ToggleSidebar,
+    ToggleSidebar, UploadFiles,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -114,6 +115,8 @@ pub struct WorkspaceView {
     selected_object_key: Option<String>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
+    /// 上传选文件面板打开中（防重入）
+    uploading: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
     download_message: Option<DownloadMessage>,
     /// 传输引擎：下载入队，状态经 watch 令牌事件驱动回填 `transfers`（不轮询）
@@ -140,10 +143,16 @@ impl WorkspaceView {
                     let (_, provider) = services
                         .build_provider(&request.account_id)
                         .map_err(|e| e.to_string())?;
-                    provider
-                        .download_object_to_file(&request.bucket, &request.key, &request.dest)
-                        .await
-                        .map_err(|e| e.to_string())
+                    match request.op {
+                        TransferOp::Download => provider
+                            .download_object_to_file(&request.bucket, &request.key, &request.dest)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        TransferOp::Upload => provider
+                            .upload_object_from_file(&request.bucket, &request.key, &request.dest)
+                            .await
+                            .map_err(|e| e.to_string()),
+                    }
                 })
             })
         };
@@ -189,6 +198,7 @@ impl WorkspaceView {
             current_prefix: None,
             selected_object_key: None,
             downloading: false,
+            uploading: false,
             download_message: None,
             engine: Arc::clone(&engine),
             transfers: Vec::new(),
@@ -217,13 +227,24 @@ impl WorkspaceView {
                         // 不 suspend/resume：尊重网络监视器当前挂起标志。
                         // 引擎已挂起时入队停在 Queued；未挂起则按并发上限启动。
                         for item in items {
-                            let id = this.engine.enqueue_download(
-                                item.account_id,
-                                item.bucket,
-                                item.object_key,
-                                PathBuf::from(item.dest),
-                                item.display_name,
-                            );
+                            let local = PathBuf::from(item.dest);
+                            let id = if item.kind == "upload" {
+                                this.engine.enqueue_upload(
+                                    item.account_id,
+                                    item.bucket,
+                                    item.object_key,
+                                    local,
+                                    item.display_name,
+                                )
+                            } else {
+                                this.engine.enqueue_download(
+                                    item.account_id,
+                                    item.bucket,
+                                    item.object_key,
+                                    local,
+                                    item.display_name,
+                                )
+                            };
                             if item.state == "paused" {
                                 this.engine.pause(id);
                             }
@@ -576,6 +597,103 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.start_object_download(cx);
+    }
+
+    fn handle_upload_files(
+        &mut self,
+        _: &UploadFiles,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_files_upload(cx);
+    }
+
+    /// 上传本地文件：gpui `prompt_for_paths`（多选，只要文件）→ 入队。
+    /// 云端 key = 当前前缀 + 文件名；目录上传后续里程碑。
+    fn start_files_upload(&mut self, cx: &mut Context<Self>) {
+        if self.uploading {
+            return;
+        }
+        let Some(account_id) = self.selected_account_id.clone() else {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "请先选中一个账号和空间再上传".into(),
+            });
+            cx.notify();
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "请先选中一个空间再上传".into(),
+            });
+            cx.notify();
+            return;
+        };
+        self.uploading = true;
+        self.download_message = None;
+        cx.notify();
+
+        let prefix = self.current_prefix.clone().unwrap_or_default();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("上传文件".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            enum PanelOutcome {
+                Picked(Vec<PathBuf>),
+                Cancelled,
+                Failed(String),
+            }
+            let outcome = match receiver.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => PanelOutcome::Picked(paths),
+                Ok(Ok(Some(_))) | Ok(Ok(None)) => PanelOutcome::Cancelled,
+                Ok(Err(e)) => PanelOutcome::Failed(format!("无法打开文件面板：{e}")),
+                Err(_) => PanelOutcome::Failed("文件面板结果通道已关闭".into()),
+            };
+
+            this.update(cx, |this, cx| {
+                this.uploading = false;
+                match outcome {
+                    PanelOutcome::Cancelled => {}
+                    PanelOutcome::Failed(text) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text,
+                        });
+                    }
+                    PanelOutcome::Picked(paths) => {
+                        let mut names = Vec::new();
+                        for path in paths {
+                            let name = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("file")
+                                .to_string();
+                            let key = format!("{prefix}{name}");
+                            this.engine.enqueue_upload(
+                                account_id.as_str(),
+                                bucket.as_str(),
+                                key.as_str(),
+                                path,
+                                name.clone(),
+                            );
+                            names.push(name);
+                        }
+                        this.download_message = Some(DownloadMessage {
+                            is_error: false,
+                            text: format!("已加入传输队列：{}", names.join("、")),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---- 模态：添加账号 ----
@@ -1525,8 +1643,8 @@ impl WorkspaceView {
             );
         }
 
-        // 下载入口（选中对象时可用；下载中置灰）+ 最近一次结果提示
-        if self.selected_cloud_object().is_some() {
+        // 下载（选中对象）/ 上传（选中空间）入口 + 最近一次结果提示
+        if self.selected_cloud_object().is_some() || self.selected_bucket.is_some() {
             panel = panel.child(
                 div()
                     .px_3()
@@ -1534,15 +1652,38 @@ impl WorkspaceView {
                     .border_t_1()
                     .border_color(theme.border)
                     .child(
-                        Button::new("download-object")
-                            .label(if self.downloading {
-                                "下载中…"
-                            } else {
-                                "下载…"
+                        h_flex()
+                            .gap_2()
+                            .when(self.selected_cloud_object().is_some(), |row| {
+                                row.child(
+                                    Button::new("download-object")
+                                        .label(if self.downloading {
+                                            "下载中…"
+                                        } else {
+                                            "下载…"
+                                        })
+                                        .disabled(self.downloading)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_object_download(cx)
+                                        })),
+                                )
                             })
-                            .disabled(self.downloading)
-                            .with_size(Size::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.start_object_download(cx))),
+                            .when(self.selected_bucket.is_some(), |row| {
+                                row.child(
+                                    Button::new("upload-files")
+                                        .label(if self.uploading {
+                                            "选择文件…"
+                                        } else {
+                                            "上传…"
+                                        })
+                                        .disabled(self.uploading)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_files_upload(cx)
+                                        })),
+                                )
+                            }),
                     ),
             );
         }
@@ -1696,23 +1837,43 @@ fn persistable_from_snapshot(tasks: &[TransferTask]) -> Vec<PersistedTransfer> {
         .iter()
         .filter(|t| t.state.is_active())
         .map(|t| {
-            let TransferKind::Download {
-                account_id,
-                bucket,
-                key,
-                dest,
-            } = &t.kind;
+            let (kind, account_id, bucket, key, local) = match &t.kind {
+                TransferKind::Download {
+                    account_id,
+                    bucket,
+                    key,
+                    dest,
+                } => (
+                    "download",
+                    account_id.clone(),
+                    bucket.clone(),
+                    key.clone(),
+                    dest.clone(),
+                ),
+                TransferKind::Upload {
+                    account_id,
+                    bucket,
+                    key,
+                    source,
+                } => (
+                    "upload",
+                    account_id.clone(),
+                    bucket.clone(),
+                    key.clone(),
+                    source.clone(),
+                ),
+            };
             let state = if t.state == TransferState::Paused {
                 "paused"
             } else {
                 "queued"
             };
             PersistedTransfer {
-                kind: "download".into(),
-                account_id: account_id.clone(),
-                bucket: bucket.clone(),
-                object_key: key.clone(),
-                dest: dest.to_string_lossy().into_owned(),
+                kind: kind.into(),
+                account_id,
+                bucket,
+                object_key: key,
+                dest: local.to_string_lossy().into_owned(),
                 display_name: t.display_name.clone(),
                 state: state.into(),
                 enqueued_at_millis: t.enqueued_at_millis as i64,
@@ -1769,6 +1930,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_open_command_palette))
             .on_action(cx.listener(Self::handle_open_add_modal))
             .on_action(cx.listener(Self::handle_download_object))
+            .on_action(cx.listener(Self::handle_upload_files))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
