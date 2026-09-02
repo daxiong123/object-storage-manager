@@ -296,8 +296,9 @@ impl StorageProvider for AliyunProvider {
             sub.push(("marker".into(), marker.clone()));
         }
         sub.push(("max-keys".into(), request.limit.to_string()));
-        let refs: Vec<(&str, &str)> = sub.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let resource = sign::canonicalized_resource(&request.bucket, None, &refs);
+        // ListObjects 的 prefix/delimiter/marker/max-keys 是普通查询参数，不属于 OSS V1
+        // CanonicalizedResource 的 subresource；服务端 StringToSign 只使用 `/{bucket}/`。
+        let resource = sign::canonicalized_resource(&request.bucket, None, &[]);
         let mut pairs: Vec<(&str, String)> = sub
             .iter()
             .map(|(k, v)| (k.as_str(), sign::percent_encode_path(v)))
@@ -799,8 +800,7 @@ mod tests {
         assert!(req.request_line.contains("max-keys=100"));
         let auth = req.header("Authorization").unwrap();
         let date = req.header("x-oss-date").unwrap();
-        let resource =
-            sign::canonicalized_resource("b1", None, &[("delimiter", "/"), ("max-keys", "100")]);
+        let resource = sign::canonicalized_resource("b1", None, &[]);
         let expected = sign::authorization(
             &AliyunCredential::new("test-ak", "test-sk").unwrap(),
             &sign::string_to_sign(

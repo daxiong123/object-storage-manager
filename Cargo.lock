@@ -3942,11 +3942,22 @@ dependencies = [
 [[package]]
 name = "object-storage-aliyun"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-util",
+ "hmac",
+ "object-storage-core",
+ "object-storage-domain",
+ "reqwest",
+ "sha1",
+ "tokio",
+]
 
 [[package]]
 name = "object-storage-app"
 version = "0.1.0"
 dependencies = [
+ "object-storage-aliyun",
  "object-storage-core",
  "object-storage-domain",
  "object-storage-macos",
