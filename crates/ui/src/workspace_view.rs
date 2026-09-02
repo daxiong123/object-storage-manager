@@ -2169,7 +2169,7 @@ impl WorkspaceView {
 
         if let Some(object) = selected {
             let preview_content = match preview_path {
-                Some(path) => img(path)
+                Some(ref path) => img(path.to_path_buf())
                     .w_full()
                     .h(px(220.))
                     .object_fit(ObjectFit::Contain)
@@ -2216,15 +2216,40 @@ impl WorkspaceView {
                             ),
                     )
                     .child(
-                        Button::new("preview-object-inspector")
-                            .label(if self.previewing {
-                                "准备预览…"
-                            } else {
-                                "预览"
-                            })
-                            .disabled(self.previewing)
-                            .with_size(Size::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.start_object_preview(cx))),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("preview-object-inspector")
+                                    .label(if self.previewing {
+                                        "准备预览…"
+                                    } else {
+                                        "预览"
+                                    })
+                                    .disabled(self.previewing)
+                                    .with_size(Size::Small)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.start_object_preview(cx)),
+                                    ),
+                            )
+                            .when(preview_path.is_some(), |row| {
+                                let path = preview_path.clone().expect("已判断预览路径存在");
+                                row.child(
+                                    Button::new("edit-object-external")
+                                        .label("编辑…")
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Err(error) =
+                                                object_storage_macos::open_with_default_app(&path)
+                                            {
+                                                this.download_message = Some(DownloadMessage {
+                                                    is_error: true,
+                                                    text: format!("打开编辑应用失败：{error}"),
+                                                });
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                            }),
                     ),
             );
         }
