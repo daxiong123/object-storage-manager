@@ -7,4 +7,5 @@ mod account_service;
 mod services;
 
 pub use account_service::{AccountError, AccountService};
+pub use object_storage_persistence::PersistedTransfer;
 pub use services::{AppServices, AppServicesError};

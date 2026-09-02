@@ -23,7 +23,7 @@ pub enum PersistenceError {
         #[source]
         source: rusqlite::Error,
     },
-    #[error("数据损坏：accounts 表出现未知 provider 值“{0}”")]
+    #[error("数据损坏：{0}")]
     Corrupt(String),
     #[error("无法定位应用数据目录（Application Support）")]
     DataDir,
@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS accounts (
     provider          TEXT NOT NULL CHECK (provider IN ('qiniu', 'aliyun')),
     access_key        TEXT NOT NULL,
     created_at_millis INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS transfers (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind                TEXT NOT NULL CHECK (kind IN ('download')),
+    account_id          TEXT NOT NULL,
+    bucket              TEXT NOT NULL,
+    object_key          TEXT NOT NULL,
+    dest                TEXT NOT NULL,
+    display_name        TEXT NOT NULL,
+    state               TEXT NOT NULL CHECK (state IN ('queued', 'paused')),
+    enqueued_at_millis  INTEGER NOT NULL
 );
 ";
 
@@ -86,7 +97,8 @@ fn materialize(raw: RawAccount) -> Result<Account, PersistenceError> {
 /// 账号元数据仓储。同步 API；异步包装由上层负责（gpui 后台执行器 / tokio）
 #[derive(Debug)]
 pub struct AccountRepository {
-    conn: Connection,
+    /// 同 crate 内 transfers 模块共用连接（不对外暴露）
+    pub(crate) conn: Connection,
 }
 
 impl AccountRepository {

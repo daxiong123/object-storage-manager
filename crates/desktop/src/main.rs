@@ -73,8 +73,8 @@ fn main() {
         gpui_component::init(cx);
         ui::init(cx);
         cx.set_menus(app_menus());
-        // Quit 用全局监听（capture 阶段，不依赖窗口焦点）：最后一个窗口关闭后仍可 ⌘Q 退出。
-        // TODO(§57)：传输引擎落地后，改为弹退出确认（默认「暂停并持久化」）。
+        // Quit 全局监听在 bubble 末尾：有窗口时由 WorkspaceView 先处理（有传输则弹确认），
+        // 仅当无人处理或显式 propagate 时落到这里——窗口全关后仍可 ⌘Q 退出。
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         cx.spawn(async move |cx| {

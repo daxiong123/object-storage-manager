@@ -27,8 +27,8 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder, px,
+    PromptButton, PromptLevel, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -36,16 +36,17 @@ use gpui_component::{
     spinner::Spinner, v_flex,
 };
 
-use object_storage_app::AppServices;
+use object_storage_app::{AppServices, PersistedTransfer};
 use object_storage_core::StorageProvider as _;
 use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
 use object_storage_transfer::{
-    TaskRunner, TransferEngine, TransferRequest, TransferState, TransferTask,
+    TaskRunner, TransferEngine, TransferKind, TransferRequest, TransferState, TransferTask,
 };
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, ToggleInspector, ToggleSidebar,
+    AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, Quit, ToggleInspector,
+    ToggleSidebar,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -119,6 +120,8 @@ pub struct WorkspaceView {
     engine: Arc<TransferEngine>,
     /// 引擎任务快照（watch 订阅任务回填；取消/继续/重试直接作用于引擎）
     transfers: Vec<TransferTask>,
+    /// ⌘Q 确认面板已弹出：gpui 禁止重入 `window.prompt`，二次 ⌘Q 直接忽略
+    quit_prompt_open: bool,
 
     // ---- 串台防护：账号/对象各自的自增代号 ----
     bucket_gen: u64,
@@ -189,12 +192,56 @@ impl WorkspaceView {
             download_message: None,
             engine: Arc::clone(&engine),
             transfers: Vec::new(),
+            quit_prompt_open: false,
             bucket_gen: 0,
             object_gen: 0,
         };
         this.load_accounts(cx);
+        this.restore_persisted_transfers(cx);
         Self::subscribe_transfers(engine, cx);
         this
+    }
+
+    /// 启动时取出上次 ⌘Q「暂停并退出」留下的队列，入引擎后按原状态恢复。
+    /// SQLite 走后台执行器；入队发生在首帧前后的短窗口，用户来不及抢点下载。
+    fn restore_persisted_transfers(&mut self, cx: &mut Context<Self>) {
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { services.take_transfers() })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(items) if !items.is_empty() => {
+                        // 不 suspend/resume：尊重网络监视器当前挂起标志。
+                        // 引擎已挂起时入队停在 Queued；未挂起则按并发上限启动。
+                        for item in items {
+                            let id = this.engine.enqueue_download(
+                                item.account_id,
+                                item.bucket,
+                                item.object_key,
+                                PathBuf::from(item.dest),
+                                item.display_name,
+                            );
+                            if item.state == "paused" {
+                                this.engine.pause(id);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: format!("读取已保存的传输队列失败：{e}"),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 订阅引擎状态变更令牌：任何任务状态突变 → 取快照回填 → notify。
@@ -618,6 +665,103 @@ impl WorkspaceView {
     ) {
         self.inspector_collapsed = !self.inspector_collapsed;
         cx.notify();
+    }
+
+    fn handle_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quit_prompt_open {
+            return;
+        }
+        let active: Vec<TransferTask> = self
+            .engine
+            .snapshot()
+            .into_iter()
+            .filter(|t| t.state.is_active())
+            .collect();
+        if active.is_empty() {
+            cx.quit();
+            return;
+        }
+        self.quit_prompt_open = true;
+        let n = active.len();
+        let message = format!("有 {n} 个传输任务尚未完成。");
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some("暂停并退出会保存队列，下次启动后继续；立即退出会丢弃未完成任务。"),
+            &[
+                PromptButton::ok("暂停并退出"),
+                PromptButton::cancel("取消"),
+                PromptButton::new("立即退出"),
+            ],
+            cx,
+        );
+        let engine = Arc::clone(&self.engine);
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let answer = match rx.await {
+                Ok(i) => i,
+                Err(_) => {
+                    this.update(cx, |this, _| this.quit_prompt_open = false)
+                        .ok();
+                    return;
+                }
+            };
+            match answer {
+                0 => {
+                    engine.suspend_all();
+                    let items = persistable_from_snapshot(&engine.snapshot());
+                    let services = Arc::clone(&services);
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { services.replace_transfers(&items) })
+                        .await;
+                    match result {
+                        Ok(()) => {
+                            let _ = cx.update(|cx| cx.quit());
+                        }
+                        Err(e) => {
+                            this.update(cx, |this, cx| {
+                                this.quit_prompt_open = false;
+                                this.download_message = Some(DownloadMessage {
+                                    is_error: true,
+                                    text: format!("保存传输队列失败，未退出：{e}"),
+                                });
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    }
+                }
+                2 => {
+                    let services = Arc::clone(&services);
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { services.clear_transfers() })
+                        .await;
+                    match result {
+                        Ok(()) => {
+                            let _ = cx.update(|cx| cx.quit());
+                        }
+                        Err(e) => {
+                            this.update(cx, |this, cx| {
+                                this.quit_prompt_open = false;
+                                this.download_message = Some(DownloadMessage {
+                                    is_error: true,
+                                    text: format!("清除已保存队列失败，未退出：{e}"),
+                                });
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    }
+                }
+                _ => {
+                    this.update(cx, |this, _| this.quit_prompt_open = false)
+                        .ok();
+                }
+            }
+        })
+        .detach();
     }
 
     fn handle_close_window(
@@ -1545,6 +1689,38 @@ pub fn format_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
+/// 活动任务 → 持久化行。Running/Waiting/Queued 落成 queued（下次自动继续），
+/// 用户暂停保持 paused。终态任务不落盘。
+fn persistable_from_snapshot(tasks: &[TransferTask]) -> Vec<PersistedTransfer> {
+    tasks
+        .iter()
+        .filter(|t| t.state.is_active())
+        .map(|t| {
+            let TransferKind::Download {
+                account_id,
+                bucket,
+                key,
+                dest,
+            } = &t.kind;
+            let state = if t.state == TransferState::Paused {
+                "paused"
+            } else {
+                "queued"
+            };
+            PersistedTransfer {
+                kind: "download".into(),
+                account_id: account_id.clone(),
+                bucket: bucket.clone(),
+                object_key: key.clone(),
+                dest: dest.to_string_lossy().into_owned(),
+                display_name: t.display_name.clone(),
+                state: state.into(),
+                enqueued_at_millis: t.enqueued_at_millis as i64,
+            }
+        })
+        .collect()
+}
+
 /// 云端 Key 的末段展示名（目录前缀先去掉结尾 `/`）。
 pub fn display_name(key: &str) -> &str {
     let trimmed = key.trim_end_matches('/');
@@ -1588,6 +1764,7 @@ impl Render for WorkspaceView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_toggle_sidebar))
             .on_action(cx.listener(Self::handle_toggle_inspector))
+            .on_action(cx.listener(Self::handle_quit))
             .on_action(cx.listener(Self::handle_close_window))
             .on_action(cx.listener(Self::handle_open_command_palette))
             .on_action(cx.listener(Self::handle_open_add_modal))

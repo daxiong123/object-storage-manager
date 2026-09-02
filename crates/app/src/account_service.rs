@@ -11,7 +11,7 @@
 
 use object_storage_domain::{Account, ProviderKind};
 use object_storage_macos::KeychainCredentialStore;
-use object_storage_persistence::{AccountRepository, PersistenceError};
+use object_storage_persistence::{AccountRepository, PersistedTransfer, PersistenceError};
 use object_storage_qiniu::{QiniuCredential, QiniuProvider};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,6 +60,21 @@ impl AccountService {
 
     pub fn list(&self) -> Result<Vec<Account>, AccountError> {
         Ok(self.repo.list()?)
+    }
+
+    /// 整表替换传输队列（⌘Q 暂停并退出）。空切片清空。
+    pub fn replace_transfers(&self, items: &[PersistedTransfer]) -> Result<(), AccountError> {
+        Ok(self.repo.replace_transfers(items)?)
+    }
+
+    /// 原子取出并清空传输队列（启动恢复用）。
+    pub fn take_transfers(&self) -> Result<Vec<PersistedTransfer>, AccountError> {
+        Ok(self.repo.take_transfers()?)
+    }
+
+    /// 丢弃已保存队列（⌘Q 立即退出）。
+    pub fn clear_transfers(&self) -> Result<(), AccountError> {
+        Ok(self.repo.clear_transfers()?)
     }
 
     /// 添加账号：Secret 入 Keychain，元数据入 SQLite

@@ -23,8 +23,10 @@
 ### Action 与菜单
 - 未被处理的 Action 派发是**静默的**（不 panic、不告警）——菜单项挂了 Action 但没人处理时
   不会崩，但也意味着 Action 断链要靠手工验证发现。
-- `App::on_action`（app.rs:1696）注册的是 capture 阶段全局监听：适合 `Quit` 这类
-  不依赖窗口焦点的应用级行为（最后一个窗口关闭后依然可达）。
+- `App::on_action`（app.rs:1696）注册的是 **bubble 末尾** 全局监听（源码注释写明
+  `DispatchPhase::Bubble`）：「仅当没有其它 handler，或其它 handler 调用了
+  `cx.propagate()` 时才会跑」。适合窗口全关后的 ⌘Q 兜底，**不是** capture。
+  窗口内要拦截 Quit（弹确认）应在视图 `.on_action` 处理，不要依赖全局先跑。
 - `App::quit()` 在 app.rs:749。
 - `Window::remove_window()` 在 window.rs:1375（⌘W 关窗口用）。
 - `Window::focus(&FocusHandle)` 在 window.rs:1386；open_window 回调里给根视图设置初始焦点，
@@ -112,6 +114,18 @@ window.remove_window();
 - `screencapture` 需要屏幕录制权限（终端宿主常没有），CGWindowList 不需要。
 - gpui 0.2.2 无 AX 树，无法用 Accessibility 检查 UI。
 - CGEvent `postToPid` 可在无前台权限时向指定进程注入键盘事件（菜单/快捷键自动化测试用）。
+
+### 确认对话框：必须走 `Window::prompt`（NSAlert sheet + oneshot）
+
+`Window::prompt(level, message, detail, answers, cx) -> oneshot::Receiver<usize>`
+（window.rs:4141）。macOS 实现（platform/mac/window.rs:1121）用
+`beginSheetModalForWindow:completionHandler:`，**不是** `runModal`，不会重入 gpui App RefCell。
+
+- `PromptLevel::{Info, Warning, Critical}`；`PromptButton::{ok, cancel, new}`。
+- 返回值是按钮在 `answers` 数组里的**原始下标**（NSAlert 会把 Cancel 视觉上挪到最后，tag 仍是原下标）。
+- 第一按钮默认 Return；`PromptButton::Cancel` 绑 Escape。
+- **禁止重入**：`cx.prompt_builder.take()`，二次 `prompt` 会 `unreachable!`。⌘Q 这类入口必须用 flag 防抖。
+- 调用方 `cx.spawn` 里 `rx.await` 后再 `cx.quit()` / 落盘；不要在事件处理器里同步等。
 
 ### raw-window-handle（获取 NSWindow）
 

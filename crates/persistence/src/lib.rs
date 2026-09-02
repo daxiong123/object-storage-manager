@@ -6,5 +6,7 @@
 //! - 默认路径符合 macOS 规范（`dirs::data_dir()`），不乱写 `~/.app/`
 
 mod accounts;
+mod transfers;
 
 pub use accounts::{AccountRepository, PersistenceError, default_db_path};
+pub use transfers::PersistedTransfer;

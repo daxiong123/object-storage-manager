@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use object_storage_core::{StorageError, StorageProvider};
 use object_storage_domain::{Account, Bucket, ListObjectsRequest, ObjectPage, ProviderKind};
-use object_storage_persistence::default_db_path;
+use object_storage_persistence::{PersistedTransfer, default_db_path};
 use object_storage_qiniu::QiniuProvider;
 use tokio::runtime::Runtime;
 
@@ -182,6 +182,21 @@ impl AppServices {
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
     }
+
+    /// 整表替换传输队列（⌘Q「暂停并退出」落盘）。空切片清空。
+    pub fn replace_transfers(&self, items: &[PersistedTransfer]) -> Result<(), AppServicesError> {
+        Ok(self.lock_accounts().replace_transfers(items)?)
+    }
+
+    /// 原子取出并清空传输队列（启动时恢复；取出后表空，避免下次重复入队）。
+    pub fn take_transfers(&self) -> Result<Vec<PersistedTransfer>, AppServicesError> {
+        Ok(self.lock_accounts().take_transfers()?)
+    }
+
+    /// 丢弃已保存队列（⌘Q「立即退出」，下次启动不要复活）。
+    pub fn clear_transfers(&self) -> Result<(), AppServicesError> {
+        Ok(self.lock_accounts().clear_transfers()?)
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +302,43 @@ mod tests {
         );
 
         services.lock_accounts().delete(&account2.id).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn transfer_queue_replace_take_clear() {
+        let (db, dir) = temp_db("xfer");
+        let services = AppServices::open_at(&db).unwrap();
+        let item = PersistedTransfer {
+            kind: "download".into(),
+            account_id: "acc".into(),
+            bucket: "b".into(),
+            object_key: "k.bin".into(),
+            dest: "/tmp/k.bin".into(),
+            display_name: "k.bin".into(),
+            state: "paused".into(),
+            enqueued_at_millis: 1,
+        };
+        services
+            .replace_transfers(std::slice::from_ref(&item))
+            .unwrap();
+        let taken = services.take_transfers().unwrap();
+        assert_eq!(taken, vec![item]);
+        assert!(services.take_transfers().unwrap().is_empty());
+        services
+            .replace_transfers(&[PersistedTransfer {
+                kind: "download".into(),
+                account_id: "acc".into(),
+                bucket: "b".into(),
+                object_key: "k.bin".into(),
+                dest: "/tmp/k.bin".into(),
+                display_name: "k.bin".into(),
+                state: "queued".into(),
+                enqueued_at_millis: 1,
+            }])
+            .unwrap();
+        services.clear_transfers().unwrap();
+        assert!(services.take_transfers().unwrap().is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 }
