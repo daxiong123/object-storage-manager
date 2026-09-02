@@ -111,7 +111,7 @@ crates/
 
 - Unified Titlebar（Traffic Lights + 导航 + Toolbar 一体），Sidebar（180/220/360px，折叠 44px Icon Rail，⌘⌥S），Inspector（280/320/520px，⌘⌥I）。Resize 实时 60 FPS。
 - 快捷键一律 Command 系（⌘K/⌘L/⌘F/⌘U/⌘R/⌘,/⌘[/⌘]/⌘A/⌘W/⌘Q）；UI 中只显示 `⌘ ⌥ ⌃ ⇧` 符号，不显示 "Cmd+Shift+P" 文字。
-- Space 预览（再按 Space/Esc 关闭，方向键切换）；Return 进 Inline Rename（Finder 式，不弹 Dialog）；删除用 `⌘⌫` 且远端删除必须确认。
+- Space 预览（再按 Space/Esc 关闭，方向键切换）；Return 进 Inline Rename（Finder 式，不弹 Dialog）；删除用 `⌘⌫` 且远端删除必须确认（`window.prompt`，无废纸篓）。命令面板/添加账号打开时 ⌘⌫ 不删对象。
 - Selection：Click / ⌘Click / ⇧Click / ⌘A，完整 macOS 语义。
 - Context Menu 顺序参考 Finder，Delete 放最底。Menu Bar：App/File/Edit/View/Object/Transfer/Window/Help；同一 Action 必须在 Menu / Context Menu / Toolbar / 快捷键 / Command Palette 共用。
 - 外观跟随 System（监听变化）；低饱和 Accent，自有视觉身份（图标不得拼接七牛+阿里云 Logo）。

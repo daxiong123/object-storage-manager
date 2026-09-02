@@ -46,8 +46,8 @@ use object_storage_transfer::{
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, Quit, Refresh, ToggleInspector,
-    ToggleSidebar, UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, DeleteObject, DownloadObject, OpenCommandPalette, Quit, Refresh,
+    ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -117,6 +117,10 @@ pub struct WorkspaceView {
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
     uploading: bool,
+    /// 远端删除进行中
+    deleting: bool,
+    /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
+    delete_prompt_open: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
     download_message: Option<DownloadMessage>,
     /// 传输引擎：下载入队，状态经 watch 令牌事件驱动回填 `transfers`（不轮询）
@@ -212,6 +216,8 @@ impl WorkspaceView {
             selected_object_key: None,
             downloading: false,
             uploading: false,
+            deleting: false,
+            delete_prompt_open: false,
             download_message: None,
             engine: Arc::clone(&engine),
             transfers: Vec::new(),
@@ -628,6 +634,99 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.start_folder_upload(cx);
+    }
+
+    fn handle_delete_object(
+        &mut self,
+        _: &DeleteObject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_and_delete_object(window, cx);
+    }
+
+    /// 远端删除必须确认（规范 §43，无废纸篓）。⌘⌫ / 菜单 / Inspector 共用。
+    fn confirm_and_delete_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        if self.deleting || self.delete_prompt_open || self.quit_prompt_open {
+            return;
+        }
+        let Some(object) = self.selected_cloud_object() else {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "请先选中一个对象再删除".into(),
+            });
+            cx.notify();
+            return;
+        };
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let key = object.key.clone();
+        let name = display_name(&key).to_string();
+        self.delete_prompt_open = true;
+        let message = format!("删除“{name}”？");
+        let detail = format!("将从空间 {bucket} 永久删除，无法撤销。");
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &[PromptButton::ok("删除"), PromptButton::cancel("取消")],
+            cx,
+        );
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let answer = match rx.await {
+                Ok(i) => i,
+                Err(_) => {
+                    this.update(cx, |this, _| this.delete_prompt_open = false)
+                        .ok();
+                    return;
+                }
+            };
+            if answer != 0 {
+                this.update(cx, |this, _| this.delete_prompt_open = false)
+                    .ok();
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.delete_prompt_open = false;
+                this.deleting = true;
+                this.download_message = None;
+                cx.notify();
+            })
+            .ok();
+            let result = cx
+                .background_executor()
+                .spawn(async move { services.delete_object(&account_id, &bucket, &key) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.deleting = false;
+                match result {
+                    Ok(()) => {
+                        this.reload_objects(cx);
+                        this.download_message = Some(DownloadMessage {
+                            is_error: false,
+                            text: format!("已删除 {name}"),
+                        });
+                    }
+                    Err(e) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: format!("删除失败：{e}"),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ⌘R：有选中空间则重载当前前缀的对象列表；否则刷新空间/账号。
@@ -1977,6 +2076,20 @@ impl WorkspaceView {
                                             this.start_object_download(cx)
                                         })),
                                 )
+                                .child(
+                                    Button::new("delete-object")
+                                        .danger()
+                                        .label(if self.deleting {
+                                            "删除中…"
+                                        } else {
+                                            "删除…"
+                                        })
+                                        .disabled(self.deleting || self.delete_prompt_open)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_and_delete_object(window, cx)
+                                        })),
+                                )
                             })
                             .when(self.selected_bucket.is_some(), |row| {
                                 row.child(
@@ -2344,6 +2457,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_upload_files))
             .on_action(cx.listener(Self::handle_upload_folder))
             .on_action(cx.listener(Self::handle_refresh))
+            .on_action(cx.listener(Self::handle_delete_object))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))

@@ -91,6 +91,13 @@ pub trait StorageProvider: Send + Sync {
         source: &std::path::Path,
         progress: Option<ByteProgress>,
     ) -> impl Future<Output = Result<u64, StorageError>> + Send;
+
+    /// 删除远端对象。成功即对象已不存在；对象本就不存在时由实现方报错（不静默）。
+    fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 }
 
 #[cfg(test)]

@@ -32,6 +32,8 @@ const DEFAULT_UC_ENDPOINT: &str = "https://uc.qiniuapi.com";
 const DEFAULT_RSF_ENDPOINT: &str = "https://rsf.qbox.me";
 /// 官方表单上传入口（华东/智能；区域专用域名后续里程碑按 UC v4/query 解析）
 const DEFAULT_UP_ENDPOINT: &str = "https://upload.qiniup.com";
+/// 官方 RS 服务端点（对象管理：删除/stat/move）
+const DEFAULT_RS_ENDPOINT: &str = "https://rs.qbox.me";
 
 pub struct QiniuProvider {
     http: reqwest::Client,
@@ -43,6 +45,7 @@ pub struct QiniuProvider {
     cred: QiniuCredential,
     uc_base: reqwest::Url,
     rsf_base: reqwest::Url,
+    rs_base: reqwest::Url,
     up_base: reqwest::Url,
     /// 下载域名协议（生产恒为 https；测试指向本地 mock 时切 http）
     download_use_https: bool,
@@ -60,15 +63,22 @@ impl QiniuProvider {
         uc_base: &str,
         rsf_base: &str,
     ) -> Result<Self, StorageError> {
-        Self::with_all_endpoints(cred, uc_base, rsf_base, DEFAULT_UP_ENDPOINT)
+        Self::with_all_endpoints(
+            cred,
+            uc_base,
+            rsf_base,
+            DEFAULT_UP_ENDPOINT,
+            DEFAULT_RS_ENDPOINT,
+        )
     }
 
-    /// 指定 UC / RSF / 上传端点（测试用）。
+    /// 指定 UC / RSF / 上传 / RS 端点（测试用）。
     pub fn with_all_endpoints(
         cred: QiniuCredential,
         uc_base: &str,
         rsf_base: &str,
         up_base: &str,
+        rs_base: &str,
     ) -> Result<Self, StorageError> {
         let uc_base = reqwest::Url::parse(uc_base)
             .map_err(|e| StorageError::InvalidInput(format!("UC 端点不合法: {e}")))?;
@@ -76,6 +86,8 @@ impl QiniuProvider {
             .map_err(|e| StorageError::InvalidInput(format!("RSF 端点不合法: {e}")))?;
         let up_base = reqwest::Url::parse(up_base)
             .map_err(|e| StorageError::InvalidInput(format!("上传端点不合法: {e}")))?;
+        let rs_base = reqwest::Url::parse(rs_base)
+            .map_err(|e| StorageError::InvalidInput(format!("RS 端点不合法: {e}")))?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("CloudStorage/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
@@ -97,6 +109,7 @@ impl QiniuProvider {
             cred,
             uc_base,
             rsf_base,
+            rs_base,
             up_base,
             download_use_https: true,
         })
@@ -110,6 +123,12 @@ impl QiniuProvider {
 
     fn rsf_url(&self, path: &str) -> Result<reqwest::Url, StorageError> {
         self.rsf_base
+            .join(path)
+            .map_err(|e| StorageError::InvalidInput(format!("URL 拼接失败: {e}")))
+    }
+
+    fn rs_url(&self, path: &str) -> Result<reqwest::Url, StorageError> {
+        self.rs_base
             .join(path)
             .map_err(|e| StorageError::InvalidInput(format!("URL 拼接失败: {e}")))
     }
@@ -213,6 +232,7 @@ impl std::fmt::Debug for QiniuProvider {
             .field("cred", &self.cred)
             .field("uc_base", &self.uc_base.as_str())
             .field("rsf_base", &self.rsf_base.as_str())
+            .field("rs_base", &self.rs_base.as_str())
             .field("up_base", &self.up_base.as_str())
             .finish()
     }
@@ -539,6 +559,29 @@ impl StorageProvider for QiniuProvider {
         let _resp = self.check_status(resp, "upload_object").await?;
         Ok(file_len)
     }
+
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
+        if bucket.is_empty() {
+            return Err(StorageError::InvalidInput("bucket 不能为空".into()));
+        }
+        if key.is_empty() {
+            return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+        // RS `POST /delete/<urlsafe_base64(bucket:key)>`，V2 签名，无 body
+        // （官方 qiniu-apis delete_object PathParams::set_entry_as_str）
+        let entry = sign::encoded_entry(bucket, key);
+        let url = self.rs_url(&format!("delete/{entry}"))?;
+        let auth = sign::authorization_v2_for_url(&self.cred, "POST", &url);
+        let resp = self
+            .http
+            .post(url)
+            .header(AUTHORIZATION, auth)
+            .send()
+            .await
+            .map_err(|e| StorageError::Network(format!("delete_object: {e}")))?;
+        let _resp = self.check_status(resp, "delete_object").await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -629,7 +672,7 @@ mod tests {
     fn test_provider(addr: SocketAddr) -> QiniuProvider {
         let cred = QiniuCredential::new("test-ak", "test-sk").unwrap();
         let base = format!("http://{addr}");
-        QiniuProvider::with_all_endpoints(cred, &base, &base, &base).unwrap()
+        QiniuProvider::with_all_endpoints(cred, &base, &base, &base, &base).unwrap()
     }
 
     fn tokio() -> tokio::runtime::Runtime {
@@ -984,6 +1027,41 @@ mod tests {
         let provider = test_provider("127.0.0.1:9".parse().unwrap());
         let err = tokio()
             .block_on(provider.upload_object_from_file("b1", "", Path::new("/tmp/x"), None))
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
+    }
+
+    #[test]
+    fn delete_object_posts_encoded_entry_with_v2_auth() {
+        let (addr, captured) = spawn_mock(200, r#"{}"#);
+        let provider = test_provider(addr);
+        tokio()
+            .block_on(provider.delete_object("b1", "a/b"))
+            .unwrap();
+
+        let req = captured.lock().unwrap().take().unwrap();
+        let entry = sign::encoded_entry("b1", "a/b");
+        assert!(
+            req.request_line
+                .starts_with(&format!("POST /delete/{entry} ")),
+            "request_line={}",
+            req.request_line
+        );
+        let auth = req.header("Authorization").expect("删除必须 V2 签名");
+        assert!(auth.starts_with("Qiniu test-ak:"), "实际 {auth}");
+        let expected = sign::authorization_v2_for_url(
+            &QiniuCredential::new("test-ak", "test-sk").unwrap(),
+            "POST",
+            &format!("http://{addr}/delete/{entry}").parse().unwrap(),
+        );
+        assert_eq!(auth, expected);
+    }
+
+    #[test]
+    fn delete_rejects_empty_key_before_network() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        let err = tokio()
+            .block_on(provider.delete_object("b1", ""))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
     }

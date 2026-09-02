@@ -190,6 +190,11 @@ pub(crate) fn authorization_v2_for_url(
     authorization_v2(cred, &sign_data)
 }
 
+/// RS 管理接口的 entry：`urlsafe_base64("bucket:key")`（官方 PathParams::set_entry_as_str）。
+pub(crate) fn encoded_entry(bucket: &str, key: &str) -> String {
+    BASE64_URL_SAFE.encode(format!("{bucket}:{key}").as_bytes())
+}
+
 /// RFC 3986 query 值编码：保留 `A-Za-z0-9-._~`，其余按 `%XX` 大写十六进制编码。
 /// （不用 form-urlencoded 的 `+` 空格，避免任何服务端解码歧义。）
 pub(crate) fn percent_encode_query_value(value: &str) -> String {
@@ -292,6 +297,13 @@ mod tests {
             authorization_v2(&cred, &sign_data),
             "Qiniu ak:arPKqUn6T6DrnHhygbFS40PGBgY="
         );
+    }
+
+    #[test]
+    fn encoded_entry_is_urlsafe_base64_of_bucket_colon_key() {
+        // "b1:a/b" 的 URL_SAFE padded base64（与官方 qiniu_utils::base64::urlsafe 同构）
+        assert_eq!(encoded_entry("b1", "a/b"), "YjE6YS9i");
+        assert_eq!(encoded_entry("bucket", "key"), "YnVja2V0OmtleQ==");
     }
 
     #[test]

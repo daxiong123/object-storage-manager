@@ -178,6 +178,17 @@ impl AppServices {
             .block_on(provider.download_object_to_file(bucket, key, dest, None))?)
     }
 
+    /// 删除远端对象。对象不存在由 provider 报错，不静默当成功。
+    pub fn delete_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+    ) -> Result<(), AppServicesError> {
+        let (_, provider) = self.build_provider(account_id)?;
+        Ok(self.runtime.block_on(provider.delete_object(bucket, key))?)
+    }
+
     /// tokio 运行时句柄（Transfer Engine 用它 spawn 任务 future）。
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()

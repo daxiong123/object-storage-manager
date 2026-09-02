@@ -42,6 +42,7 @@ Host: host[:port]\n
 | 列举空间 | UC `GET https://uc.qiniuapi.com/buckets` | V2 | bucket 名字符串数组 |
 | 列举文件 | RSF `GET https://rsf.qbox.me/list?bucket=&marker=&limit=&prefix=&delimiter=` | V2 | `{marker, items[], commonPrefixes[]}` |
 | 表单上传 | Up `POST https://upload.qiniup.com/`（默认华东/智能；区域域名后续按 UC `/v4/query`） | **上传凭证**（非 V2 请求签名） | `{hash,key}` |
+| 删除对象 | RS `POST https://rs.qbox.me/delete/<urlsafe_base64(bucket:key)>` | V2，无 body | 空 JSON `{}` |
 
 ### 上传凭证（官方 `Credential::sign_with_data`）
 

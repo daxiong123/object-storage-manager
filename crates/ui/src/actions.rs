@@ -23,6 +23,8 @@ actions!(
         UploadFolder,
         // 刷新当前视图：有空间则重载对象列表，否则刷新空间/账号（规范 ⌘R）
         Refresh,
+        // 删除选中远端对象：⌘⌫ / 「对象」菜单 / 命令面板 / Inspector，必须确认
+        DeleteObject,
     ]
 );
 
@@ -57,6 +59,8 @@ pub fn bind_keys(cx: &mut App) {
         // 未处理时 keymap 会沿绑定列表落到这里的 PaletteSelectPrev/Next。
         KeyBinding::new("cmd-u", UploadFiles, None),
         KeyBinding::new("cmd-r", Refresh, None),
+        // 规范 §43：⌘⌫ 删除；不绑 Delete，避免误触。面板打开时 handler 直接 return。
+        KeyBinding::new("cmd-backspace", DeleteObject, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
