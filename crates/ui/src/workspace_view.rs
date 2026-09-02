@@ -2037,7 +2037,7 @@ impl WorkspaceView {
             .hover(|row| row.bg(theme.sidebar_accent))
             .on_click(on_click)
             .child(Icon::new(IconName::TriangleAlert))
-            .child(div().truncate().child(format!("{msg}（点击重试）")))
+            .child(div().child(format!("{msg}（点击重试）")))
     }
 
     /// 通用侧栏行（id 动态：账号/桶行）。

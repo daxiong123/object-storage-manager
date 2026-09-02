@@ -15,7 +15,7 @@ use object_storage_core::{ByteProgress, StorageError, StorageProvider};
 use object_storage_domain::{
     Bucket, CloudObject, ListObjectsRequest, ListingEntry, ObjectPage, ProviderKind,
 };
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, DATE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use sign::AliyunCredential;
@@ -69,6 +69,8 @@ impl AliyunProvider {
         })
     }
 
+    /// 使用 `x-oss-date` 签名：StringToSign 的 Date 为空，时间放进 CanonicalizedOSSHeaders。
+    /// 避免 HTTP 栈自动插入的 `Date` 与签名用的时间不一致导致 SignatureDoesNotMatch。
     fn signed_headers(
         &self,
         method: &str,
@@ -76,7 +78,8 @@ impl AliyunProvider {
         resource: &str,
     ) -> Result<(String, String), StorageError> {
         let date = sign::http_gmt(SystemTime::now())?;
-        let sts = sign::string_to_sign(method, "", content_type, &date, "", resource);
+        let oss_headers = format!("x-oss-date:{date}\n");
+        let sts = sign::string_to_sign(method, "", content_type, "", &oss_headers, resource);
         let auth = sign::authorization(&self.cred, &sts);
         Ok((date, auth))
     }
@@ -95,7 +98,7 @@ impl AliyunProvider {
         let resp = self
             .http
             .get(url)
-            .header(DATE, date)
+            .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
             .await
@@ -147,6 +150,10 @@ impl AliyunProvider {
         }
         let code = status.as_u16();
         let body = resp.text().await.unwrap_or_default();
+        eprintln!(
+            "[aliyun] {context} HTTP {code} body={}",
+            truncate(&body, 800)
+        );
         let oss_code = xml_first(&body, "Code").unwrap_or_default();
         let message = xml_first(&body, "Message")
             .filter(|s| !s.is_empty())
@@ -211,7 +218,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .http
             .get(url)
-            .header(DATE, date)
+            .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
             .await
@@ -270,7 +277,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .http
             .get(url)
-            .header(DATE, date)
+            .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
             .await
@@ -300,7 +307,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .download_http
             .get(url)
-            .header(DATE, date)
+            .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
             .await
@@ -402,7 +409,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .upload_http
             .put(url)
-            .header(DATE, date)
+            .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(CONTENT_TYPE, content_type)
             .header(AUTHORIZATION, auth)
             .body(reqwest::Body::wrap_stream(stream))
@@ -427,7 +434,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .http
             .delete(url)
-            .header(DATE, date)
+            .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
             .await
@@ -704,10 +711,10 @@ mod tests {
         assert!(req.request_line.starts_with("GET / "));
         let auth = req.header("Authorization").expect("必须带 OSS 签名");
         assert!(auth.starts_with("OSS test-ak:"));
-        let date = req.header("Date").expect("必须带 Date");
+        let date = req.header("x-oss-date").expect("必须带 x-oss-date");
         let expected = sign::authorization(
             &AliyunCredential::new("test-ak", "test-sk").unwrap(),
-            &sign::string_to_sign("GET", "", "", date, "", "/"),
+            &sign::string_to_sign("GET", "", "", "", &format!("x-oss-date:{date}\n"), "/"),
         );
         assert_eq!(auth, expected);
     }
@@ -750,12 +757,19 @@ mod tests {
         assert!(req.request_line.contains("delimiter=/"));
         assert!(req.request_line.contains("max-keys=100"));
         let auth = req.header("Authorization").unwrap();
-        let date = req.header("Date").unwrap();
+        let date = req.header("x-oss-date").unwrap();
         let resource =
             sign::canonicalized_resource("b1", None, &[("delimiter", "/"), ("max-keys", "100")]);
         let expected = sign::authorization(
             &AliyunCredential::new("test-ak", "test-sk").unwrap(),
-            &sign::string_to_sign("GET", "", "", date, "", &resource),
+            &sign::string_to_sign(
+                "GET",
+                "",
+                "",
+                "",
+                &format!("x-oss-date:{date}\n"),
+                &resource,
+            ),
         );
         assert_eq!(auth, expected);
     }
@@ -774,11 +788,18 @@ mod tests {
             req.request_line
         );
         let auth = req.header("Authorization").unwrap();
-        let date = req.header("Date").unwrap();
+        let date = req.header("x-oss-date").unwrap();
         let resource = sign::canonicalized_resource("b1", Some("a/b"), &[]);
         let expected = sign::authorization(
             &AliyunCredential::new("test-ak", "test-sk").unwrap(),
-            &sign::string_to_sign("DELETE", "", "", date, "", &resource),
+            &sign::string_to_sign(
+                "DELETE",
+                "",
+                "",
+                "",
+                &format!("x-oss-date:{date}\n"),
+                &resource,
+            ),
         );
         assert_eq!(auth, expected);
     }
