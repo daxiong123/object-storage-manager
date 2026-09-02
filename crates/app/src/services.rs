@@ -15,6 +15,7 @@ use std::sync::{Mutex, MutexGuard};
 use object_storage_core::{StorageError, StorageProvider};
 use object_storage_domain::{Account, Bucket, ListObjectsRequest, ObjectPage, ProviderKind};
 use object_storage_persistence::default_db_path;
+use object_storage_qiniu::QiniuProvider;
 use tokio::runtime::Runtime;
 
 use crate::account_service::{AccountError, AccountService};
@@ -31,15 +32,28 @@ pub enum AppServicesError {
     Runtime(String),
 }
 
+/// 会话内 Secret 缓存条目：仅保留最近使用账号的一条 SK。
+/// 不落盘、不进日志；切换账号（另一个 id 首次使用）时置换淘汰。
+struct CachedSecret {
+    account_id: String,
+    secret_key: String,
+}
+
 /// 组装好的应用服务。UI 以 `Arc<AppServices>` 共享，每个后台任务克隆一份 Arc。
 ///
 /// 线程模型：`AccountService` 内含 rusqlite `Connection`（内部 RefCell，非 Sync），
 /// 而 gpui 后台任务要求 `Send + Sync` 的捕获值，故连接统一收进 `Mutex`——
 /// 同一时刻至多一个后台线程使用数据库/钥匙串，锁毒化（持锁线程 panic）时
 /// 直接 panic 响报，绝不静默吞掉（Fail Fast）。
+///
+/// 钥匙串授权体验：provider 构建优先用会话缓存里的 SK（`cached_secret`），
+/// 只有「选中账号后的第一次操作」才会触碰钥匙串（可能弹授权）；后续切换空间/
+/// 翻页/下载全部走缓存，不再弹窗。缓存锁与账号锁永不嵌套获取。
 pub struct AppServices {
     accounts: Mutex<AccountService>,
     runtime: Runtime,
+    /// 单条 SK 会话缓存（设计见类型注释与本方法族文档）
+    cached_secret: Mutex<Option<CachedSecret>>,
 }
 
 impl AppServices {
@@ -54,6 +68,7 @@ impl AppServices {
         Ok(Self {
             accounts: Mutex::new(AccountService::open(db_path)?),
             runtime: Runtime::new().map_err(|e| AppServicesError::Runtime(e.to_string()))?,
+            cached_secret: Mutex::new(None),
         })
     }
 
@@ -62,6 +77,50 @@ impl AppServices {
         self.accounts
             .lock()
             .expect("AccountService 锁已毒化：持锁线程曾 panic，数据库状态不可信")
+    }
+
+    /// 锁定 SK 缓存。毒化即 panic（同上）。
+    fn lock_cached_secret(&self) -> MutexGuard<'_, Option<CachedSecret>> {
+        self.cached_secret
+            .lock()
+            .expect("Secret 缓存锁已毒化：持锁线程曾 panic")
+    }
+
+    /// 构建可用的 Provider：优先用会话缓存的 SK（不碰钥匙串）；未命中才现取
+    /// 钥匙串（唯一可能弹授权的位置：选中账号后的第一次操作）并写入缓存。
+    ///
+    /// 缓存淘汰：单条置换——另一个账号首次使用即覆盖旧 SK。账号被删除后缓存
+    /// 条目可能仍在内存，但任何使用都会因元数据缺失而 NotFound（不会静默复活）。
+    fn build_provider(
+        &self,
+        account_id: &str,
+    ) -> Result<(Account, QiniuProvider), AppServicesError> {
+        // 1) 缓存命中：锁即取即放（永不与账号锁嵌套）
+        let cached = {
+            let cache = self.lock_cached_secret();
+            cache
+                .as_ref()
+                .filter(|c| c.account_id == account_id)
+                .map(|c| c.secret_key.clone())
+        };
+        if let Some(secret) = cached {
+            return Ok(self
+                .lock_accounts()
+                .build_provider_with_secret(account_id, secret)?);
+        }
+
+        // 2) 未命中：SQLite 校验 + 钥匙串现取（可能弹授权，每账号每会话至多一次）
+        let secret = self.lock_accounts().load_secret(account_id)?;
+        let result = self
+            .lock_accounts()
+            .build_provider_with_secret(account_id, secret.clone())?;
+
+        // 3) 写缓存（单条置换）
+        *self.lock_cached_secret() = Some(CachedSecret {
+            account_id: account_id.to_string(),
+            secret_key: secret,
+        });
+        Ok(result)
     }
 
     /// 全部账号元数据（不含 Secret）。
@@ -82,9 +141,9 @@ impl AppServices {
             .add(name, ProviderKind::Qiniu, access_key, secret_key)?)
     }
 
-    /// 列举某账号的全部 Bucket（Keychain 取 SK → 构建 provider → 请求）。
+    /// 列举某账号的全部 Bucket（首次触碰钥匙串可能弹授权；之后走会话缓存）。
     pub fn list_buckets(&self, account_id: &str) -> Result<Vec<Bucket>, AppServicesError> {
-        let (_, provider) = self.lock_accounts().build_provider(account_id)?;
+        let (_, provider) = self.build_provider(account_id)?;
         Ok(self.runtime.block_on(provider.list_buckets())?)
     }
 
@@ -94,7 +153,7 @@ impl AppServices {
         account_id: &str,
         request: ListObjectsRequest,
     ) -> Result<ObjectPage, AppServicesError> {
-        let (_, provider) = self.lock_accounts().build_provider(account_id)?;
+        let (_, provider) = self.build_provider(account_id)?;
         Ok(self.runtime.block_on(provider.list_objects(request))?)
     }
 
@@ -110,7 +169,7 @@ impl AppServices {
         key: &str,
         dest: &Path,
     ) -> Result<u64, AppServicesError> {
-        let (_, provider) = self.lock_accounts().build_provider(account_id)?;
+        let (_, provider) = self.build_provider(account_id)?;
         Ok(self
             .runtime
             .block_on(provider.download_object_to_file(bucket, key, dest))?)
@@ -120,6 +179,7 @@ impl AppServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_storage_macos::KeychainCredentialStore;
     use std::fs;
     use std::path::PathBuf;
 
@@ -177,6 +237,48 @@ mod tests {
 
         // 测试写入了真实 Keychain，自清理（失败时残留由 account_service 测试注释说明）
         services.lock_accounts().delete(&account.id).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 会话缓存：同一账号第二次构建 provider 不再触碰钥匙串——
+    /// 直接删掉钥匙串条目后仍能构建成功；切换账号后缓存被置换（旧账号回落
+    /// 到钥匙串，条目已删则显式报 MissingSecret，不静默）。
+    #[test]
+    fn provider_build_reuses_cached_secret_and_evicts_on_switch() {
+        let (db, dir) = temp_db("cachefn");
+        let services = AppServices::open_at(&db).unwrap();
+        let account = services
+            .add_qiniu_account("缓存测试", "ak-cache", "sk-cache-123")
+            .unwrap();
+
+        // 第一次构建：现取钥匙串并写缓存
+        let (_, p1) = services.build_provider(&account.id).unwrap();
+        assert_eq!(p1.kind(), ProviderKind::Qiniu);
+
+        // 模拟“钥匙串不再可用”：绕过 service 直接删条目
+        KeychainCredentialStore::new().delete(&account.id).unwrap();
+
+        // 第二次构建：命中缓存，仍成功（没碰钥匙串）
+        let (_, p2) = services.build_provider(&account.id).unwrap();
+        assert_eq!(p2.kind(), ProviderKind::Qiniu);
+
+        // 切到另一个账号：缓存置换。旧账号此后必须重新读钥匙串——
+        // 而它的条目已被删，构建应显式报 MissingSecret
+        let account2 = services
+            .add_qiniu_account("另一个", "ak-cache-2", "sk-cache-456")
+            .unwrap();
+        let (_, p3) = services.build_provider(&account2.id).unwrap();
+        assert_eq!(p3.kind(), ProviderKind::Qiniu);
+        let err = services.build_provider(&account.id).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppServicesError::Account(AccountError::MissingSecret(_))
+            ),
+            "缓存置换后旧账号应回落到钥匙串并报 MissingSecret，实际 {err:?}"
+        );
+
+        services.lock_accounts().delete(&account2.id).unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 }

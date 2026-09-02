@@ -136,24 +136,55 @@ impl AccountService {
         Ok(())
     }
 
-    /// 取账号及其七牛凭证。Secret 每次从 Keychain 现取：不缓存、不落盘、不进日志
+    /// 取账号 Secret（每次从 Keychain 现取；本层不做缓存——会话级缓存在
+    /// AppServices 编排层，见其 `cached_secret` 字段注释）。
+    /// 先校验元数据：未知账号在这里就 NotFound，不触碰钥匙串。
+    pub fn load_secret(&self, id: &str) -> Result<String, AccountError> {
+        if self.repo.get(id)?.is_none() {
+            return Err(AccountError::NotFound(id.to_string()));
+        }
+        self.keychain
+            .load(id)?
+            .ok_or_else(|| AccountError::MissingSecret(id.to_string()))
+    }
+
+    /// 取账号及其七牛凭证。Secret 每次从 Keychain 现取：不落盘、不进日志
+    /// （会话内缓存见 AppServices；本层保持无状态）
     pub fn qiniu_credential(&self, id: &str) -> Result<(Account, QiniuCredential), AccountError> {
+        let secret = self.load_secret(id)?;
+        self.qiniu_credential_with_secret(id, secret)
+    }
+
+    /// 用调用方提供的 Secret 构建凭证（供 AppServices 会话缓存复用，避免
+    /// 重复触碰钥匙串）。Secret 来源不校验，格式校验交给 QiniuCredential::new
+    pub fn qiniu_credential_with_secret(
+        &self,
+        id: &str,
+        secret_key: String,
+    ) -> Result<(Account, QiniuCredential), AccountError> {
         let account = self
             .repo
             .get(id)?
             .ok_or_else(|| AccountError::NotFound(id.to_string()))?;
-        let secret = self
-            .keychain
-            .load(id)?
-            .ok_or_else(|| AccountError::MissingSecret(id.to_string()))?;
-        let credential = QiniuCredential::new(&account.access_key, &secret)
+        let credential = QiniuCredential::new(&account.access_key, &secret_key)
             .map_err(|e| AccountError::InvalidInput(e.to_string()))?;
         Ok((account, credential))
     }
 
-    /// 构造可用的 Provider（当前仅七牛；阿里云待 provider-aliyun 实装）
+    /// 构造可用的 Provider（当前仅七牛；阿里云待 provider-aliyun 实装）。
+    /// Secret 每次从 Keychain 现取。
     pub fn build_provider(&self, id: &str) -> Result<(Account, QiniuProvider), AccountError> {
-        let (account, credential) = self.qiniu_credential(id)?;
+        let secret = self.load_secret(id)?;
+        self.build_provider_with_secret(id, secret)
+    }
+
+    /// 用调用方提供的 Secret 构造 Provider（供 AppServices 会话缓存复用）
+    pub fn build_provider_with_secret(
+        &self,
+        id: &str,
+        secret_key: String,
+    ) -> Result<(Account, QiniuProvider), AccountError> {
+        let (account, credential) = self.qiniu_credential_with_secret(id, secret_key)?;
         if account.provider != ProviderKind::Qiniu {
             return Err(AccountError::InvalidInput(format!(
                 "{} Provider 尚未实现",
