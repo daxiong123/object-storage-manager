@@ -80,6 +80,13 @@ struct DownloadMessage {
     text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorTab {
+    Preview,
+    Details,
+    Metadata,
+}
+
 pub struct WorkspaceView {
     focus_handle: FocusHandle,
     sidebar_collapsed: bool,
@@ -127,6 +134,7 @@ pub struct WorkspaceView {
     /// 文本预览内容；编辑器使用 GPUI InputState，不自建 WebView
     preview_text: Option<String>,
     text_editor: Option<Entity<InputState>>,
+    inspector_tab: InspectorTab,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
@@ -229,6 +237,7 @@ impl WorkspaceView {
             preview_path: None,
             preview_text: None,
             text_editor: None,
+            inspector_tab: InspectorTab::Preview,
             delete_prompt_open: false,
             download_message: None,
             engine: Arc::clone(&engine),
@@ -2213,29 +2222,59 @@ impl WorkspaceView {
                     .border_color(theme.border)
                     .child(
                         div()
+                            .id("inspector-tab-preview")
                             .flex_1()
                             .px_2()
                             .py_2()
                             .text_size(px(12.))
-                            .text_color(theme.foreground)
+                            .text_color(if self.inspector_tab == InspectorTab::Preview {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .hover(|tab| tab.bg(theme.sidebar_accent))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_tab = InspectorTab::Preview;
+                                cx.notify();
+                            }))
                             .child("预览"),
                     )
                     .child(
                         div()
+                            .id("inspector-tab-details")
                             .flex_1()
                             .px_2()
                             .py_2()
                             .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
+                            .text_color(if self.inspector_tab == InspectorTab::Details {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .hover(|tab| tab.bg(theme.sidebar_accent))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_tab = InspectorTab::Details;
+                                cx.notify();
+                            }))
                             .child("详情"),
                     )
                     .child(
                         div()
+                            .id("inspector-tab-metadata")
                             .flex_1()
                             .px_2()
                             .py_2()
                             .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
+                            .text_color(if self.inspector_tab == InspectorTab::Metadata {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .hover(|tab| tab.bg(theme.sidebar_accent))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_tab = InspectorTab::Metadata;
+                                cx.notify();
+                            }))
                             .child("元数据"),
                     ),
             );
