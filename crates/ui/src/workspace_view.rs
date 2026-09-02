@@ -15,6 +15,11 @@
 //! 串台防护：每次异步加载携带自增代号（generation）。用户快速切换账号/桶时，
 //! 过期任务的结果因代号不匹配被丢弃，不会覆盖新选中项的状态。
 
+// 本文件 handle_close_window 里的 objc msg_send! 宏内部会检查
+// `cfg(feature = "cargo-clippy")`（宏兼容性开关），在 rustc 1.80+ 的
+// check-cfg 机制下产生已知误报警告；就地静音，细节同 macos/src/panel.rs。
+#![allow(unexpected_cfgs)]
+
 use std::sync::Arc;
 
 use gpui::{
@@ -33,8 +38,11 @@ use object_storage_app::AppServices;
 use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
 
 use crate::account_modal::AddAccountModal;
-use crate::actions::{AddAccount, CloseWindow, OpenCommandPalette, ToggleInspector, ToggleSidebar};
+use crate::actions::{
+    AddAccount, CloseWindow, DownloadObject, OpenCommandPalette, ToggleInspector, ToggleSidebar,
+};
 use crate::command_palette::CommandPaletteView;
+use object_storage_macos::run_save_panel;
 
 /// 左栏折叠后的图标栏宽度（规范：44px Icon Rail）。
 const RAIL_WIDTH: Pixels = px(44.);
@@ -55,6 +63,13 @@ enum AsyncState {
     Idle,
     Loading,
     Failed(String),
+}
+
+/// Inspector 底部的下载结果提示（成功/失败一次一笇）
+#[derive(Debug, Clone)]
+struct DownloadMessage {
+    is_error: bool,
+    text: String,
 }
 
 pub struct WorkspaceView {
@@ -91,6 +106,10 @@ pub struct WorkspaceView {
     current_prefix: Option<String>,
     /// 检查器选中的对象 Key（entries 内查找）
     selected_object_key: Option<String>,
+    /// 对象下载进行中（Inspector 按钮置灰防重入）
+    downloading: bool,
+    /// 最近一次下载结果提示（成功/失败；失败用 danger 色）
+    download_message: Option<DownloadMessage>,
 
     // ---- 串台防护：账号/对象各自的自增代号 ----
     bucket_gen: u64,
@@ -118,6 +137,8 @@ impl WorkspaceView {
             next_marker: None,
             current_prefix: None,
             selected_object_key: None,
+            downloading: false,
+            download_message: None,
             bucket_gen: 0,
             object_gen: 0,
         };
@@ -222,6 +243,7 @@ impl WorkspaceView {
         self.next_marker = None;
         self.current_prefix = None;
         self.selected_object_key = None;
+        self.download_message = None;
     }
 
     /// 从头（当前前缀的第一页）重新加载对象。
@@ -229,6 +251,7 @@ impl WorkspaceView {
         self.entries.clear();
         self.next_marker = None;
         self.selected_object_key = None;
+        self.download_message = None;
         self.objects_state = AsyncState::Loading;
         cx.notify();
         self.request_objects(None, cx);
@@ -328,6 +351,74 @@ impl WorkspaceView {
             ListingEntry::Object(o) if o.key == *key => Some(o),
             _ => None,
         })
+    }
+
+    /// 下载选中对象：主线程弹原生「存储为」拿目标路径 → 后台执行
+    /// AppServices 下载（阻塞式，见 agents.md §5 线程模型）。用户取消 = 无操作。
+    fn start_object_download(&mut self, cx: &mut Context<Self>) {
+        if self.downloading {
+            return; // 防重入
+        }
+        let Some(object) = self.selected_cloud_object().cloned() else {
+            return; // 未选中对象：无操作（按钮本应置灰）
+        };
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+
+        // 主线程弹 NSSavePanel；取消是正常流程不是错误，静默返回
+        let Some(dest) = run_save_panel(display_name(&object.key)) else {
+            return;
+        };
+
+        self.downloading = true;
+        self.download_message = None;
+        cx.notify();
+
+        let services = Arc::clone(&self.services);
+        let dest_bg = dest.clone();
+        let key_bg = object.key.clone();
+        cx.spawn(async move |this, cx| {
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        services.download_object(&account_id, &bucket, &key_bg, &dest_bg)
+                    })
+                    .await;
+            this.update(cx, |this, cx| {
+                this.downloading = false;
+                this.download_message = Some(match result {
+                    Ok(bytes) => DownloadMessage {
+                        is_error: false,
+                        text: format!(
+                            "已下载 {}（{}）→ {}",
+                            display_name(&object.key),
+                            format_size(bytes),
+                            dest.display()
+                        ),
+                    },
+                    Err(e) => DownloadMessage {
+                        is_error: true,
+                        text: e.to_string(),
+                    },
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn handle_download_object(
+        &mut self,
+        _: &DownloadObject,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_object_download(cx);
     }
 
     // ---- 模态：添加账号 ----
@@ -1129,7 +1220,7 @@ impl WorkspaceView {
     }
 
     /// 右侧 Inspector：选中对象的元数据；未选中时显示占位破折号。
-    fn render_inspector(&self, theme: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let rows: Vec<(&'static str, String)> = match self.selected_cloud_object() {
             Some(object) => vec![
                 ("名称", display_name(&object.key).to_string()),
@@ -1177,6 +1268,43 @@ impl WorkspaceView {
                     .text_size(px(12.))
                     .child(div().text_color(theme.muted_foreground).child(label))
                     .child(div().min_w_0().truncate().child(value)),
+            );
+        }
+
+        // 下载入口（选中对象时可用；下载中置灰）+ 最近一次结果提示
+        if self.selected_cloud_object().is_some() {
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        Button::new("download-object")
+                            .label(if self.downloading {
+                                "下载中…"
+                            } else {
+                                "下载…"
+                            })
+                            .disabled(self.downloading)
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_object_download(cx))),
+                    ),
+            );
+        }
+        if let Some(message) = &self.download_message {
+            let color = if message.is_error {
+                theme.danger
+            } else {
+                theme.muted_foreground
+            };
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(12.))
+                    .text_color(color)
+                    .child(message.text.clone()),
             );
         }
         panel
@@ -1249,6 +1377,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_close_window))
             .on_action(cx.listener(Self::handle_open_command_palette))
             .on_action(cx.listener(Self::handle_open_add_modal))
+            .on_action(cx.listener(Self::handle_download_object))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))

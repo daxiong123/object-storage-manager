@@ -4,5 +4,7 @@
 //! 原则：GPUI 负责主 UI，macOS Framework 负责系统级能力（agents.md §3/§5）。
 
 pub mod keychain;
+pub mod panel;
 
 pub use keychain::{KEYCHAIN_SERVICE, KeychainCredentialStore, KeychainError};
+pub use panel::run_save_panel;

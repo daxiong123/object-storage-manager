@@ -5,8 +5,8 @@ use object_storage_app::AppServices;
 use object_storage_ui::{self as ui, WorkspaceView};
 use std::sync::Arc;
 use ui::actions::{
-    CloseWindow, Copy, Cut, OpenCommandPalette, Paste, Quit, Redo, SelectAll, ToggleInspector,
-    ToggleSidebar, Undo,
+    CloseWindow, Copy, Cut, DownloadObject, OpenCommandPalette, Paste, Quit, Redo, SelectAll,
+    ToggleInspector, ToggleSidebar, Undo,
 };
 
 /// macOS 应用菜单（规范 §11/§22：与快捷键共享同一 Action；§26：⌘ 符号随键位自动显示）。
@@ -42,6 +42,10 @@ fn app_menus() -> Vec<Menu> {
                 MenuItem::action("切换边栏", ToggleSidebar),
                 MenuItem::action("切换检查器", ToggleInspector),
             ],
+        },
+        Menu {
+            name: "对象".into(),
+            items: vec![MenuItem::action("下载…", DownloadObject)],
         },
         Menu {
             name: "窗口".into(),

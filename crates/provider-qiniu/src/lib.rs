@@ -12,14 +12,17 @@
 
 mod sign;
 
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures_util::StreamExt;
 use object_storage_core::{StorageError, StorageProvider};
 use object_storage_domain::{
     Bucket, CloudObject, ListObjectsRequest, ListingEntry, ObjectPage, ProviderKind,
 };
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 
 pub use sign::QiniuCredential;
 
@@ -30,9 +33,14 @@ const DEFAULT_RSF_ENDPOINT: &str = "https://rsf.qbox.me";
 
 pub struct QiniuProvider {
     http: reqwest::Client,
+    /// 下载专用客户端：不带总超时（30s 总超时会据断大文件下载）；
+    /// 连接超时仍在。挂死风险由后续传输引擎接管。
+    download_http: reqwest::Client,
     cred: QiniuCredential,
     uc_base: reqwest::Url,
     rsf_base: reqwest::Url,
+    /// 下载域名协议（生产恒为 https；测试指向本地 mock 时切 http）
+    download_use_https: bool,
 }
 
 impl QiniuProvider {
@@ -58,11 +66,20 @@ impl QiniuProvider {
             .use_rustls_tls()
             .build()
             .map_err(|e| StorageError::Network(format!("HTTP Client 构建失败: {e}")))?;
+        let download_http = reqwest::Client::builder()
+            .user_agent(concat!("CloudStorage/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(10))
+            // 注意：不设总超时——下载可能持续数十分钟；读阻塞由传输引擎处理
+            .use_rustls_tls()
+            .build()
+            .map_err(|e| StorageError::Network(format!("HTTP Client 构建失败: {e}")))?;
         Ok(Self {
             http,
+            download_http,
             cred,
             uc_base,
             rsf_base,
+            download_use_https: true,
         })
     }
 
@@ -76,6 +93,59 @@ impl QiniuProvider {
         self.rsf_base
             .join(path)
             .map_err(|e| StorageError::InvalidInput(format!("URL 拼接失败: {e}")))
+    }
+
+    /// 测试专用：下载域名走 http（本地 mock 无 TLS）
+    #[cfg(test)]
+    fn set_download_use_https(&mut self, use_https: bool) {
+        self.download_use_https = use_https;
+    }
+
+    fn download_scheme(&self) -> &'static str {
+        if self.download_use_https {
+            "https://"
+        } else {
+            "http://"
+        }
+    }
+
+    /// 查询空间绑定的下载域名。UC `GET /v2/domains?tbl=<bucket>`，V2 签名，
+    /// 响应为域名字符串数组（逐字节核对官方 qiniu-apis 0.2.4；旧版
+    /// `v6/domain/list` 已废弃，勿用）。
+    async fn bucket_domains(&self, bucket: &str) -> Result<Vec<String>, StorageError> {
+        let mut url = self.uc_url("v2/domains")?;
+        url.set_query(Some(&format!(
+            "tbl={}",
+            sign::percent_encode_query_value(bucket)
+        )));
+        let auth = sign::authorization_v2_for_url(&self.cred, "GET", &url);
+        let resp = self
+            .http
+            .get(url)
+            .header(AUTHORIZATION, auth)
+            .send()
+            .await
+            .map_err(|e| StorageError::Network(format!("bucket_domains: {e}")))?;
+        let resp = self.check_status(resp, "bucket_domains").await?;
+        let text = text_or_invalid(resp, "bucket_domains").await?;
+        let domains: Vec<String> = serde_json::from_str(&text).map_err(|e| {
+            StorageError::InvalidResponse(format!(
+                "bucket_domains: {e}; body={}",
+                truncate(&text, 500)
+            ))
+        })?;
+        Ok(domains)
+    }
+
+    /// 下载失败时删除半成品文件；删除也失败则并入错误信息（不静默吞掉）
+    async fn download_cleanup_failed(dest: &Path, cause: String) -> StorageError {
+        match tokio::fs::remove_file(dest).await {
+            Ok(()) => StorageError::Io(format!("download_object: {cause}；已清理半成品文件")),
+            Err(rm) => StorageError::Io(format!(
+                "download_object: {cause}；且清理半成品文件失败: {rm}（残留：{}）",
+                dest.display()
+            )),
+        }
     }
 
     /// 统一的非 2xx 错误映射（七牛错误响应体为 `{"error": "..."}`，
@@ -265,6 +335,90 @@ impl StorageProvider for QiniuProvider {
             next_marker: parsed.marker.filter(|m| !m.is_empty()),
             entries,
         })
+    }
+
+    async fn download_object_to_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        dest: &Path,
+    ) -> Result<u64, StorageError> {
+        if bucket.is_empty() {
+            return Err(StorageError::InvalidInput("bucket 不能为空".into()));
+        }
+        if key.is_empty() {
+            return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+
+        // 下载域名单独请求 UC（不缓存：域名绑定可能随时变更）
+        let domains = self.bucket_domains(bucket).await?;
+        let Some(domain) = domains.first().filter(|d| !d.is_empty()) else {
+            return Err(StorageError::InvalidResponse(format!(
+                "download_object: 空间 {bucket} 未绑定可用下载域名（请在七牛控制台绑定 CDN/测试域名）"
+            )));
+        };
+
+        // 下载 URL（官方 SDK 对公有/私有空间都签名，这里同样无条件签）：
+        //   {scheme}://{domain}/{path 转义}?e=<deadline>&token=<AK:sig>
+        // 签名数据 = 含 scheme://host 的完整 URL 串（截至 e=，不含 token），
+        // 先 parse 得到 reqwest 实际发送的规范化 URL，再对 `Url::as_str()` 签名，
+        // 保证「签名串 == 发送串」逐字节一致。
+        let deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| StorageError::InvalidInput(format!("download_object: 系统时间异常: {e}")))?
+            .as_secs()
+            + 3600;
+        let url: reqwest::Url = format!(
+            "{}{}/{}?e={deadline}",
+            self.download_scheme(),
+            domain,
+            sign::percent_encode_path_value(key)
+        )
+        .parse()
+        .map_err(|e| {
+            StorageError::InvalidInput(format!("download_object: 下载 URL 不合法: {e}"))
+        })?;
+        let token = sign::sign_token(&self.cred, url.as_str().as_bytes());
+        let mut signed_url = url.clone();
+        // token 里的 `:` 与 base64 padding `=` 都是 query 合法字符，set_query 原样保留
+        signed_url.set_query(Some(&format!("e={deadline}&token={token}")));
+
+        // 下载专用客户端不带总超时（大文件）
+        let resp = self
+            .download_http
+            .get(signed_url)
+            .send()
+            .await
+            .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
+        let resp = self.check_status(resp, "download_object").await?;
+
+        // 流式落盘：分块写，不驻留整文件（内存红线，agents.md §2）。
+        // 中途失败则清理半成品文件后响报（错误永不静默）。
+        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
+            StorageError::Io(format!(
+                "download_object: 创建本地文件 {} 失败: {e}",
+                dest.display()
+            ))
+        })?;
+        let mut total: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                StorageError::Network(format!("download_object: 接收数据中断: {e}"))
+            })?;
+            if let Err(e) = file.write_all(&chunk).await {
+                return Err(
+                    Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
+                );
+            }
+            total += chunk.len() as u64;
+        }
+        if let Err(e) = file.flush().await {
+            return Err(
+                Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
+            );
+        }
+        Ok(total)
     }
 }
 
@@ -514,5 +668,139 @@ mod tests {
                 println!("  {entry:?}");
             }
         }
+    }
+
+    /// 下载全链路（mock）：域名接口返回下载服务器地址 → 下载 URL path 转义、
+    /// e/token 参数齐全且无 Authorization 头 → 分块落盘字节数与内容一致。
+    #[test]
+    fn download_to_file_streams_and_signs_url() {
+        let body: &str = "hello 下载内容 body";
+        // 先绑下载源服务器，才能把它写进域名接口的响应体（'static 约束用 Box::leak）
+        let (addr_b, captured_b) = spawn_mock(200, body);
+        let domains_body: &str =
+            Box::leak(format!("[\"127.0.0.1:{}\"]", addr_b.port()).into_boxed_str());
+        let (addr_a, captured_a) = spawn_mock(200, domains_body);
+
+        let uc = format!("http://{addr_a}");
+        let rsf = format!("http://{addr_b}");
+        let cred = QiniuCredential::new("test-ak", "test-sk").unwrap();
+        let mut provider = QiniuProvider::with_endpoints(cred, &uc, &rsf).unwrap();
+        provider.set_download_use_https(false);
+
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-dl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("b c.txt");
+
+        let (total, dl_req) = tokio().block_on(async {
+            let total = provider
+                .download_object_to_file("b1", "a/b c.txt", &dest)
+                .await
+                .unwrap();
+            (total, captured_b.lock().unwrap().take().unwrap())
+        });
+
+        assert_eq!(total, body.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), body.as_bytes());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let e_value: u64 = dl_req
+            .request_line
+            .split("?e=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .and_then(|v| v.parse().ok())
+            .expect("e 参数必须存在且为数字");
+        assert!(
+            e_value > now && e_value <= now + 7200,
+            "e 应在 [now, now+3600] 附近，实际 {e_value} vs {now}"
+        );
+
+        assert!(
+            dl_req.request_line.starts_with("GET /a/b%20c.txt?e="),
+            "path 必须按 path 规则转义且保留 /，实际: {}",
+            dl_req.request_line
+        );
+        assert!(
+            dl_req.request_line.contains("&token=test-ak:"),
+            "token 必须在 URL 上（下载签名不走 Authorization 头），实际: {}",
+            dl_req.request_line
+        );
+        assert!(
+            dl_req.header("Authorization").is_none(),
+            "下载请求不应携带 Authorization 头"
+        );
+
+        // 域名请求：UC V2 签名走 Authorization 头
+        let req_a = captured_a.lock().unwrap().take().unwrap();
+        assert!(req_a.request_line.starts_with("GET /v2/domains?tbl=b1"));
+        assert!(
+            req_a
+                .header("Authorization")
+                .expect("域名请求必须 V2 签名")
+                .starts_with("Qiniu test-ak:")
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 对象不存在（612）：先于落盘报错，不产生半成品文件
+    #[test]
+    fn download_missing_object_fails_without_partial_file() {
+        let (addr_b, _captured_b) = spawn_mock(612, r#"{"error":"no such file"}"#);
+        let domains_body: &str =
+            Box::leak(format!("[\"127.0.0.1:{}\"]", addr_b.port()).into_boxed_str());
+        let (addr_a, _captured_a) = spawn_mock(200, domains_body);
+
+        let uc = format!("http://{addr_a}");
+        let rsf = format!("http://{addr_b}");
+        let cred = QiniuCredential::new("test-ak", "test-sk").unwrap();
+        let mut provider = QiniuProvider::with_endpoints(cred, &uc, &rsf).unwrap();
+        provider.set_download_use_https(false);
+
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-dl404-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.bin");
+
+        let err = tokio()
+            .block_on(provider.download_object_to_file("b1", "k", &dest))
+            .unwrap_err();
+        match &err {
+            StorageError::Api { status, message } => {
+                assert_eq!(*status, 612);
+                assert!(message.contains("no such file"), "实际: {message}");
+            }
+            other => panic!("应报 Api 错误，实际 {other:?}"),
+        }
+        assert!(!dest.exists(), "612 时不应创建本地文件");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn download_rejects_empty_key_before_network() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        let err = tokio()
+            .block_on(provider.download_object_to_file(
+                "b1",
+                "",
+                &std::env::temp_dir().join("nope"),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
     }
 }

@@ -97,6 +97,24 @@ impl AppServices {
         let (_, provider) = self.lock_accounts().build_provider(account_id)?;
         Ok(self.runtime.block_on(provider.list_objects(request))?)
     }
+
+    /// 下载对象到本地文件，返回写入的字节数。
+    ///
+    /// 注意：先 `build_provider`（拿完 provider 即释放数据库锁），再阻塞在
+    /// 下载上——长下载绝不持有 `Mutex<AccountService>`，否则会卡住所有
+    /// 其它后台任务（翻页/账号管理）。
+    pub fn download_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        dest: &Path,
+    ) -> Result<u64, AppServicesError> {
+        let (_, provider) = self.lock_accounts().build_provider(account_id)?;
+        Ok(self
+            .runtime
+            .block_on(provider.download_object_to_file(bucket, key, dest))?)
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +149,16 @@ mod tests {
             matches!(err, AppServicesError::Account(AccountError::NotFound(_))),
             "未知账号应报 NotFound，实际 {err:?}"
         );
+
+        // 下载同样：未知账号在碰网络前就报 NotFound
+        let err = services
+            .download_object("no-such-account", "b", "k", &dir.join("out.bin"))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppServicesError::Account(AccountError::NotFound(_))),
+            "下载未知账号应报 NotFound，实际 {err:?}"
+        );
+        assert!(!dir.join("out.bin").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

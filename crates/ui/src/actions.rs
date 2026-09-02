@@ -15,6 +15,8 @@ actions!(
         OpenCommandPalette,
         // 添加账号：侧栏「+ 添加账号」入口与命令面板共享（规范 §11/§22）
         AddAccount,
+        // 下载选中对象：Inspector 按钮 / 「对象」菜单 / 命令面板三入口共享
+        DownloadObject,
     ]
 );
 

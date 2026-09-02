@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+objc = "0.2"
 security-framework = { workspace = true }
 security-framework-sys = { workspace = true }
 thiserror = { workspace = true }

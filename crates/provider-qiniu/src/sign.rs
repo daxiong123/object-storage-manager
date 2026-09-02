@@ -63,8 +63,8 @@ impl std::fmt::Debug for QiniuCredential {
     }
 }
 
-/// HMAC-SHA1 → `AK:sig`
-fn sign_token(cred: &QiniuCredential, sign_data: &[u8]) -> String {
+/// HMAC-SHA1 → `AK:sig`（下载 URL 签名与管理 API V2 签名共用本原语）
+pub(crate) fn sign_token(cred: &QiniuCredential, sign_data: &[u8]) -> String {
     let mut mac =
         HmacSha1::new_from_slice(cred.secret_key.as_bytes()).expect("HMAC-SHA1 接受任意长度 key");
     mac.update(sign_data);
@@ -183,6 +183,29 @@ pub(crate) fn percent_encode_query_value(value: &str) -> String {
     out
 }
 
+/// 下载 URL path 编码：保留 unreserved + sub-delims + `:` `@` `/`，其余 `%XX`。
+///
+/// 与官方 SDK `url_escape::encode_path_to_string` 的 path 保留表一致：
+/// 逃逸 C0/DEL/空格/`"`/`#`/`%`/`<`/`>`/`?`/`[`/`\`/`]`/`^`/`` ` ``/`{`/`|`/`}`
+/// 及全部非 ASCII。`/` 必须保留（它承载 Key 的目录结构），`%` 必须逃逸
+/// （否则无法区分字面 `%` 与已有百分号编码，服务端解码即错）。
+pub(crate) fn percent_encode_path_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &b in value.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'.' | b'_' | b'~'
+            // sub-delims + ':' '@'（URL path 合法字符）
+            | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+            | b':' | b'@'
+            // 目录分隔符
+            | b'/' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +300,35 @@ mod tests {
         assert_eq!(percent_encode_query_value("a b"), "a%20b");
         assert_eq!(percent_encode_query_value("旅行"), "%E6%97%85%E8%A1%8C");
         assert_eq!(percent_encode_query_value("a+b~c_d.e-f"), "a%2Bb~c_d.e-f");
+    }
+
+    /// 下载 token 向量：与官方 SDK `sign_download_url` 同构——对**完整 URL 串**
+    /// （含 scheme://host、`?e=<deadline>`，不含 token 本身）做 HMAC-SHA1。
+    /// 期望值由独立脚本按 HMAC-SHA1 + urlsafe base64（带 padding）预计算。
+    #[test]
+    fn download_token_signs_full_url() {
+        let cred = QiniuCredential::new("abcdefghklmnopq", "1234567890").unwrap();
+        let url = "http://example.com/a/b%20c.txt?e=1700000000";
+        assert_eq!(
+            sign_token(&cred, url.as_bytes()),
+            "abcdefghklmnopq:_Y86UaHhmnSGrIhrVvz-d0zOB78="
+        );
+    }
+
+    #[test]
+    fn path_encoding_keeps_structure_and_escapes_rest() {
+        // `/` 保留目录结构；空格/非 ASCII/% 必须逃逸
+        assert_eq!(
+            percent_encode_path_value("photos/2024/旅行 .txt"),
+            "photos/2024/%E6%97%85%E8%A1%8C%20.txt"
+        );
+        assert_eq!(percent_encode_path_value("100%.txt"), "100%25.txt");
+        assert_eq!(percent_encode_path_value("a#b?c.txt"), "a%23b%3Fc.txt");
+        // unreserved + sub-delims + : @ 原样保留（与官方 url_escape path 表一致）
+        assert_eq!(
+            percent_encode_path_value("a-._~!$&'()*+,;=:@b"),
+            "a-._~!$&'()*+,;=:@b"
+        );
     }
 
     #[test]

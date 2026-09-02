@@ -37,6 +37,10 @@ pub enum StorageError {
 
     #[error("无效输入: {0}")]
     InvalidInput(String),
+
+    /// 本地文件系统 IO 错误（下载落盘/上传读盘；非远端 API 错误）
+    #[error("本地 IO 错误: {0}")]
+    Io(String),
 }
 
 /// 对象存储 Provider 统一接口
@@ -59,6 +63,17 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: ListObjectsRequest,
     ) -> impl Future<Output = Result<ObjectPage, StorageError>> + Send;
+
+    /// 流式下载对象到本地文件，返回写入的字节数。
+    ///
+    /// 内存红线（agents.md §2）：分块写盘，**绝不把整个对象读进内存**。
+    /// 实现方按需覆盖本地文件（`dest` 已存在时截断重写）。
+    fn download_object_to_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        dest: &std::path::Path,
+    ) -> impl Future<Output = Result<u64, StorageError>> + Send;
 }
 
 #[cfg(test)]
