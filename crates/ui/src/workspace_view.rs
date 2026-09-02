@@ -2025,7 +2025,9 @@ impl WorkspaceView {
                             .when(selected, |row| row.bg(theme.accent))
                             .hover(|row| row.bg(theme.accent))
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                eprintln!("[preview] selected key={key}");
                                 this.selected_object_key = Some(key.clone());
+                                this.start_object_preview(cx);
                                 cx.notify();
                             }))
                             .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
