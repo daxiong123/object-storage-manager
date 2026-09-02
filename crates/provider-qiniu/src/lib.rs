@@ -1094,13 +1094,15 @@ mod tests {
         let (addr, captured) = spawn_mock(200, r#"["cdn.example.com"]"#);
         let provider = test_provider(addr);
         let url = tokio()
-            .block_on(provider.signed_get_url("b1", "a/b.png", 3600))
+            .block_on(provider.signed_get_url("b1", "a b/中文.png", 3600))
             .unwrap();
         assert!(
-            url.starts_with("https://cdn.example.com/a/b.png?e="),
+            url.starts_with("https://cdn.example.com/a%20b/%E4%B8%AD%E6%96%87.png?e="),
             "url={url}"
         );
         assert!(url.contains("&token=test-ak:"), "url={url}");
+        assert!(!url.contains(' '), "url={url}");
+        assert!(!url.contains("中文"), "url={url}");
         let req = captured.lock().unwrap().take().unwrap();
         assert!(
             req.request_line.starts_with("GET /v2/domains?tbl=b1 "),

@@ -79,10 +79,18 @@ enum AsyncState {
 }
 
 /// Inspector 底部的下载结果提示（成功/失败一次一笇）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DownloadMessage {
     is_error: bool,
     text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopyObjectUrlRequest {
+    account_id: String,
+    bucket: String,
+    key: String,
+    ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -890,21 +898,18 @@ impl WorkspaceView {
         if self.copying_url {
             return;
         }
-        let Some(object) = self.selected_cloud_object() else {
-            self.download_message = Some(DownloadMessage {
-                is_error: true,
-                text: "请先选中一个对象再复制链接".into(),
-            });
-            cx.notify();
-            return;
+        let request = match copy_object_url_request(
+            self.selected_account_id.as_deref(),
+            self.selected_bucket.as_deref(),
+            self.selected_cloud_object(),
+        ) {
+            Ok(request) => request,
+            Err(message) => {
+                self.download_message = Some(message);
+                cx.notify();
+                return;
+            }
         };
-        let Some(account_id) = self.selected_account_id.clone() else {
-            return;
-        };
-        let Some(bucket) = self.selected_bucket.clone() else {
-            return;
-        };
-        let key = object.key.clone();
         self.copying_url = true;
         self.download_message = None;
         cx.notify();
@@ -913,7 +918,12 @@ impl WorkspaceView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    services.signed_get_url(&account_id, &bucket, &key, SIGNED_URL_TTL_SECS)
+                    services.signed_get_url(
+                        &request.account_id,
+                        &request.bucket,
+                        &request.key,
+                        request.ttl_secs,
+                    )
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -3266,6 +3276,31 @@ impl Render for WorkspaceView {
     }
 }
 
+fn copy_object_url_request(
+    account_id: Option<&str>,
+    bucket: Option<&str>,
+    object: Option<&CloudObject>,
+) -> Result<CopyObjectUrlRequest, DownloadMessage> {
+    let Some(object) = object else {
+        return Err(DownloadMessage {
+            is_error: true,
+            text: "请先选中一个对象再复制链接".into(),
+        });
+    };
+    let (Some(account_id), Some(bucket)) = (account_id, bucket) else {
+        return Err(DownloadMessage {
+            is_error: true,
+            text: "请先选择账号和 Bucket 再复制链接".into(),
+        });
+    };
+    Ok(CopyObjectUrlRequest {
+        account_id: account_id.to_string(),
+        bucket: bucket.to_string(),
+        key: object.key.clone(),
+        ttl_secs: SIGNED_URL_TTL_SECS,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3355,5 +3390,39 @@ mod tests {
         assert_eq!(preview_kind("config.json"), PreviewKind::Text);
         assert_eq!(preview_kind("specs.pdf"), PreviewKind::System);
         assert_eq!(preview_kind("movie.mp4"), PreviewKind::System);
+    }
+
+    #[test]
+    fn copy_object_url_request_requires_selected_object() {
+        let err = copy_object_url_request(Some("account-1"), Some("bucket-1"), None).unwrap_err();
+        assert_eq!(
+            err,
+            DownloadMessage {
+                is_error: true,
+                text: "请先选中一个对象再复制链接".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn copy_object_url_request_uses_current_selection_and_default_ttl() {
+        let object = CloudObject {
+            key: "report/a b.pdf".into(),
+            size: 42,
+            mime_type: Some("application/pdf".into()),
+            etag: Some("etag".into()),
+            put_time_millis: 1,
+        };
+        let request =
+            copy_object_url_request(Some("account-1"), Some("bucket-1"), Some(&object)).unwrap();
+        assert_eq!(
+            request,
+            CopyObjectUrlRequest {
+                account_id: "account-1".into(),
+                bucket: "bucket-1".into(),
+                key: "report/a b.pdf".into(),
+                ttl_secs: SIGNED_URL_TTL_SECS,
+            }
+        );
     }
 }

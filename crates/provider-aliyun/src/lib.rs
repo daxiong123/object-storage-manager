@@ -849,12 +849,26 @@ mod tests {
     fn signed_get_url_embeds_expires_and_signature() {
         let provider = test_provider("127.0.0.1:9".parse().unwrap());
         let url = tokio()
-            .block_on(provider.signed_get_url("b1", "a/b.png", 3600))
+            .block_on(provider.signed_get_url("b1", "a b/中文.png", 3600))
             .unwrap();
-        assert!(url.contains("/b1/a/b.png?"), "url={url}");
+        assert!(
+            url.contains("/b1/a%20b/%E4%B8%AD%E6%96%87.png?"),
+            "url={url}"
+        );
         assert!(url.contains("OSSAccessKeyId=test-ak"));
         assert!(url.contains("Expires="));
         assert!(url.contains("Signature="));
+        assert!(!url.contains(' '), "url={url}");
+        assert!(!url.contains("中文"), "url={url}");
+    }
+
+    #[test]
+    fn signed_get_url_rejects_zero_ttl() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        let err = tokio()
+            .block_on(provider.signed_get_url("b1", "a", 0))
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
     }
 
     #[test]
