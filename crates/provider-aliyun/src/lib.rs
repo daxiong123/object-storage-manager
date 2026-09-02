@@ -20,7 +20,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use sign::AliyunCredential;
 
-const DEFAULT_SERVICE_ENDPOINT: &str = "https://oss.aliyuncs.com";
+/// 列举空间用地域入口（GetService 在各 region 均可列出账号下全部 Bucket）
+const DEFAULT_SERVICE_ENDPOINT: &str = "https://oss-cn-hangzhou.aliyuncs.com";
 const DEFAULT_LOCATION: &str = "oss-cn-hangzhou";
 
 pub struct AliyunProvider {
@@ -47,12 +48,14 @@ impl AliyunProvider {
             .user_agent(concat!("CloudStorage/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
+            .http1_only()
             .use_rustls_tls()
             .build()
             .map_err(|e| StorageError::Network(format!("HTTP Client 构建失败: {e}")))?;
         let long_http = reqwest::Client::builder()
             .user_agent(concat!("CloudStorage/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
+            .http1_only()
             .use_rustls_tls()
             .build()
             .map_err(|e| StorageError::Network(format!("HTTP Client 构建失败: {e}")))?;
@@ -144,11 +147,25 @@ impl AliyunProvider {
         }
         let code = status.as_u16();
         let body = resp.text().await.unwrap_or_default();
+        let oss_code = xml_first(&body, "Code").unwrap_or_default();
         let message = xml_first(&body, "Message")
-            .or_else(|| xml_first(&body, "Code"))
-            .unwrap_or_else(|| truncate(&body, 300));
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if oss_code.is_empty() {
+                    truncate(&body, 300)
+                } else {
+                    oss_code.clone()
+                }
+            });
         if code == 403 || code == 401 {
-            return Err(StorageError::Auth(format!("{context}: {message}")));
+            let mut detail = format!("{context}: {message}");
+            if !oss_code.is_empty() && oss_code != message {
+                detail = format!("{context}: [{oss_code}] {message}");
+            }
+            if let Some(sts) = xml_first(&body, "StringToSign") {
+                detail.push_str(&format!("；服务端 StringToSign=[{sts}]"));
+            }
+            return Err(StorageError::Auth(detail));
         }
         if code == 503 || code == 429 {
             return Err(StorageError::RateLimited(format!("{context}: {message}")));
@@ -188,9 +205,12 @@ impl StorageProvider for AliyunProvider {
     async fn list_buckets(&self) -> Result<Vec<Bucket>, StorageError> {
         let resource = sign::canonicalized_resource("", None, &[]);
         let (date, auth) = self.signed_headers("GET", "", &resource)?;
+        let mut url = self.service_base.clone();
+        url.set_path("/");
+        url.set_query(None);
         let resp = self
             .http
-            .get(self.service_base.clone())
+            .get(url)
             .header(DATE, date)
             .header(AUTHORIZATION, auth)
             .send()

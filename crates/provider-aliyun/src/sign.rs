@@ -31,9 +31,9 @@ impl AliyunCredential {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
     ) -> Result<Self, StorageError> {
-        let access_key = access_key.into();
-        let secret_key = secret_key.into();
-        if access_key.trim().is_empty() || secret_key.trim().is_empty() {
+        let access_key = access_key.into().trim().to_string();
+        let secret_key = secret_key.into().trim().to_string();
+        if access_key.is_empty() || secret_key.is_empty() {
             return Err(StorageError::InvalidInput(
                 "Aliyun AccessKey/SecretKey 不能为空".into(),
             ));
@@ -260,6 +260,31 @@ mod tests {
         assert!(AliyunCredential::new("ak", "  ").is_err());
         let cred = AliyunCredential::new("ak", "super-secret").unwrap();
         assert!(!format!("{cred:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn official_header_signature_vector() {
+        // 官方文档「在 Header 中包含签名」示例
+        let cred = AliyunCredential::new(
+            "44CF9590006BF252F707",
+            "OtxrzxIsfpFjA7SwPzILwy8Bw21TLhquhboDYROV",
+        )
+        .unwrap();
+        let sts = string_to_sign(
+            "PUT",
+            "eB5eJF1ptWaXm4bijSPyxw==",
+            "text/html",
+            "Thu, 17 Nov 2005 18:49:58 GMT",
+            "",
+            "/oss-example/nelson",
+        );
+        let auth = authorization(&cred, &sts);
+        // HMAC-SHA1 + 标准 Base64，与 OpenSSL 同构：
+        // printf 'PUT\n...\n/oss-example/nelson' | openssl dgst -sha1 -hmac 'Otxr...' -binary | openssl base64
+        assert_eq!(
+            auth,
+            "OSS 44CF9590006BF252F707:LNAVCpRhoMq7+fL5OzU7sUkNHE8="
+        );
     }
 
     #[test]

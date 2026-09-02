@@ -96,7 +96,8 @@ impl AccountService {
         if access_key.is_empty() {
             return Err(AccountError::InvalidInput("Access Key 不能为空".into()));
         }
-        if secret_key.trim().is_empty() {
+        let secret_key = secret_key.trim();
+        if secret_key.is_empty() {
             return Err(AccountError::InvalidInput("Secret Key 不能为空".into()));
         }
         let id = uuid::Uuid::new_v4().to_string();
