@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths, FocusHandle,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, Img,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
     ParentElement as _, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
     StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, hsla, img,
@@ -87,6 +87,13 @@ enum InspectorTab {
     Metadata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewKind {
+    Image,
+    Text,
+    System,
+}
+
 pub struct WorkspaceView {
     focus_handle: FocusHandle,
     sidebar_collapsed: bool,
@@ -134,6 +141,8 @@ pub struct WorkspaceView {
     /// 文本预览内容；编辑器使用 GPUI InputState，不自建 WebView
     preview_text: Option<String>,
     text_editor: Option<Entity<InputState>>,
+    /// Space 触发预览时，系统格式下载完成后自动打开 Quick Look
+    preview_open_quicklook: bool,
     inspector_tab: InspectorTab,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
@@ -237,6 +246,7 @@ impl WorkspaceView {
             preview_path: None,
             preview_text: None,
             text_editor: None,
+            preview_open_quicklook: false,
             inspector_tab: InspectorTab::Preview,
             delete_prompt_open: false,
             download_message: None,
@@ -700,8 +710,21 @@ impl WorkspaceView {
                 match result {
                     Ok((path, text)) => {
                         eprintln!("[preview] inline path={}", path.display());
-                        this.preview_path = Some(path);
+                        this.preview_path = Some(path.clone());
                         this.preview_text = text;
+                        if this.preview_open_quicklook {
+                            this.preview_open_quicklook = false;
+                            if let Some(key) = this.selected_object_key.as_deref() {
+                                if preview_kind(key) == PreviewKind::System {
+                                    if let Err(error) = object_storage_macos::quick_look(&path) {
+                                        this.download_message = Some(DownloadMessage {
+                                            is_error: true,
+                                            text: format!("打开 Quick Look 失败：{error}"),
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         this.download_message = Some(DownloadMessage {
@@ -769,12 +792,32 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn open_system_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.preview_path.clone() else {
+            return;
+        };
+        if let Err(error) = object_storage_macos::quick_look(&path) {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: format!("打开 Quick Look 失败：{error}"),
+            });
+            cx.notify();
+        }
+    }
+
     fn handle_preview_object(
         &mut self,
         _: &PreviewObject,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(key) = self.selected_object_key.clone() {
+            if preview_kind(&key) == PreviewKind::System && self.preview_path.is_some() {
+                self.open_system_preview(cx);
+                return;
+            }
+            self.preview_open_quicklook = preview_kind(&key) == PreviewKind::System;
+        }
         self.start_object_preview(cx);
     }
 
@@ -2281,6 +2324,7 @@ impl WorkspaceView {
 
         if self.inspector_tab == InspectorTab::Preview {
             if let Some(object) = selected {
+                let kind = preview_kind(&object.key);
                 let preview_content = if let Some(editor) = self.text_editor.clone() {
                     Input::new(&editor).h(px(220.)).into_any_element()
                 } else if let Some(text) = self.preview_text.clone() {
@@ -2292,11 +2336,47 @@ impl WorkspaceView {
                         .text_size(px(11.))
                         .child(text)
                         .into_any_element()
-                } else if let Some(path) = preview_path {
-                    img(path)
-                        .w_full()
+                } else if kind == PreviewKind::Image {
+                    if let Some(path) = preview_path {
+                        img(path)
+                            .w_full()
+                            .h(px(220.))
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .h(px(220.))
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::File)
+                                    .text_color(theme.muted_foreground)
+                                    .text_size(px(42.)),
+                            )
+                            .into_any_element()
+                    }
+                } else if kind == PreviewKind::System {
+                    div()
                         .h(px(220.))
-                        .object_fit(ObjectFit::Contain)
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            Icon::new(IconName::Eye)
+                                .text_color(theme.muted_foreground)
+                                .text_size(px(32.)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.muted_foreground)
+                                .child("此格式使用系统 Quick Look 预览"),
+                        )
                         .into_any_element()
                 } else {
                     div()
@@ -2355,6 +2435,20 @@ impl WorkspaceView {
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.start_object_preview(cx)
                                         })),
+                                )
+                                .when(
+                                    kind == PreviewKind::System && self.preview_path.is_some(),
+                                    |row| {
+                                        row.child(
+                                            Button::new("quicklook-object")
+                                                .label("系统预览")
+                                                .primary()
+                                                .with_size(Size::Small)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.open_system_preview(cx)
+                                                })),
+                                        )
+                                    },
                                 )
                                 .when(self.preview_text.is_some(), |row| {
                                     if self.text_editor.is_some() {
@@ -2785,6 +2879,24 @@ pub fn display_name(key: &str) -> &str {
     }
 }
 
+fn preview_kind(key: &str) -> PreviewKind {
+    if is_text_object(key) {
+        PreviewKind::Text
+    } else if is_image_object(key) {
+        PreviewKind::Image
+    } else {
+        PreviewKind::System
+    }
+}
+
+fn is_image_object(key: &str) -> bool {
+    let Some(ext) = key.rsplit('.').next() else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    Img::extensions().iter().any(|candidate| *candidate == ext)
+}
+
 fn syntax_language(key: &str) -> &'static str {
     match key
         .rsplit('.')
@@ -2972,5 +3084,14 @@ mod tests {
         let err = collect_folder_uploads(&path).unwrap_err();
         assert!(err.contains("不是目录"), "实际 {err}");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn preview_kind_classifies_extensions() {
+        assert_eq!(preview_kind("logo.png"), PreviewKind::Image);
+        assert_eq!(preview_kind("notes.txt"), PreviewKind::Text);
+        assert_eq!(preview_kind("config.json"), PreviewKind::Text);
+        assert_eq!(preview_kind("specs.pdf"), PreviewKind::System);
+        assert_eq!(preview_kind("movie.mp4"), PreviewKind::System);
     }
 }

@@ -9,9 +9,11 @@
 //! macOS Framework 负责系统级能力（agents.md §3/§5）。
 
 pub mod keychain;
+pub mod quicklook;
 pub mod system_events;
 
 pub use keychain::{KEYCHAIN_SERVICE, KeychainCredentialStore, KeychainError};
+pub use quicklook::quick_look;
 pub use system_events::{EventCallback, start_network_monitor, start_sleep_wake_monitor};
 
 /// 交给 macOS 默认应用打开本地文件（预览/编辑入口）。
