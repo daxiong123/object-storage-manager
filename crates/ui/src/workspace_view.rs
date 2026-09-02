@@ -33,8 +33,8 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
-    button::ButtonVariants as _, h_flex, progress::Progress, resizable::h_resizable,
-    resizable::resizable_panel, spinner::Spinner, v_flex,
+    button::ButtonVariants as _, h_flex, input::Input, input::InputState, progress::Progress,
+    resizable::h_resizable, resizable::resizable_panel, spinner::Spinner, v_flex,
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
@@ -124,6 +124,9 @@ pub struct WorkspaceView {
     previewing: bool,
     /// 已下载到本地缓存、供 GPUI img 直接渲染的预览路径
     preview_path: Option<PathBuf>,
+    /// 文本预览内容；编辑器使用 GPUI InputState，不自建 WebView
+    preview_text: Option<String>,
+    text_editor: Option<Entity<InputState>>,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
@@ -224,6 +227,8 @@ impl WorkspaceView {
             deleting: false,
             previewing: false,
             preview_path: None,
+            preview_text: None,
+            text_editor: None,
             delete_prompt_open: false,
             download_message: None,
             engine: Arc::clone(&engine),
@@ -647,6 +652,8 @@ impl WorkspaceView {
         ));
         self.previewing = true;
         self.preview_path = None;
+        self.preview_text = None;
+        self.text_editor = None;
         self.download_message = None;
         cx.notify();
         let services = Arc::clone(&self.services);
@@ -659,7 +666,20 @@ impl WorkspaceView {
                     services
                         .download_object(&account_id, &bucket, &key, &path)
                         .map_err(|e| format!("下载预览对象失败：{e}"))?;
-                    Ok::<_, String>(path)
+                    let text = if is_text_object(&key) {
+                        let metadata = std::fs::metadata(&path)
+                            .map_err(|e| format!("读取预览文件信息失败：{e}"))?;
+                        if metadata.len() > 2 * 1024 * 1024 {
+                            return Err("文本对象超过 2 MiB，暂不在编辑器中打开".into());
+                        }
+                        Some(
+                            std::fs::read_to_string(&path)
+                                .map_err(|e| format!("文本对象不是有效 UTF-8：{e}"))?,
+                        )
+                    } else {
+                        None
+                    };
+                    Ok::<_, String>((path, text))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -669,9 +689,10 @@ impl WorkspaceView {
                     if result.is_ok() { "ok" } else { "error" }
                 );
                 match result {
-                    Ok(path) => {
+                    Ok((path, text)) => {
                         eprintln!("[preview] inline path={}", path.display());
                         this.preview_path = Some(path);
+                        this.preview_text = text;
                     }
                     Err(error) => {
                         this.download_message = Some(DownloadMessage {
@@ -685,6 +706,54 @@ impl WorkspaceView {
             .expect("预览结果回传 UI 失败");
         })
         .detach();
+    }
+
+    fn start_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.preview_text.clone() else {
+            return;
+        };
+        let editor = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .default_value(text)
+        });
+        self.text_editor = Some(editor);
+        cx.notify();
+    }
+
+    fn save_text_edit(&mut self, cx: &mut Context<Self>) {
+        let (Some(editor), Some(path), Some(account_id), Some(bucket), Some(object)) = (
+            self.text_editor.clone(),
+            self.preview_path.clone(),
+            self.selected_account_id.clone(),
+            self.selected_bucket.clone(),
+            self.selected_cloud_object()
+                .map(|object| object.key.clone()),
+        ) else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        if let Err(error) = std::fs::write(&path, text.as_bytes()) {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: format!("写入编辑内容失败：{error}"),
+            });
+            cx.notify();
+            return;
+        }
+        self.engine.enqueue_upload(
+            &account_id,
+            &bucket,
+            &object,
+            path,
+            display_name(&object).to_string(),
+        );
+        self.text_editor = None;
+        self.download_message = Some(DownloadMessage {
+            is_error: false,
+            text: format!("已加入覆盖上传队列：{}", display_name(&object)),
+        });
+        cx.notify();
     }
 
     fn handle_preview_object(
@@ -2168,13 +2237,25 @@ impl WorkspaceView {
             );
 
         if let Some(object) = selected {
-            let preview_content = match preview_path {
-                Some(ref path) => img(path.to_path_buf())
+            let preview_content = if let Some(editor) = self.text_editor.clone() {
+                Input::new(&editor).h(px(220.)).into_any_element()
+            } else if let Some(text) = self.preview_text.clone() {
+                div()
+                    .w_full()
+                    .h(px(220.))
+                    .overflow_hidden()
+                    .p_2()
+                    .text_size(px(11.))
+                    .child(text)
+                    .into_any_element()
+            } else if let Some(path) = preview_path {
+                img(path)
                     .w_full()
                     .h(px(220.))
                     .object_fit(ObjectFit::Contain)
-                    .into_any_element(),
-                None => div()
+                    .into_any_element()
+            } else {
+                div()
                     .h(px(220.))
                     .w_full()
                     .flex()
@@ -2185,7 +2266,7 @@ impl WorkspaceView {
                             .text_color(theme.muted_foreground)
                             .text_size(px(42.)),
                     )
-                    .into_any_element(),
+                    .into_any_element()
             };
             panel = panel.child(
                 v_flex()
@@ -2231,24 +2312,27 @@ impl WorkspaceView {
                                         cx.listener(|this, _, _, cx| this.start_object_preview(cx)),
                                     ),
                             )
-                            .when(preview_path.is_some(), |row| {
-                                let path = preview_path.clone().expect("已判断预览路径存在");
-                                row.child(
-                                    Button::new("edit-object-external")
-                                        .label("编辑…")
-                                        .with_size(Size::Small)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Err(error) =
-                                                object_storage_macos::open_with_default_app(&path)
-                                            {
-                                                this.download_message = Some(DownloadMessage {
-                                                    is_error: true,
-                                                    text: format!("打开编辑应用失败：{error}"),
-                                                });
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
+                            .when(self.preview_text.is_some(), |row| {
+                                if self.text_editor.is_some() {
+                                    row.child(
+                                        Button::new("save-text-object")
+                                            .label("保存并上传")
+                                            .primary()
+                                            .with_size(Size::Small)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.save_text_edit(cx)
+                                            })),
+                                    )
+                                } else {
+                                    row.child(
+                                        Button::new("edit-text-object")
+                                            .label("编辑…")
+                                            .with_size(Size::Small)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_text_edit(window, cx)
+                                            })),
+                                    )
+                                }
                             }),
                     ),
             );
@@ -2628,6 +2712,31 @@ pub fn display_name(key: &str) -> &str {
         Some(i) => &trimmed[i + 1..],
         None => trimmed,
     }
+}
+
+fn is_text_object(key: &str) -> bool {
+    matches!(
+        key.rsplit('.')
+            .next()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some(
+            "txt"
+                | "json"
+                | "md"
+                | "html"
+                | "htm"
+                | "css"
+                | "js"
+                | "ts"
+                | "xml"
+                | "yaml"
+                | "yml"
+                | "csv"
+                | "toml"
+                | "rs"
+        )
+    )
 }
 
 /// 目录前缀的上一级（保持结尾 `/`）；已是根级返回 None。
