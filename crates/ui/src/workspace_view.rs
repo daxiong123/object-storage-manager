@@ -2279,118 +2279,146 @@ impl WorkspaceView {
                     ),
             );
 
-        if let Some(object) = selected {
-            let preview_content = if let Some(editor) = self.text_editor.clone() {
-                Input::new(&editor).h(px(220.)).into_any_element()
-            } else if let Some(text) = self.preview_text.clone() {
-                div()
-                    .w_full()
-                    .h(px(220.))
-                    .overflow_hidden()
-                    .p_2()
-                    .text_size(px(11.))
-                    .child(text)
-                    .into_any_element()
-            } else if let Some(path) = preview_path {
-                img(path)
-                    .w_full()
-                    .h(px(220.))
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element()
-            } else {
-                div()
-                    .h(px(220.))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Icon::new(IconName::File)
-                            .text_color(theme.muted_foreground)
-                            .text_size(px(42.)),
-                    )
-                    .into_any_element()
-            };
-            panel = panel.child(
-                v_flex()
-                    .mx_3()
-                    .mt_3()
-                    .gap_2()
-                    .items_center()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.sidebar)
-                    .p_3()
-                    .child(preview_content)
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .child(display_name(&object.key).to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child(
-                                object
-                                    .mime_type
-                                    .clone()
-                                    .unwrap_or_else(|| "未知类型".into()),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("preview-object-inspector")
-                                    .label(if self.previewing {
-                                        "准备预览…"
+        if self.inspector_tab == InspectorTab::Preview {
+            if let Some(object) = selected {
+                let preview_content = if let Some(editor) = self.text_editor.clone() {
+                    Input::new(&editor).h(px(220.)).into_any_element()
+                } else if let Some(text) = self.preview_text.clone() {
+                    div()
+                        .w_full()
+                        .h(px(220.))
+                        .overflow_hidden()
+                        .p_2()
+                        .text_size(px(11.))
+                        .child(text)
+                        .into_any_element()
+                } else if let Some(path) = preview_path {
+                    img(path)
+                        .w_full()
+                        .h(px(220.))
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element()
+                } else {
+                    div()
+                        .h(px(220.))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::File)
+                                .text_color(theme.muted_foreground)
+                                .text_size(px(42.)),
+                        )
+                        .into_any_element()
+                };
+                panel = panel.child(
+                    v_flex()
+                        .mx_3()
+                        .mt_3()
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.sidebar)
+                        .p_3()
+                        .child(preview_content)
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .child(display_name(&object.key).to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    object
+                                        .mime_type
+                                        .clone()
+                                        .unwrap_or_else(|| "未知类型".into()),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("preview-object-inspector")
+                                        .label(if self.previewing {
+                                            "准备预览…"
+                                        } else {
+                                            "预览"
+                                        })
+                                        .disabled(self.previewing)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_object_preview(cx)
+                                        })),
+                                )
+                                .when(self.preview_text.is_some(), |row| {
+                                    if self.text_editor.is_some() {
+                                        row.child(
+                                            Button::new("save-text-object")
+                                                .label("保存并上传")
+                                                .primary()
+                                                .with_size(Size::Small)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.save_text_edit(cx)
+                                                })),
+                                        )
                                     } else {
-                                        "预览"
-                                    })
-                                    .disabled(self.previewing)
-                                    .with_size(Size::Small)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.start_object_preview(cx)),
-                                    ),
-                            )
-                            .when(self.preview_text.is_some(), |row| {
-                                if self.text_editor.is_some() {
-                                    row.child(
-                                        Button::new("save-text-object")
-                                            .label("保存并上传")
-                                            .primary()
-                                            .with_size(Size::Small)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.save_text_edit(cx)
-                                            })),
-                                    )
-                                } else {
-                                    row.child(
-                                        Button::new("edit-text-object")
-                                            .label("编辑…")
-                                            .with_size(Size::Small)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.start_text_edit(window, cx)
-                                            })),
-                                    )
-                                }
-                            }),
-                    ),
-            );
+                                        row.child(
+                                            Button::new("edit-text-object")
+                                                .label("编辑…")
+                                                .with_size(Size::Small)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.start_text_edit(window, cx)
+                                                })),
+                                        )
+                                    }
+                                }),
+                        ),
+                );
+            }
         }
-        for (label, value) in rows {
-            panel = panel.child(
-                h_flex()
-                    .px_3()
-                    .py_1()
-                    .justify_between()
-                    .gap_2()
-                    .text_size(px(12.))
-                    .child(div().text_color(theme.muted_foreground).child(label))
-                    .child(div().min_w_0().truncate().child(value)),
-            );
+        if self.inspector_tab == InspectorTab::Details {
+            for (label, value) in rows {
+                panel = panel.child(
+                    h_flex()
+                        .px_3()
+                        .py_1()
+                        .justify_between()
+                        .gap_2()
+                        .text_size(px(12.))
+                        .child(div().text_color(theme.muted_foreground).child(label))
+                        .child(div().min_w_0().truncate().child(value)),
+                );
+            }
+        }
+        if self.inspector_tab == InspectorTab::Metadata {
+            if let Some(object) = selected {
+                for (label, value) in [
+                    (
+                        "Content-Type",
+                        object.mime_type.clone().unwrap_or_else(|| "—".into()),
+                    ),
+                    ("大小（字节）", object.size.to_string()),
+                    ("ETag", object.etag.clone().unwrap_or_else(|| "—".into())),
+                    ("更新时间", format_time(object.put_time_millis)),
+                ] {
+                    panel = panel.child(
+                        h_flex()
+                            .px_3()
+                            .py_1()
+                            .justify_between()
+                            .gap_2()
+                            .text_size(px(12.))
+                            .child(div().text_color(theme.muted_foreground).child(label))
+                            .child(div().min_w_0().truncate().child(value)),
+                    );
+                }
+            }
         }
 
         // 下载（选中对象）/ 上传（选中空间）入口 + 最近一次结果提示
