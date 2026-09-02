@@ -146,12 +146,14 @@ pub(crate) fn canonicalized_resource(
     key: Option<&str>,
     subresources: &[(&str, &str)],
 ) -> String {
+    // 官方：`/` + Bucket + `/` + Object。Object 为空时仍保留 Bucket 后的 `/`
+    // （ListObjects 服务端 StringToSign 实测为 `/bucket/`，不是 `/bucket`）。
     let mut resource = if bucket.is_empty() {
         "/".to_string()
     } else if let Some(key) = key.filter(|k| !k.is_empty()) {
         format!("/{bucket}/{key}")
     } else {
-        format!("/{bucket}")
+        format!("/{bucket}/")
     };
     if subresources.is_empty() {
         return resource;
@@ -244,13 +246,13 @@ mod tests {
                 None,
                 &[("prefix", "a/"), ("delimiter", "/"), ("max-keys", "100")]
             ),
-            "/b1?delimiter=/&max-keys=100&prefix=a/"
+            "/b1/?delimiter=/&max-keys=100&prefix=a/"
         );
         assert_eq!(canonicalized_resource("", None, &[]), "/");
         assert_eq!(canonicalized_resource("b1", Some("a/b"), &[]), "/b1/a/b");
         assert_eq!(
             canonicalized_resource("b1", None, &[("location", "")]),
-            "/b1?location"
+            "/b1/?location"
         );
     }
 
