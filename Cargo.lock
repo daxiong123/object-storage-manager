@@ -3953,6 +3953,7 @@ dependencies = [
  "object-storage-persistence",
  "object-storage-qiniu",
  "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 
@@ -3976,6 +3977,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "object-storage-app",
  "object-storage-ui",
 ]
 
@@ -4029,9 +4031,12 @@ version = "0.1.0"
 name = "object-storage-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui",
  "gpui-component",
  "objc",
+ "object-storage-app",
+ "object-storage-domain",
  "raw-window-handle",
 ]
 

@@ -81,6 +81,9 @@ crates/
 | Provider trait | `StorageProvider`（`crates/storage-core`）：方法返回 `impl Future + Send`（不用裸 `async fn`，Send 义务显式化，否则无法 spawn 到 tokio/gpui 后台执行器）；非 dyn-safe，上层按服务商 enum 分发 |
 | 七牛签名 | V2 请求签名逐字节核对自官方 SDK 源码并内置官方向量测试（V1 hello/world + V2 X-Qiniu-* 规范化排序）；坑：Base64 必须带 padding、签名用实际发送的原始 query 串、X-Qiniu-* 头名规范化为 Title-Case 后排序、putTime 单位 100ns。详见 `docs/notes/qiniu-api-notes.md`，勿凭记忆重写 |
 | Transfer | Sleep/Wake/断网后状态为 `Waiting/Paused` 并恢复，**不得**误标 `Failed`（P0）；事件驱动，不轮询 |
+| AppServices 线程模型 | `AccountService` 内含 rusqlite `Connection`（内部 RefCell，非 Sync），直接 `Arc<AppServices>` 进不了 gpui 后台任务（要求 Send+Sync）。连接统一收进 `Mutex<AccountService>`（crates/app/src/services.rs），同一时刻至多一个后台线程用数据库/钥匙串；锁毒化（持锁线程 panic）直接 panic 响报，不静默 |
+| UI 异步编排 | UI 层永不直接调 provider/runtime：一律 `cx.spawn` → `background_executor().spawn` 调 AppServices 阻塞方法（内部 `runtime.block_on`）。并发竞态用代数计数（`bucket_gen`/`object_gen`）丢弃过期结果（last-click-wins）；添加账号模态用 `done/closed` 标志 + `observe_in` 由 WorkspaceView 回收，保存中禁止关闭（防丢成功结果） |
+| UI 冒烟边界 | 无屏幕录制权限 → `kCGWindowName` 恒为 `"(no title)"`，窗口存在性用 `/tmp/winall.swift`（按 OwnerName 过滤）输出非空判断，不能 grep 窗口名；gpui 不建 AX 树，UI 内部交互无法脚本化，只能人肉验证 |
 | ⌘Q vs ⌘W | ⌘W 只关窗口（**必须先禁用 close 动画再 remove_window**，见下行）；⌘Q 有 Transfer 时弹确认，默认 `Pause + Persist` |
 | 关窗口实现 | macOS 15 close 动画会被 gpui 立即 teardown 杀死 → 窗口卡死可见。`handle_close_window`：`setAnimationBehavior: None` + `remove_window()`；失败方案与机制详见 `docs/notes/gpui-api-notes.md`「关闭窗口」章节，勿重复试错 |
 | 通知 | `UserNotifications.framework`，仅长时间 Transfer 完成/失败、Migration 完成 |

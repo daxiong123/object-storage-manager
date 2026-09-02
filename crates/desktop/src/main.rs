@@ -1,7 +1,9 @@
 use gpui::*;
 use gpui::{Menu, MenuItem, OsAction};
 use gpui_component::Root;
+use object_storage_app::AppServices;
 use object_storage_ui::{self as ui, WorkspaceView};
+use std::sync::Arc;
 use ui::actions::{
     CloseWindow, Copy, Cut, OpenCommandPalette, Paste, Quit, Redo, SelectAll, ToggleInspector,
     ToggleSidebar, Undo,
@@ -49,6 +51,17 @@ fn app_menus() -> Vec<Menu> {
 }
 
 fn main() {
+    // AppServices（SQLite + Keychain + tokio 运行时）在进 UI 前组装。
+    // 打不开数据库属于启动级错误：直接报错退出（Fail Fast，规范 §8），
+    // 不进半可用的界面。
+    let services = match AppServices::open() {
+        Ok(services) => Arc::new(services),
+        Err(e) => {
+            eprintln!("CloudStorage 启动失败：{e}");
+            std::process::exit(1);
+        }
+    };
+
     let app = Application::new().with_assets(gpui_component_assets::Assets);
 
     app.run(move |cx| {
@@ -63,7 +76,7 @@ fn main() {
         cx.spawn(async move |cx| {
             let bounds = cx.update(|app| Bounds::centered(None, size(px(1280.), px(820.)), app))?;
             cx.open_window(ui::window_options(bounds), |window, cx| {
-                let workspace = cx.new(WorkspaceView::new);
+                let workspace = cx.new(|cx| WorkspaceView::new(Arc::clone(&services), cx));
                 // 菜单 Action 经焦点链派发：初始焦点置于 Workspace 根节点。
                 window.focus(&workspace.focus_handle(cx));
                 // 窗口第一层视图必须是 Root。

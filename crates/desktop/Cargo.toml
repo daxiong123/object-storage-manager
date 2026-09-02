@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 object-storage-ui = { workspace = true }
+object-storage-app = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }

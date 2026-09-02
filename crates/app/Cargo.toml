@@ -10,9 +10,8 @@ repository.workspace = true
 object-storage-domain = { workspace = true }
 object-storage-persistence = { workspace = true }
 object-storage-macos = { workspace = true }
+object-storage-core = { workspace = true }
 object-storage-qiniu = { workspace = true }
+tokio = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-
-[dev-dependencies]
-object-storage-core = { workspace = true }

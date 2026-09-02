@@ -13,6 +13,8 @@ actions!(
         ToggleSidebar,
         ToggleInspector,
         OpenCommandPalette,
+        // 添加账号：侧栏「+ 添加账号」入口与命令面板共享（规范 §11/§22）
+        AddAccount,
     ]
 );
 
@@ -22,6 +24,10 @@ actions!(
     cloud_storage,
     [PaletteClose, PaletteSelectPrev, PaletteSelectNext,]
 );
+
+// 自建模态（添加账号等）的关闭：仅通过 context "AccountModal" 生效。
+// 输入框未处理 Esc 时会 propagate 到这里（与命令面板同一机制）。
+actions!(cloud_storage, [DismissModal]);
 
 // Edit 菜单专用：通过 `MenuItem::os_action` 触发 macOS 原生编辑行为。
 //
@@ -45,5 +51,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
         KeyBinding::new("down", PaletteSelectNext, Some("Palette")),
+        KeyBinding::new("escape", DismissModal, Some("AccountModal")),
     ]);
 }

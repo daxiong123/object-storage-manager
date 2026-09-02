@@ -6,19 +6,34 @@
 //! - 三栏宽度用 gpui-component Resizable；折叠/展开切换布局变体（不同的 resizable group id），
 //!   使每种变体各自记住拖拽后的宽度。
 //! - Action 处理见 `crate::actions`：⌘⌥S / ⌘⌥I / ⌘W / ⌘Q 与菜单共享同一 Action。
+//!
+//! 数据接线（里程碑 c）：Sidebar 渲染真实账号/空间，Content 渲染选中 Bucket 的
+//! 对象列表。所有 IO（SQLite/Keychain/网络）经 `AppServices` 的阻塞方法丢进 gpui
+//! 后台执行器（`background_executor().spawn`），窗口显示永不被 IO 阻塞；
+//! UI 状态更新统一回主线程 `this.update` + `cx.notify()`。
+//!
+//! 串台防护：每次异步加载携带自增代号（generation）。用户快速切换账号/桶时，
+//! 过期任务的结果因代号不匹配被丢弃，不会覆盖新选中项的状态。
+
+use std::sync::Arc;
 
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Render, Styled, Window, div,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
+    ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
     button::ButtonVariants as _, h_flex, resizable::h_resizable, resizable::resizable_panel,
-    v_flex,
+    spinner::Spinner, v_flex,
 };
 
-use crate::actions::{CloseWindow, OpenCommandPalette, ToggleInspector, ToggleSidebar};
+use object_storage_app::AppServices;
+use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
+
+use crate::account_modal::AddAccountModal;
+use crate::actions::{AddAccount, CloseWindow, OpenCommandPalette, ToggleInspector, ToggleSidebar};
 use crate::command_palette::CommandPaletteView;
 
 /// 左栏折叠后的图标栏宽度（规范：44px Icon Rail）。
@@ -31,6 +46,16 @@ const SIDEBAR_MAX: Pixels = px(360.);
 const INSPECTOR_DEFAULT: Pixels = px(320.);
 const INSPECTOR_MIN: Pixels = px(280.);
 const INSPECTOR_MAX: Pixels = px(520.);
+/// 对象列表单页条数（七牛列举单页上限内）。
+const OBJECTS_PAGE_LIMIT: u32 = 100;
+
+/// 侧栏/内容区的异步加载状态。`Loaded` 不单独建模——数据非空且 state==Idle 即加载完成。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AsyncState {
+    Idle,
+    Loading,
+    Failed(String),
+}
 
 pub struct WorkspaceView {
     focus_handle: FocusHandle,
@@ -39,16 +64,342 @@ pub struct WorkspaceView {
     /// 当前打开的命令面板（⌘K）。Some 时在根容器上渲染模态遮罩层；
     /// 面板关闭（open=false）后由此处置 None 并归还焦点。
     palette: Option<Entity<CommandPaletteView>>,
+    /// 当前打开的「添加账号」模态（overlay 与命令面板同机制）。
+    add_modal: Option<Entity<AddAccountModal>>,
+
+    /// 组装好的应用服务（SQLite + Keychain + tokio 运行时），后台任务共享。
+    services: Arc<AppServices>,
+
+    // ---- 账号（Sidebar 上段） ----
+    accounts: Vec<Account>,
+    accounts_state: AsyncState,
+    selected_account_id: Option<String>,
+
+    // ---- 空间（Sidebar 下段；跟随选中账号异步加载） ----
+    buckets: Vec<Bucket>,
+    buckets_state: AsyncState,
+    selected_bucket: Option<String>,
+
+    // ---- 对象列表（Content；跟随选中桶异步加载，支持翻页与前缀下钻） ----
+    entries: Vec<ListingEntry>,
+    objects_state: AsyncState,
+    /// 「加载更多」进行中（不影响整表状态，避免整表闪回加载态）
+    loading_more: bool,
+    /// 下一页标记；None 或空 = 没有更多
+    next_marker: Option<String>,
+    /// 当前浏览的目录前缀（None = 根目录），以 `/` 结尾
+    current_prefix: Option<String>,
+    /// 检查器选中的对象 Key（entries 内查找）
+    selected_object_key: Option<String>,
+
+    // ---- 串台防护：账号/对象各自的自增代号 ----
+    bucket_gen: u64,
+    object_gen: u64,
 }
 
 impl WorkspaceView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        Self {
+    pub fn new(services: Arc<AppServices>, cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
             focus_handle: cx.focus_handle(),
             sidebar_collapsed: false,
             inspector_collapsed: false,
             palette: None,
+            add_modal: None,
+            services,
+            accounts: Vec::new(),
+            accounts_state: AsyncState::Idle,
+            selected_account_id: None,
+            buckets: Vec::new(),
+            buckets_state: AsyncState::Idle,
+            selected_bucket: None,
+            entries: Vec::new(),
+            objects_state: AsyncState::Idle,
+            loading_more: false,
+            next_marker: None,
+            current_prefix: None,
+            selected_object_key: None,
+            bucket_gen: 0,
+            object_gen: 0,
+        };
+        this.load_accounts(cx);
+        this
+    }
+
+    // ---- 异步数据加载（全部经 AppServices 走后台执行器） ----
+
+    /// 拉取账号列表（SQLite，快）。启动时与添加账号成功后调用。
+    fn load_accounts(&mut self, cx: &mut Context<Self>) {
+        self.accounts_state = AsyncState::Loading;
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { services.list_accounts() })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(accounts) => {
+                        this.accounts = accounts;
+                        this.accounts_state = AsyncState::Idle;
+                    }
+                    Err(e) => this.accounts_state = AsyncState::Failed(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 选中账号并异步加载其空间列表。重复点击同一账号不重复请求（重试走 retry_buckets）。
+    fn select_account(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.selected_account_id.as_deref() == Some(id) {
+            return;
         }
+        self.selected_account_id = Some(id.to_string());
+        self.buckets.clear();
+        self.buckets_state = AsyncState::Loading;
+        self.clear_bucket_selection();
+        cx.notify();
+        self.start_bucket_load(cx);
+    }
+
+    /// 空间列表加载失败后的重试入口（保持当前选中账号重新请求）。
+    fn retry_buckets(&mut self, cx: &mut Context<Self>) {
+        if self.selected_account_id.is_none() || self.buckets_state == AsyncState::Loading {
+            return;
+        }
+        self.buckets_state = AsyncState::Loading;
+        cx.notify();
+        self.start_bucket_load(cx);
+    }
+
+    fn start_bucket_load(&mut self, cx: &mut Context<Self>) {
+        self.bucket_gen += 1;
+        let generation = self.bucket_gen;
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { services.list_buckets(&account_id) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.bucket_gen != generation {
+                    return; // 已切到别的账号，丢弃过期结果
+                }
+                match result {
+                    Ok(buckets) => {
+                        this.buckets = buckets;
+                        this.buckets_state = AsyncState::Idle;
+                    }
+                    Err(e) => this.buckets_state = AsyncState::Failed(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 选中桶并从根目录开始加载对象。重复点击同一桶不重复请求。
+    fn select_bucket(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.selected_bucket.as_deref() == Some(name) {
+            return;
+        }
+        self.selected_bucket = Some(name.to_string());
+        self.current_prefix = None;
+        self.reload_objects(cx);
+    }
+
+    /// 清空对象区（切换账号/桶时）。
+    fn clear_bucket_selection(&mut self) {
+        self.entries.clear();
+        self.objects_state = AsyncState::Idle;
+        self.loading_more = false;
+        self.next_marker = None;
+        self.current_prefix = None;
+        self.selected_object_key = None;
+    }
+
+    /// 从头（当前前缀的第一页）重新加载对象。
+    fn reload_objects(&mut self, cx: &mut Context<Self>) {
+        self.entries.clear();
+        self.next_marker = None;
+        self.selected_object_key = None;
+        self.objects_state = AsyncState::Loading;
+        cx.notify();
+        self.request_objects(None, cx);
+    }
+
+    /// 下钻到某个目录前缀。
+    fn open_prefix(&mut self, prefix: String, cx: &mut Context<Self>) {
+        self.current_prefix = Some(prefix);
+        self.reload_objects(cx);
+    }
+
+    /// 返回上一级目录；已在根目录则无操作。
+    fn go_up(&mut self, cx: &mut Context<Self>) {
+        let Some(prefix) = self.current_prefix.clone() else {
+            return;
+        };
+        self.current_prefix = parent_prefix(&prefix).map(str::to_string);
+        self.reload_objects(cx);
+    }
+
+    /// 「加载更多」：带 marker 请求下一页并追加（错误时保留已加载内容）。
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.loading_more || self.next_marker.is_none() {
+            return;
+        }
+        self.request_objects(self.next_marker.clone(), cx);
+    }
+
+    /// 对象列表请求核心：携带代号发起后台加载；marker 非空表示翻页追加。
+    fn request_objects(&mut self, marker: Option<String>, cx: &mut Context<Self>) {
+        let is_more = marker.is_some();
+        if is_more {
+            self.loading_more = true;
+        }
+        self.object_gen += 1;
+        let generation = self.object_gen;
+
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let prefix = self.current_prefix.clone();
+        let services = Arc::clone(&self.services);
+
+        cx.spawn(async move |this, cx| {
+            let request = ListObjectsRequest {
+                bucket,
+                prefix,
+                delimiter: Some("/".into()),
+                marker,
+                limit: OBJECTS_PAGE_LIMIT,
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move { services.list_objects(&account_id, request) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.object_gen != generation {
+                    return; // 已切换桶/前缀，丢弃过期结果
+                }
+                this.loading_more = false;
+                match result {
+                    Ok(page) => {
+                        let marker = if page.has_more() {
+                            page.next_marker.clone()
+                        } else {
+                            None
+                        };
+                        if is_more {
+                            this.entries.extend(page.entries);
+                        } else {
+                            this.entries = page.entries;
+                        }
+                        this.next_marker = marker;
+                        this.objects_state = AsyncState::Idle;
+                    }
+                    Err(e) => {
+                        // 整页失败清空；翻页失败保留已加载数据（见 render_objects）
+                        if !is_more {
+                            this.entries.clear();
+                        }
+                        this.objects_state = AsyncState::Failed(e.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn selected_cloud_object(&self) -> Option<&CloudObject> {
+        let key = self.selected_object_key.as_ref()?;
+        self.entries.iter().find_map(|e| match e {
+            ListingEntry::Object(o) if o.key == *key => Some(o),
+            _ => None,
+        })
+    }
+
+    // ---- 模态：添加账号 ----
+
+    fn handle_open_add_modal(
+        &mut self,
+        _: &AddAccount,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.add_modal.is_some() {
+            return;
+        }
+        let services = Arc::clone(&self.services);
+        let modal = cx.new(|cx| AddAccountModal::new(services, window, cx));
+        cx.observe_in(&modal, window, Self::handle_add_modal_changed)
+            .detach();
+        modal.update(cx, |modal, cx| modal.focus_first(window, cx));
+        self.add_modal = Some(modal);
+        cx.notify();
+    }
+
+    /// 模态观察：置 done（保存成功 → 刷新账号列表）或 closed（取消）后丢弃实体。
+    fn handle_add_modal_changed(
+        &mut self,
+        modal: Entity<AddAccountModal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (closed, done) = {
+            let m = modal.read(cx);
+            (m.closed(), m.done())
+        };
+        if !closed && !done {
+            return; // saving/error 等常规通知，不处理
+        }
+        self.add_modal = None;
+        window.focus(&self.focus_handle);
+        if done {
+            self.load_accounts(cx);
+        }
+        cx.notify();
+    }
+
+    /// 「添加账号」模态遮罩：点击空白处请求关闭（保存中拒绝）；卡片内点击
+    /// 已被卡片的 stop_propagation 挡住。
+    fn render_add_modal_overlay(
+        &self,
+        modal: &Entity<AddAccountModal>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    let Some(modal) = &this.add_modal else {
+                        return;
+                    };
+                    if !modal.read(cx).saving() {
+                        modal.update(cx, AddAccountModal::close);
+                    }
+                }),
+            )
+            .child(modal.clone())
     }
 
     // ---- Action 处理（与菜单/快捷键共享） ----
@@ -187,9 +538,7 @@ impl WorkspaceView {
                         .icon(Icon::new(sidebar_icon))
                         .ghost()
                         .with_size(Size::Small)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.handle_toggle_sidebar(&ToggleSidebar, window, cx)
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
                 // 中：标题
                 .child("CloudStorage")
@@ -256,9 +605,21 @@ impl WorkspaceView {
         )
     }
 
+    /// 侧栏分组标题（"账户"/"空间"）。
+    fn sidebar_section_label(&self, theme: &Theme, label: &str) -> impl IntoElement {
+        div()
+            .px_3()
+            .pt_2()
+            .pb_1()
+            .text_size(px(11.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.muted_foreground)
+            .child(label.to_string())
+    }
+
     /// 展开态 Sidebar（自建，宽度由 Resizable 面板控制，内容 w_full 填充）。
-    fn render_sidebar(&self, theme: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+    fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut sidebar = v_flex()
             .h_full()
             .w_full()
             .overflow_hidden()
@@ -267,41 +628,207 @@ impl WorkspaceView {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(self.sidebar_section_label(theme, "账户"))
-            .child(self.sidebar_row(theme, "nav-qiniu", IconName::Globe, "七牛云 Kodo", true))
-            .child(self.sidebar_row(theme, "nav-aliyun", IconName::Globe, "阿里云 OSS", false))
-            .child(self.sidebar_section_label(theme, "空间"))
-            .child(self.sidebar_row(
-                theme,
-                "nav-buckets",
-                IconName::FolderOpen,
-                "Bucket 列表",
-                false,
-            ))
-            .child(self.sidebar_row(theme, "nav-starred", IconName::Star, "收藏", false))
-            .child(div().flex_1())
-            .child(self.sidebar_row(theme, "nav-settings", IconName::Settings, "设置", false))
-            .child(div().h_2())
+            .children(self.render_account_rows(theme, cx))
+            .child(self.render_add_account_row(theme, cx));
+
+        if self.selected_account_id.is_some() {
+            sidebar = sidebar
+                .child(self.sidebar_section_label(theme, "空间"))
+                .children(self.render_bucket_rows(theme, cx));
+        } else {
+            sidebar = sidebar
+                .child(self.sidebar_section_label(theme, "空间"))
+                .child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child("先选择一个账号"),
+                );
+        }
+
+        sidebar.child(div().flex_1())
     }
 
-    fn sidebar_section_label(&self, theme: &Theme, label: &'static str) -> impl IntoElement {
+    /// 账户区：加载态 / 错误重试 / 真实账号行（点击选中并加载空间）。
+    fn render_account_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        match &self.accounts_state {
+            AsyncState::Loading => vec![
+                self.sidebar_status_row(theme, "正在加载账号…")
+                    .into_any_element(),
+            ],
+            AsyncState::Failed(msg) => vec![
+                self.sidebar_error_row(
+                    theme,
+                    "sidebar-accounts-error",
+                    msg,
+                    cx.listener(|this, _, _, cx| this.load_accounts(cx)),
+                )
+                .into_any_element(),
+            ],
+            AsyncState::Idle => {
+                if self.accounts.is_empty() {
+                    return vec![
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("还没有账号，点下方添加")
+                            .into_any_element(),
+                    ];
+                }
+                self.accounts
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, account)| {
+                        let active =
+                            self.selected_account_id.as_deref() == Some(account.id.as_str());
+                        let id = account.id.clone();
+                        self.sidebar_row(
+                            theme,
+                            SharedString::from(format!("account-row-{ix}")),
+                            IconName::User,
+                            &account.name,
+                            active,
+                            cx.listener(move |this, _, _, cx| this.select_account(&id, cx)),
+                        )
+                        .into_any_element()
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// 「+ 添加账号」入口（与命令面板共享 AddAccount Action）。
+    fn render_add_account_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px_3()
-            .pt_3()
-            .pb_1()
-            .text_size(px(11.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .id("sidebar-add-account")
+            .mx_2()
+            .mt_1()
+            .px_2()
+            .py(px(5.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(13.))
             .text_color(theme.muted_foreground)
+            .hover(|row| {
+                row.bg(theme.sidebar_accent)
+                    .text_color(theme.sidebar_accent_foreground)
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.handle_open_add_modal(&AddAccount, window, cx);
+            }))
+            .child(Icon::new(IconName::Plus))
+            .child("添加账号")
+    }
+
+    /// 空间区：加载态 / 错误重试 / 真实桶行（点击选中并加载对象）。
+    fn render_bucket_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        match &self.buckets_state {
+            AsyncState::Loading => vec![
+                self.sidebar_status_row(theme, "正在加载空间…")
+                    .into_any_element(),
+            ],
+            AsyncState::Failed(msg) => vec![
+                self.sidebar_error_row(
+                    theme,
+                    "sidebar-buckets-error",
+                    msg,
+                    cx.listener(|this, _, _, cx| this.retry_buckets(cx)),
+                )
+                .into_any_element(),
+            ],
+            AsyncState::Idle => {
+                if self.buckets.is_empty() {
+                    return vec![
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("（此账号没有空间）")
+                            .into_any_element(),
+                    ];
+                }
+                self.buckets
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, bucket)| {
+                        let active = self.selected_bucket.as_deref() == Some(bucket.name.as_str());
+                        let name = bucket.name.clone();
+                        self.sidebar_row(
+                            theme,
+                            SharedString::from(format!("bucket-row-{ix}")),
+                            IconName::Folder,
+                            &bucket.name,
+                            active,
+                            cx.listener(move |this, _, _, cx| this.select_bucket(&name, cx)),
+                        )
+                        .into_any_element()
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// 非交互状态行（加载中）。
+    fn sidebar_status_row(&self, theme: &Theme, label: &'static str) -> impl IntoElement {
+        h_flex()
+            .mx_2()
+            .px_2()
+            .py(px(5.))
+            .gap_2()
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .child(Spinner::new().with_size(Size::Small))
             .child(label)
     }
 
-    fn sidebar_row(
+    /// 可点击的错误行（点击重试），msg 截断展示。
+    fn sidebar_error_row<F>(
         &self,
         theme: &Theme,
         id: &'static str,
+        msg: &str,
+        on_click: F,
+    ) -> impl IntoElement
+    where
+        F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    {
+        div()
+            .id(id)
+            .mx_2()
+            .px_2()
+            .py(px(5.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(12.))
+            .text_color(theme.danger)
+            .hover(|row| row.bg(theme.sidebar_accent))
+            .on_click(on_click)
+            .child(Icon::new(IconName::TriangleAlert))
+            .child(div().truncate().child(format!("{msg}（点击重试）")))
+    }
+
+    /// 通用侧栏行（id 动态：账号/桶行）。
+    fn sidebar_row<F>(
+        &self,
+        theme: &Theme,
+        id: SharedString,
         icon: IconName,
-        label: &'static str,
+        label: &str,
         active: bool,
-    ) -> impl IntoElement {
+        on_click: F,
+    ) -> impl IntoElement
+    where
+        F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    {
         div()
             .id(id)
             .mx_2()
@@ -317,8 +844,9 @@ impl WorkspaceView {
                     .text_color(theme.sidebar_accent_foreground)
             })
             .hover(|row| row.bg(theme.sidebar_accent))
+            .on_click(on_click)
             .child(Icon::new(icon))
-            .child(label)
+            .child(div().truncate().child(label.to_string()))
     }
 
     /// 折叠态 44px 图标栏（规范硬指标）。点击顶部按钮恢复展开。
@@ -342,29 +870,286 @@ impl WorkspaceView {
                     .with_size(Size::Small)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
-            .child(Icon::new(IconName::Globe))
-            .child(Icon::new(IconName::FolderOpen))
-            .child(div().flex_1())
-            .child(Icon::new(IconName::Settings))
+            .child(Icon::new(IconName::User))
+            .child(Icon::new(IconName::Folder))
     }
 
-    /// 中间内容区：后续为 Object Table（占位）。
-    fn render_content(&self, theme: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+    /// 中间内容区：对象列表（选中桶后异步加载，含前缀导航与翻页）。
+    fn render_content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(theme.background)
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(IconName::Inbox))
+                .child(if self.selected_account_id.is_some() {
+                    "选择一个 Bucket 查看对象列表"
+                } else {
+                    "添加并选择账号后开始浏览"
+                })
+                .into_any_element();
+        };
+
+        let mut content = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
+            .overflow_hidden()
             .bg(theme.background)
-            .text_color(theme.muted_foreground)
-            .child(Icon::new(IconName::Inbox))
-            .child("选择一个 Bucket 查看对象列表")
+            .child(self.render_content_toolbar(theme, &bucket, cx));
+
+        if self.objects_state == AsyncState::Loading && self.entries.is_empty() {
+            content = content.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new())
+                    .child("加载对象列表中…"),
+            );
+            return content.into_any_element();
+        }
+
+        if let AsyncState::Failed(msg) = &self.objects_state {
+            if self.entries.is_empty() {
+                content = content.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
+                        .child(div().max_w(px(480.)).child(msg.clone()))
+                        .child(
+                            Button::new("objects-retry")
+                                .label("重试")
+                                .with_size(Size::Small)
+                                .on_click(cx.listener(|this, _, _, cx| this.reload_objects(cx))),
+                        ),
+                );
+                return content.into_any_element();
+            }
+            // 翻页失败但已有数据：保留列表，顶部横幅提示
+            content = content.child(
+                h_flex()
+                    .mx_3()
+                    .mt_2()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.))
+                    .text_color(theme.danger)
+                    .text_size(px(12.))
+                    .child(Icon::new(IconName::TriangleAlert))
+                    .child(format!("加载更多失败：{msg}")),
+            );
+        }
+
+        content = content.child(self.render_object_list(theme, cx));
+        content.into_any_element()
     }
 
-    /// 右侧 Inspector（占位）。
+    /// 内容区工具行：桶名 + 当前前缀 + 返回上一级 / 刷新。
+    fn render_content_toolbar(
+        &self,
+        theme: &Theme,
+        bucket: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(13.))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(bucket.to_string()),
+            )
+            .children(self.current_prefix.as_ref().map(|prefix| {
+                div()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(prefix.clone())
+            }))
+            .child(div().flex_1())
+            .children(self.current_prefix.is_some().then(|| {
+                Button::new("objects-go-up")
+                    .icon(Icon::new(IconName::ArrowLeft))
+                    .ghost()
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
+            }))
+            .child(
+                Button::new("objects-refresh")
+                    .label("刷新")
+                    .ghost()
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_objects(cx))),
+            )
+    }
+
+    /// 对象列表本体：目录行（下钻）与对象行（选中进检查器）+ 底部统计与翻页。
+    fn render_object_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = v_flex()
+            .id("object-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .py_1();
+
+        if self.entries.is_empty() && self.objects_state == AsyncState::Idle {
+            list = list.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::Inbox))
+                    .child("此目录为空"),
+            );
+        }
+
+        for (ix, entry) in self.entries.iter().enumerate() {
+            match entry {
+                ListingEntry::CommonPrefix(prefix) => {
+                    let label = display_name(prefix).to_string();
+                    let prefix = prefix.clone();
+                    list = list.child(
+                        h_flex()
+                            .id(("object-row", ix))
+                            .mx_3()
+                            .px_2()
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .gap_2()
+                            .text_size(px(13.))
+                            .hover(|row| row.bg(theme.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_prefix(prefix.clone(), cx)
+                            }))
+                            .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
+                            .child(div().truncate().child(label)),
+                    );
+                }
+                ListingEntry::Object(object) => {
+                    let selected = self.selected_object_key.as_deref() == Some(object.key.as_str());
+                    let key = object.key.clone();
+                    let size = format_size(object.size);
+                    let time = format_time(object.put_time_millis);
+                    list = list.child(
+                        h_flex()
+                            .id(("object-row", ix))
+                            .mx_3()
+                            .px_2()
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .gap_2()
+                            .text_size(px(13.))
+                            .when(selected, |row| row.bg(theme.accent))
+                            .hover(|row| row.bg(theme.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected_object_key = Some(key.clone());
+                                cx.notify();
+                            }))
+                            .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(display_name(&object.key).to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .text_size(px(12.))
+                                    .child(size),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .text_size(px(12.))
+                                    .child(time),
+                            ),
+                    );
+                }
+            }
+        }
+
+        if self.entries.is_empty() {
+            return list.into_any_element();
+        }
+
+        // 底部：统计 + 翻页
+        let mut footer = h_flex()
+            .px_3()
+            .py_2()
+            .gap_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .child(format!("共 {} 项", self.entries.len()));
+        if self.next_marker.is_some() {
+            footer = footer.child(
+                Button::new("objects-load-more")
+                    .label(if self.loading_more {
+                        "加载中…"
+                    } else {
+                        "加载更多"
+                    })
+                    .loading(self.loading_more)
+                    .disabled(self.loading_more)
+                    .ghost()
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
+            );
+        }
+        list = list.child(footer);
+        list.into_any_element()
+    }
+
+    /// 右侧 Inspector：选中对象的元数据；未选中时显示占位破折号。
     fn render_inspector(&self, theme: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: Vec<(&'static str, String)> = match self.selected_cloud_object() {
+            Some(object) => vec![
+                ("名称", display_name(&object.key).to_string()),
+                ("Key", object.key.clone()),
+                ("大小", format_size(object.size)),
+                (
+                    "类型",
+                    object.mime_type.clone().unwrap_or_else(|| "—".into()),
+                ),
+                ("ETag", object.etag.clone().unwrap_or_else(|| "—".into())),
+                ("上传时间", format_time(object.put_time_millis)),
+            ],
+            None => vec![
+                ("名称", "—".into()),
+                ("大小", "—".into()),
+                ("类型", "—".into()),
+                ("修改时间", "—".into()),
+            ],
+        };
+
         let mut panel = v_flex()
             .h_full()
             .w_full()
@@ -382,24 +1167,67 @@ impl WorkspaceView {
                     .border_color(theme.border)
                     .child("检查器"),
             );
-        for (label, value) in [
-            ("名称", "—"),
-            ("大小", "—"),
-            ("类型", "—"),
-            ("修改时间", "—"),
-        ] {
+        for (label, value) in rows {
             panel = panel.child(
                 h_flex()
                     .px_3()
                     .py_1()
                     .justify_between()
+                    .gap_2()
                     .text_size(px(12.))
                     .child(div().text_color(theme.muted_foreground).child(label))
-                    .child(div().child(value)),
+                    .child(div().min_w_0().truncate().child(value)),
             );
         }
         panel
     }
+}
+
+// 侧栏行点击的 listener 由调用点的 `cx.listener` 适配（on_click 需要
+// gpui App 级闭包，helper 拿不到 Context），无需额外适配函数。
+
+// ---- 纯展示工具（单测覆盖） ----
+
+/// 字节数人性化：B 整数展示，KB/MB/GB/TB 保留 1 位小数。
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// 云端 Key 的末段展示名（目录前缀先去掉结尾 `/`）。
+pub fn display_name(key: &str) -> &str {
+    let trimmed = key.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) => &trimmed[i + 1..],
+        None => trimmed,
+    }
+}
+
+/// 目录前缀的上一级（保持结尾 `/`）；已是根级返回 None。
+pub fn parent_prefix(prefix: &str) -> Option<&str> {
+    let trimmed = prefix.trim_end_matches('/');
+    let idx = trimmed.rfind('/')?;
+    Some(&prefix[..=idx])
+}
+
+/// epoch 毫秒 → 本地时间 "YYYY-MM-DD HH:MM"。非法时间戳原样输出数字（不静默美化）。
+pub fn format_time(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| millis.to_string())
 }
 
 impl gpui::Focusable for WorkspaceView {
@@ -413,22 +1241,72 @@ impl Render for WorkspaceView {
         let theme = cx.theme().clone();
         let mut root = v_flex()
             .id("workspace")
-            .relative() // 命令面板遮罩层的定位基准
+            .relative() // 模态遮罩层的定位基准
             .size_full()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_toggle_sidebar))
             .on_action(cx.listener(Self::handle_toggle_inspector))
             .on_action(cx.listener(Self::handle_close_window))
             .on_action(cx.listener(Self::handle_open_command_palette))
+            .on_action(cx.listener(Self::handle_open_add_modal))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
             .child(self.render_body(&theme, cx));
 
-        // 命令面板遮罩层：置于根容器之上，挡住下层交互（规范 §22）。
+        // 模态遮罩层（先渲染 → 在下层），命令面板后渲染盖在其上。
+        if let Some(modal) = self.add_modal.clone() {
+            root = root.child(self.render_add_modal_overlay(&modal, &theme, cx));
+        }
         if let Some(palette) = self.palette.clone() {
             root = root.child(self.render_palette_overlay(&palette, &theme, cx));
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_size_human_readable() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+        // 超出 TB 封顶：不再升单位
+        let tb = 1024.0_f64.powi(4);
+        assert_eq!(format_size((tb * 2048.0) as u64), "2048.0 TB");
+    }
+
+    #[test]
+    fn display_name_takes_last_segment() {
+        assert_eq!(display_name("a/b/c.txt"), "c.txt");
+        assert_eq!(display_name("c.txt"), "c.txt");
+        assert_eq!(display_name("a/b/"), "b");
+        assert_eq!(display_name(""), "");
+    }
+
+    #[test]
+    fn parent_prefix_walks_up() {
+        assert_eq!(parent_prefix("a/"), None);
+        assert_eq!(parent_prefix("a/b/"), Some("a/"));
+        assert_eq!(parent_prefix("a/b/c/"), Some("a/b/"));
+    }
+
+    #[test]
+    fn format_time_shapes_local_datetime() {
+        // epoch 0 → 本地时区的 "YYYY-MM-DD HH:MM"（16 字符）；跨时区只验证形状
+        let s = format_time(0);
+        assert_eq!(s.len(), 16, "实际输出：{s}");
+        assert_eq!(&s[4..5], "-");
+        assert_eq!(&s[7..8], "-");
+        assert_eq!(&s[10..11], " ");
+        assert_eq!(&s[13..14], ":");
+        // 非法时间戳：原样输出数字，不静默美化
+        assert_eq!(format_time(i64::MIN), i64::MIN.to_string());
     }
 }
