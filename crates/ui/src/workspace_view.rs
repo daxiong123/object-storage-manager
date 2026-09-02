@@ -26,9 +26,10 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths, FocusHandle,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
-    PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, hsla, prelude::FluentBuilder, px,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    ParentElement as _, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, hsla, img,
+    prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -121,6 +122,8 @@ pub struct WorkspaceView {
     deleting: bool,
     /// 预览对象下载/打开进行中
     previewing: bool,
+    /// 已下载到本地缓存、供 GPUI img 直接渲染的预览路径
+    preview_path: Option<PathBuf>,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
@@ -220,6 +223,7 @@ impl WorkspaceView {
             uploading: false,
             deleting: false,
             previewing: false,
+            preview_path: None,
             delete_prompt_open: false,
             download_message: None,
             engine: Arc::clone(&engine),
@@ -642,6 +646,7 @@ impl WorkspaceView {
             name
         ));
         self.previewing = true;
+        self.preview_path = None;
         self.download_message = None;
         cx.notify();
         let services = Arc::clone(&self.services);
@@ -665,12 +670,8 @@ impl WorkspaceView {
                 );
                 match result {
                     Ok(path) => {
-                        if let Err(error) = object_storage_macos::open_with_default_app(&path) {
-                            this.download_message = Some(DownloadMessage {
-                                is_error: true,
-                                text: format!("打开预览失败：{error}"),
-                            });
-                        }
+                        eprintln!("[preview] inline path={}", path.display());
+                        this.preview_path = Some(path);
                     }
                     Err(error) => {
                         this.download_message = Some(DownloadMessage {
@@ -2108,6 +2109,7 @@ impl WorkspaceView {
         };
 
         let selected = self.selected_cloud_object();
+        let preview_path = self.preview_path.clone();
         let mut panel = v_flex()
             .h_full()
             .w_full()
@@ -2160,19 +2162,29 @@ impl WorkspaceView {
                             .text_size(px(12.))
                             .text_color(theme.muted_foreground)
                             .child("元数据"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_2()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                            .child("版本"),
                     ),
             );
 
         if let Some(object) = selected {
+            let preview_content = match preview_path {
+                Some(path) => img(path)
+                    .w_full()
+                    .h(px(220.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => div()
+                    .h(px(220.))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::File)
+                            .text_color(theme.muted_foreground)
+                            .text_size(px(42.)),
+                    )
+                    .into_any_element(),
+            };
             panel = panel.child(
                 v_flex()
                     .mx_3()
@@ -2184,11 +2196,7 @@ impl WorkspaceView {
                     .border_color(theme.border)
                     .bg(theme.sidebar)
                     .p_3()
-                    .child(
-                        Icon::new(IconName::File)
-                            .text_color(theme.accent)
-                            .text_size(px(30.)),
-                    )
+                    .child(preview_content)
                     .child(
                         div()
                             .text_size(px(13.))
