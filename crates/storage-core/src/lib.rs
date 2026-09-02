@@ -1,4 +1,76 @@
-//! Provider abstraction：对象存储 Provider trait 与公共类型
+//! Provider abstraction：对象存储 Provider trait 与公共错误类型
 //!
-//! TODO: 按 agents.md 的职责边界逐步实现。
-//! 抽象原则：为真实需求抽象，不为不存在的平台抽象（agents.md §3）。
+//! 抽象原则（agents.md §3 / spec §63）：为真实需求抽象——七牛与阿里云两个真实
+//! Provider 需要统一接口，而不是为不存在的平台做抽象。因此本 crate 只有：
+//! - `StorageProvider` trait（async，按服务商枚举分发，不需要 dyn）
+//! - `StorageError` 统一错误
+//!
+//! trait 方法返回 `impl Future + Send`：调用方可以把 Future 交给 tokio 或
+//! gpui 后台执行器 spawn（这正是 clippy `async_fn_in_trait` 警告的真实关切；
+//! 不用裸 `async fn` 是为了让 Send 义务显式化，避免将来破坏 API）。
+
+use object_storage_domain::{Bucket, ListObjectsRequest, ObjectPage, ProviderKind};
+use thiserror::Error;
+
+use std::future::Future;
+
+/// 存储层统一错误
+///
+/// Provider 实现负责把自己的传输层错误（reqwest 等）映射到这里的语义分类，
+/// 上层 UI/Transfer 只依赖本枚举。
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("网络错误: {0}")]
+    Network(String),
+
+    #[error("认证失败（AccessKey/SecretKey 错误或无权限）: {0}")]
+    Auth(String),
+
+    #[error("请求被限流: {0}")]
+    RateLimited(String),
+
+    #[error("API 错误 (HTTP {status}): {message}")]
+    Api { status: u16, message: String },
+
+    #[error("响应解析失败: {0}")]
+    InvalidResponse(String),
+
+    #[error("无效输入: {0}")]
+    InvalidInput(String),
+}
+
+/// 对象存储 Provider 统一接口
+///
+/// 实现要求：
+/// - 可跨线程共享（`Send + Sync`），内部不可变，用 `reqwest::Client` 复用连接
+/// - 所有 IO 走 async；分页由调用方通过 `ObjectPage::next_marker` 驱动
+pub trait StorageProvider: Send + Sync {
+    /// 服务商类型
+    fn kind(&self) -> ProviderKind;
+
+    /// 列举账号下所有 Bucket
+    fn list_buckets(&self) -> impl Future<Output = Result<Vec<Bucket>, StorageError>> + Send;
+
+    /// 列举 Bucket 内对象（单页）
+    ///
+    /// 翻页：把返回页的 `next_marker` 填进下一次请求的 `marker`，
+    /// 直到 `has_more()` 为 false。
+    fn list_objects(
+        &self,
+        request: ListObjectsRequest,
+    ) -> impl Future<Output = Result<ObjectPage, StorageError>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_error_displays_chinese() {
+        let e = StorageError::Api {
+            status: 631,
+            message: "no such bucket".into(),
+        };
+        assert_eq!(e.to_string(), "API 错误 (HTTP 631): no such bucket");
+    }
+}

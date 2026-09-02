@@ -76,6 +76,8 @@ crates/
 | 预览 | 常见格式应用内；PDF/Office/视频走系统 Quick Look，不自建 Preview Engine |
 | Keychain key | `service = com.<company>.<app>.credentials`，`account = <account_uuid>`（不用账号名） |
 | 本地路径 | `PathBuf`；Cloud Object Key：`String` + `/`。两者严格区分 |
+| Provider trait | `StorageProvider`（`crates/storage-core`）：方法返回 `impl Future + Send`（不用裸 `async fn`，Send 义务显式化，否则无法 spawn 到 tokio/gpui 后台执行器）；非 dyn-safe，上层按服务商 enum 分发 |
+| 七牛签名 | V2 请求签名逐字节核对自官方 SDK 源码并内置官方向量测试（V1 hello/world + V2 X-Qiniu-* 规范化排序）；坑：Base64 必须带 padding、签名用实际发送的原始 query 串、X-Qiniu-* 头名规范化为 Title-Case 后排序、putTime 单位 100ns。详见 `docs/notes/qiniu-api-notes.md`，勿凭记忆重写 |
 | Transfer | Sleep/Wake/断网后状态为 `Waiting/Paused` 并恢复，**不得**误标 `Failed`（P0）；事件驱动，不轮询 |
 | ⌘Q vs ⌘W | ⌘W 只关窗口（**必须先禁用 close 动画再 remove_window**，见下行）；⌘Q 有 Transfer 时弹确认，默认 `Pause + Persist` |
 | 关窗口实现 | macOS 15 close 动画会被 gpui 立即 teardown 杀死 → 窗口卡死可见。`handle_close_window`：`setAnimationBehavior: None` + `remove_window()`；失败方案与机制详见 `docs/notes/gpui-api-notes.md`「关闭窗口」章节，勿重复试错 |

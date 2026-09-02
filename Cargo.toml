@@ -18,6 +18,14 @@ gpui-component-assets = "0.5.1"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- 网络（spec §68：reqwest + rustls；tokio 异步运行时）---
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
 
 # --- 内部 crate ---
 object-storage-desktop = { path = "crates/desktop" }
