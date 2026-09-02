@@ -182,10 +182,9 @@ impl AliyunProvider {
             if message.contains("ListBuckets")
                 || xml_first(&body, "AuthAction").as_deref() == Some("oss:ListBuckets")
             {
-                return Err(StorageError::Api {
-                    status: code,
-                    message: "当前 RAM 子账号没有列举全部空间的权限（oss:ListBuckets），请手动添加有权限的 Bucket 名称".into(),
-                });
+                return Err(StorageError::InvalidInput(
+                    "无法自动列举空间（RAM 无 oss:ListBuckets）。请填写有权限的 Bucket 名称".into(),
+                ));
             }
             return Err(StorageError::Api {
                 status: code,

@@ -1998,17 +1998,24 @@ impl WorkspaceView {
                     )
                     .into_any_element(),
                 ];
-                if msg.contains("手动添加") {
+                if msg.contains("填写") || msg.contains("Bucket") {
                     if let Some(input) = &self.manual_bucket_input {
                         rows.push(
                             v_flex()
                                 .px_2()
                                 .pt_1()
                                 .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(theme.muted_foreground)
+                                        .child("空间名称"),
+                                )
                                 .child(Input::new(input))
                                 .child(
                                     Button::new("add-manual-bucket")
                                         .label("添加空间")
+                                        .primary()
                                         .with_size(Size::Small)
                                         .on_click(
                                             cx.listener(|this, _, _, cx| {
@@ -2026,7 +2033,7 @@ impl WorkspaceView {
                                 .child(
                                     Button::new("open-manual-bucket")
                                         .label("输入 Bucket 名称…")
-                                        .ghost()
+                                        .primary()
                                         .with_size(Size::Small)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.manual_bucket_input = Some(cx.new(|cx| {
@@ -2088,7 +2095,7 @@ impl WorkspaceView {
             .child(label)
     }
 
-    /// 可点击的错误行（点击重试），msg 截断展示。
+    /// 可点击的错误行（点击重试）。窄侧栏里必须换行，不能截成半个词。
     fn sidebar_error_row<F>(
         &self,
         theme: &Theme,
@@ -2099,21 +2106,31 @@ impl WorkspaceView {
     where
         F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     {
-        div()
+        v_flex()
             .id(id)
             .mx_2()
             .px_2()
-            .py(px(5.))
+            .py_2()
+            .gap_1()
             .rounded(px(6.))
-            .flex()
-            .items_center()
-            .gap_2()
             .text_size(px(12.))
             .text_color(theme.danger)
             .hover(|row| row.bg(theme.sidebar_accent))
             .on_click(on_click)
-            .child(Icon::new(IconName::TriangleAlert))
-            .child(div().child(format!("{msg}（点击重试）")))
+            .child(
+                h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(Icon::new(IconName::TriangleAlert))
+                    .child(div().flex_1().min_w_0().child(msg.to_string())),
+            )
+            .child(
+                div()
+                    .pl(px(22.))
+                    .text_size(px(11.))
+                    .text_color(theme.muted_foreground)
+                    .child("点击重试"),
+            )
     }
 
     /// 通用侧栏行（id 动态：账号/桶行）。
