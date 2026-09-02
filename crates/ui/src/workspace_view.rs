@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
     PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder, px,
@@ -853,6 +853,145 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// Finder / 其它 App 拖入文件：对象浏览区是投放目标（规范 §15）。
+    fn with_file_drop(
+        &self,
+        el: gpui::Div,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        el.id("object-browser-drop")
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.handle_dropped_paths(paths.paths(), cx);
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().accent.opacity(0.12)))
+    }
+
+    fn enqueue_file_uploads(
+        &mut self,
+        account_id: &str,
+        bucket: &str,
+        prefix: &str,
+        paths: Vec<PathBuf>,
+    ) -> usize {
+        let n = paths.len();
+        for path in paths {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+            let key = format!("{prefix}{name}");
+            self.engine
+                .enqueue_upload(account_id, bucket, key.as_str(), path, name);
+        }
+        n
+    }
+
+    fn handle_dropped_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let Some((account_id, bucket, prefix)) = self.upload_target(cx) else {
+            return;
+        };
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        for path in paths {
+            let meta = match std::fs::symlink_metadata(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.download_message = Some(DownloadMessage {
+                        is_error: true,
+                        text: format!("无法读取 {}：{e}", path.display()),
+                    });
+                    cx.notify();
+                    return;
+                }
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                dirs.push(path.clone());
+            } else if meta.is_file() {
+                files.push(path.clone());
+            }
+        }
+        if dirs.is_empty() {
+            if files.is_empty() {
+                self.download_message = Some(DownloadMessage {
+                    is_error: true,
+                    text: "没有可上传的文件（已跳过符号链接）".into(),
+                });
+            } else {
+                let n = self.enqueue_file_uploads(&account_id, &bucket, &prefix, files);
+                self.download_message = Some(DownloadMessage {
+                    is_error: false,
+                    text: format!("已加入传输队列：{n} 个文件"),
+                });
+            }
+            cx.notify();
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let walked = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut entries = Vec::new();
+                    let mut errors = Vec::new();
+                    for dir in &dirs {
+                        match collect_folder_uploads(dir) {
+                            Ok(found) => entries.extend(found),
+                            Err(e) => errors.push(e),
+                        }
+                    }
+                    (entries, errors)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let n_files = this.enqueue_file_uploads(&account_id, &bucket, &prefix, files);
+                let (entries, errors) = walked;
+                let n_folder = entries.len();
+                for entry in entries {
+                    let key = format!("{prefix}{}", entry.relative_key);
+                    this.engine.enqueue_upload(
+                        account_id.as_str(),
+                        bucket.as_str(),
+                        key.as_str(),
+                        entry.source,
+                        entry.display_name,
+                    );
+                }
+                let n = n_files + n_folder;
+                if n == 0 {
+                    let text = if errors.is_empty() {
+                        "没有可上传的文件".into()
+                    } else {
+                        errors.join("；")
+                    };
+                    this.download_message = Some(DownloadMessage {
+                        is_error: true,
+                        text,
+                    });
+                } else {
+                    let mut text = format!("已加入传输队列：{n} 个文件");
+                    if !errors.is_empty() {
+                        text.push_str("；部分目录失败：");
+                        text.push_str(&errors.join("；"));
+                    }
+                    this.download_message = Some(DownloadMessage {
+                        is_error: !errors.is_empty(),
+                        text,
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     // ---- 模态：添加账号 ----
 
     fn handle_open_add_modal(
@@ -1497,31 +1636,38 @@ impl WorkspaceView {
     /// 中间内容区：对象列表（选中桶后异步加载，含前缀导航与翻页）。
     fn render_content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(bucket) = self.selected_bucket.clone() else {
-            return v_flex()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .bg(theme.background)
-                .text_color(theme.muted_foreground)
-                .child(Icon::new(IconName::Inbox))
-                .child(if self.selected_account_id.is_some() {
-                    "选择一个 Bucket 查看对象列表"
-                } else {
-                    "添加并选择账号后开始浏览"
-                })
+            return self
+                .with_file_drop(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .bg(theme.background)
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(IconName::Inbox))
+                        .child(if self.selected_account_id.is_some() {
+                            "选择一个 Bucket 查看对象列表"
+                        } else {
+                            "添加并选择账号后开始浏览"
+                        }),
+                    cx,
+                )
                 .into_any_element();
         };
 
-        let mut content = v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_hidden()
-            .bg(theme.background)
-            .child(self.render_content_toolbar(theme, &bucket, cx));
+        let mut content = self.with_file_drop(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_hidden()
+                .bg(theme.background)
+                .child(self.render_content_toolbar(theme, &bucket, cx)),
+            cx,
+        );
 
         if self.objects_state == AsyncState::Loading && self.entries.is_empty() {
             content = content.child(
