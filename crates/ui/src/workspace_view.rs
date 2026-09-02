@@ -712,9 +712,13 @@ impl WorkspaceView {
         let Some(text) = self.preview_text.clone() else {
             return;
         };
+        let language = self
+            .selected_cloud_object()
+            .map(|object| syntax_language(&object.key))
+            .unwrap_or("text");
         let editor = cx.new(|cx| {
             InputState::new(window, cx)
-                .multi_line(true)
+                .code_editor(language)
                 .default_value(text)
         });
         self.text_editor = Some(editor);
@@ -2711,6 +2715,27 @@ pub fn display_name(key: &str) -> &str {
     match trimmed.rfind('/') {
         Some(i) => &trimmed[i + 1..],
         None => trimmed,
+    }
+}
+
+fn syntax_language(key: &str) -> &'static str {
+    match key
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("json") => "json",
+        Some("js") => "javascript",
+        Some("ts") => "typescript",
+        Some("html" | "htm") => "html",
+        Some("css") => "css",
+        Some("md") => "markdown",
+        Some("xml") => "xml",
+        Some("yaml" | "yml") => "yaml",
+        Some("rs") => "rust",
+        Some("csv") | Some("txt") | None => "text",
+        _ => "text",
     }
 }
 
