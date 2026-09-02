@@ -46,8 +46,8 @@ use object_storage_transfer::{
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, DeleteObject, DownloadObject, OpenCommandPalette, Quit, Refresh,
-    ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, DeleteObject, DownloadObject, OpenCommandPalette, PreviewObject, Quit,
+    Refresh, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -119,6 +119,8 @@ pub struct WorkspaceView {
     uploading: bool,
     /// 远端删除进行中
     deleting: bool,
+    /// 预览对象下载/打开进行中
+    previewing: bool,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
@@ -217,6 +219,7 @@ impl WorkspaceView {
             downloading: false,
             uploading: false,
             deleting: false,
+            previewing: false,
             delete_prompt_open: false,
             download_message: None,
             engine: Arc::clone(&engine),
@@ -607,6 +610,84 @@ impl WorkspaceView {
             .ok();
         })
         .detach();
+    }
+
+    fn start_object_preview(&mut self, cx: &mut Context<Self>) {
+        if self.previewing {
+            return;
+        }
+        let Some(key) = self
+            .selected_cloud_object()
+            .map(|object| object.key.clone())
+        else {
+            return;
+        };
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let name = display_name(&key).to_string();
+        let mut path = std::env::temp_dir();
+        path.push("CloudStorage");
+        path.push("preview");
+        path.push(format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("系统时间早于 Unix epoch")
+                .as_nanos(),
+            name
+        ));
+        self.previewing = true;
+        self.download_message = None;
+        cx.notify();
+        let services = Arc::clone(&self.services);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::create_dir_all(path.parent().expect("预览路径必须有父目录"))
+                        .map_err(|e| format!("创建预览缓存目录失败：{e}"))?;
+                    services
+                        .download_object(&account_id, &bucket, &key, &path)
+                        .map_err(|e| format!("下载预览对象失败：{e}"))?;
+                    Ok::<_, String>(path)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.previewing = false;
+                match result {
+                    Ok(path) => {
+                        if let Err(error) = object_storage_macos::open_with_default_app(&path) {
+                            this.download_message = Some(DownloadMessage {
+                                is_error: true,
+                                text: format!("打开预览失败：{error}"),
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: error,
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .expect("预览结果回传 UI 失败");
+        })
+        .detach();
+    }
+
+    fn handle_preview_object(
+        &mut self,
+        _: &PreviewObject,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_object_preview(cx);
     }
 
     fn handle_download_object(
@@ -2454,6 +2535,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_open_command_palette))
             .on_action(cx.listener(Self::handle_open_add_modal))
             .on_action(cx.listener(Self::handle_download_object))
+            .on_action(cx.listener(Self::handle_preview_object))
             .on_action(cx.listener(Self::handle_upload_files))
             .on_action(cx.listener(Self::handle_upload_folder))
             .on_action(cx.listener(Self::handle_refresh))
