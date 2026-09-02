@@ -121,6 +121,8 @@ pub struct WorkspaceView {
     buckets: Vec<Bucket>,
     buckets_state: AsyncState,
     selected_bucket: Option<String>,
+    /// RAM 子账号无 ListBuckets 时，手动输入空间名
+    manual_bucket_input: Option<Entity<InputState>>,
 
     // ---- 对象列表（Content；跟随选中桶异步加载，支持翻页与前缀下钻） ----
     entries: Vec<ListingEntry>,
@@ -241,6 +243,7 @@ impl WorkspaceView {
             selected_account_id: None,
             buckets: Vec::new(),
             buckets_state: AsyncState::Idle,
+            manual_bucket_input: None,
             selected_bucket: None,
             entries: Vec::new(),
             objects_state: AsyncState::Idle,
@@ -390,6 +393,34 @@ impl WorkspaceView {
     }
 
     /// 空间列表加载失败后的重试入口（保持当前选中账号重新请求）。
+    fn add_manual_bucket(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.manual_bucket_input.clone() else {
+            return;
+        };
+        let name = input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let kind = self
+            .accounts
+            .iter()
+            .find(|account| Some(account.id.as_str()) == self.selected_account_id.as_deref())
+            .map(|account| account.provider)
+            .unwrap_or(object_storage_domain::ProviderKind::Aliyun);
+        if !self.buckets.iter().any(|bucket| bucket.name == name) {
+            self.buckets.push(Bucket {
+                name: name.clone(),
+                kind,
+                region: None,
+            });
+        }
+        self.buckets_state = AsyncState::Idle;
+        self.selected_bucket = Some(name);
+        self.selected_object_key = None;
+        self.reload_objects(cx);
+        cx.notify();
+    }
+
     fn retry_buckets(&mut self, cx: &mut Context<Self>) {
         if self.selected_account_id.is_none() || self.buckets_state == AsyncState::Loading {
             return;
@@ -1957,15 +1988,60 @@ impl WorkspaceView {
                 self.sidebar_status_row(theme, "正在加载空间…")
                     .into_any_element(),
             ],
-            AsyncState::Failed(msg) => vec![
-                self.sidebar_error_row(
-                    theme,
-                    "sidebar-buckets-error",
-                    msg,
-                    cx.listener(|this, _, _, cx| this.retry_buckets(cx)),
-                )
-                .into_any_element(),
-            ],
+            AsyncState::Failed(msg) => {
+                let mut rows = vec![
+                    self.sidebar_error_row(
+                        theme,
+                        "sidebar-buckets-error",
+                        msg,
+                        cx.listener(|this, _, _, cx| this.retry_buckets(cx)),
+                    )
+                    .into_any_element(),
+                ];
+                if msg.contains("手动添加") {
+                    if let Some(input) = &self.manual_bucket_input {
+                        rows.push(
+                            v_flex()
+                                .px_2()
+                                .pt_1()
+                                .gap_1()
+                                .child(Input::new(input))
+                                .child(
+                                    Button::new("add-manual-bucket")
+                                        .label("添加空间")
+                                        .with_size(Size::Small)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.add_manual_bucket(cx)
+                                            }),
+                                        ),
+                                )
+                                .into_any_element(),
+                        );
+                    } else {
+                        rows.push(
+                            div()
+                                .px_2()
+                                .pt_1()
+                                .child(
+                                    Button::new("open-manual-bucket")
+                                        .label("输入 Bucket 名称…")
+                                        .ghost()
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.manual_bucket_input = Some(cx.new(|cx| {
+                                                InputState::new(window, cx)
+                                                    .placeholder("Bucket 名称")
+                                            }));
+                                            cx.notify();
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+                rows
+            }
             AsyncState::Idle => {
                 if self.buckets.is_empty() {
                     return vec![

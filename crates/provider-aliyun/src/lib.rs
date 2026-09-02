@@ -85,6 +85,7 @@ impl AliyunProvider {
         Ok((date, auth))
     }
 
+    #[allow(dead_code)]
     async fn bucket_location(&self, bucket: &str) -> Result<String, StorageError> {
         if self.test_mode {
             return Ok(DEFAULT_LOCATION.to_string());
@@ -134,7 +135,11 @@ impl AliyunProvider {
             url.set_query(None);
             return Ok(url);
         }
-        let host = format!("{bucket}.{location}.aliyuncs.com");
+        let host = if location.is_empty() {
+            format!("{bucket}.oss.aliyuncs.com")
+        } else {
+            format!("{bucket}.{location}.aliyuncs.com")
+        };
         let mut url = reqwest::Url::parse(&format!("https://{host}"))
             .map_err(|e| StorageError::InvalidInput(format!("对象 URL 不合法: {e}")))?;
         url.set_path(&format!("/{}", sign::percent_encode_path(key)));
@@ -166,15 +171,29 @@ impl AliyunProvider {
                     oss_code.clone()
                 }
             });
-        if code == 403 || code == 401 {
-            let mut detail = format!("{context}: {message}");
-            if !oss_code.is_empty() && oss_code != message {
-                detail = format!("{context}: [{oss_code}] {message}");
-            }
+        if oss_code == "SignatureDoesNotMatch" || oss_code == "InvalidAccessKeyId" {
+            let mut detail = format!("{context}: [{oss_code}] {message}");
             if let Some(sts) = xml_first(&body, "StringToSign") {
                 detail.push_str(&format!("；服务端 StringToSign=[{sts}]"));
             }
             return Err(StorageError::Auth(detail));
+        }
+        if oss_code == "AccessDenied" || code == 403 {
+            if message.contains("ListBuckets")
+                || xml_first(&body, "AuthAction").as_deref() == Some("oss:ListBuckets")
+            {
+                return Err(StorageError::Api {
+                    status: code,
+                    message: "当前 RAM 子账号没有列举全部空间的权限（oss:ListBuckets），请手动添加有权限的 Bucket 名称".into(),
+                });
+            }
+            return Err(StorageError::Api {
+                status: code,
+                message: format!("{context}: {message}"),
+            });
+        }
+        if code == 401 {
+            return Err(StorageError::Auth(format!("{context}: {message}")));
         }
         if code == 503 || code == 429 {
             return Err(StorageError::RateLimited(format!("{context}: {message}")));
@@ -250,8 +269,7 @@ impl StorageProvider for AliyunProvider {
         if request.limit == 0 {
             return Err(StorageError::InvalidInput("limit 必须大于 0".into()));
         }
-        let location = self.bucket_location(&request.bucket).await?;
-        let mut url = self.object_url(&request.bucket, &location, "")?;
+        let mut url = self.object_url(&request.bucket, "", "")?;
         let mut sub: Vec<(String, String)> = Vec::new();
         if let Some(prefix) = &request.prefix {
             sub.push(("prefix".into(), prefix.clone()));
@@ -304,8 +322,7 @@ impl StorageProvider for AliyunProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
-        let location = self.bucket_location(bucket).await?;
-        let url = self.object_url(bucket, &location, key)?;
+        let url = self.object_url(bucket, "", key)?;
         let resource = sign::canonicalized_resource(bucket, Some(key), &[]);
         let (date, auth) = self.signed_headers("GET", "", &resource)?;
         let resp = self
@@ -382,8 +399,7 @@ impl StorageProvider for AliyunProvider {
                 source.display()
             ))
         })?;
-        let location = self.bucket_location(bucket).await?;
-        let url = self.object_url(bucket, &location, key)?;
+        let url = self.object_url(bucket, "", key)?;
         let resource = sign::canonicalized_resource(bucket, Some(key), &[]);
         let content_type = "application/octet-stream";
         let (date, auth) = self.signed_headers("PUT", content_type, &resource)?;
@@ -433,8 +449,7 @@ impl StorageProvider for AliyunProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
-        let location = self.bucket_location(bucket).await?;
-        let url = self.object_url(bucket, &location, key)?;
+        let url = self.object_url(bucket, "", key)?;
         let resource = sign::canonicalized_resource(bucket, Some(key), &[]);
         let (date, auth) = self.signed_headers("DELETE", "", &resource)?;
         let resp = self
@@ -465,8 +480,7 @@ impl StorageProvider for AliyunProvider {
         if ttl_secs == 0 {
             return Err(StorageError::InvalidInput("ttl_secs 必须大于 0".into()));
         }
-        let location = self.bucket_location(bucket).await?;
-        let mut url = self.object_url(bucket, &location, key)?;
+        let mut url = self.object_url(bucket, "", key)?;
         let expires = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| StorageError::InvalidInput(format!("signed_get_url: 系统时间异常: {e}")))?
