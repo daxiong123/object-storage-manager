@@ -4,8 +4,10 @@
 //! Secret），对上层 UI 暴露领域操作；保证两边数据的一致性由本层编排。
 
 mod account_service;
+mod provider;
 mod services;
 
 pub use account_service::{AccountError, AccountService};
 pub use object_storage_persistence::PersistedTransfer;
+pub use provider::BuiltProvider;
 pub use services::{AppServices, AppServicesError};

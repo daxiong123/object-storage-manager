@@ -9,10 +9,13 @@
 //!
 //! 所有 API 同步；调用方（UI）负责放入后台执行器，不阻塞主线程。
 
+use object_storage_aliyun::{AliyunCredential, AliyunProvider};
 use object_storage_domain::{Account, ProviderKind};
 use object_storage_macos::KeychainCredentialStore;
 use object_storage_persistence::{AccountRepository, PersistedTransfer, PersistenceError};
 use object_storage_qiniu::{QiniuCredential, QiniuProvider};
+
+use crate::provider::BuiltProvider;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -96,12 +99,6 @@ impl AccountService {
         if secret_key.trim().is_empty() {
             return Err(AccountError::InvalidInput("Secret Key 不能为空".into()));
         }
-        if provider == ProviderKind::Aliyun {
-            return Err(AccountError::InvalidInput(
-                "阿里云 Provider 尚未实现，暂不能添加阿里云账号".into(),
-            ));
-        }
-
         let id = uuid::Uuid::new_v4().to_string();
         let created_at_millis = now_millis()?;
 
@@ -186,9 +183,8 @@ impl AccountService {
         Ok((account, credential))
     }
 
-    /// 构造可用的 Provider（当前仅七牛；阿里云待 provider-aliyun 实装）。
-    /// Secret 每次从 Keychain 现取。
-    pub fn build_provider(&self, id: &str) -> Result<(Account, QiniuProvider), AccountError> {
+    /// 构造可用的 Provider。Secret 每次从 Keychain 现取。
+    pub fn build_provider(&self, id: &str) -> Result<(Account, BuiltProvider), AccountError> {
         let secret = self.load_secret(id)?;
         self.build_provider_with_secret(id, secret)
     }
@@ -198,15 +194,29 @@ impl AccountService {
         &self,
         id: &str,
         secret_key: String,
-    ) -> Result<(Account, QiniuProvider), AccountError> {
-        let (account, credential) = self.qiniu_credential_with_secret(id, secret_key)?;
-        if account.provider != ProviderKind::Qiniu {
-            return Err(AccountError::InvalidInput(format!(
-                "{} Provider 尚未实现",
-                account.provider.display_name()
-            )));
+    ) -> Result<(Account, BuiltProvider), AccountError> {
+        let account = self
+            .repo
+            .get(id)?
+            .ok_or_else(|| AccountError::NotFound(id.to_string()))?;
+        match account.provider {
+            ProviderKind::Qiniu => {
+                let credential = QiniuCredential::new(&account.access_key, &secret_key)
+                    .map_err(|e| AccountError::InvalidInput(e.to_string()))?;
+                Ok((
+                    account,
+                    BuiltProvider::Qiniu(QiniuProvider::new(credential)),
+                ))
+            }
+            ProviderKind::Aliyun => {
+                let credential = AliyunCredential::new(&account.access_key, &secret_key)
+                    .map_err(|e| AccountError::InvalidInput(e.to_string()))?;
+                Ok((
+                    account,
+                    BuiltProvider::Aliyun(AliyunProvider::new(credential)),
+                ))
+            }
         }
-        Ok((account, QiniuProvider::new(credential)))
     }
 }
 
@@ -220,7 +230,6 @@ fn now_millis() -> Result<i64, AccountError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use object_storage_core::StorageProvider;
     use std::fs;
     use std::path::PathBuf;
 
@@ -297,11 +306,10 @@ mod tests {
     #[test]
     fn add_validates_input_and_unimplemented_provider() {
         let (service, dir) = temp_service("validate");
-        let cases: [(&str, &str, &str, ProviderKind); 4] = [
+        let cases: [(&str, &str, &str, ProviderKind); 3] = [
             ("", "ak", "sk", ProviderKind::Qiniu),
             ("名称", "", "sk", ProviderKind::Qiniu),
             ("名称", "ak", "", ProviderKind::Qiniu),
-            ("名称", "ak", "sk", ProviderKind::Aliyun),
         ];
         for (name, ak, sk, provider) in cases {
             let result = service.add(name, provider, ak, sk);
@@ -357,6 +365,19 @@ mod tests {
         // Secret 是凭证明文：原样存取，不做 trim（不可直接断言，
         // 但 qiniu_credential 能构建成功说明整链路通）
         assert!(service.qiniu_credential(&account.id).is_ok());
+        service.delete(&account.id).unwrap();
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn add_aliyun_account_builds_aliyun_provider() {
+        let (service, dir) = temp_service("aliyun");
+        let account = service
+            .add("oss", ProviderKind::Aliyun, "ak-oss", "sk-oss")
+            .unwrap();
+        assert_eq!(account.provider, ProviderKind::Aliyun);
+        let (_, provider) = service.build_provider(&account.id).unwrap();
+        assert_eq!(provider.kind(), ProviderKind::Aliyun);
         service.delete(&account.id).unwrap();
         cleanup_dir(&dir);
     }

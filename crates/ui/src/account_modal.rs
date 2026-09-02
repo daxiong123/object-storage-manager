@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, Styled, Window, div, px,
+    ParentElement as _, Render, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable as _, Size, Theme, button::Button,
@@ -21,6 +21,7 @@ use gpui_component::{
 };
 
 use object_storage_app::AppServices;
+use object_storage_domain::ProviderKind;
 
 use crate::actions::DismissModal;
 
@@ -29,6 +30,7 @@ pub struct AddAccountModal {
     name: Entity<InputState>,
     access_key: Entity<InputState>,
     secret_key: Entity<InputState>,
+    provider: ProviderKind,
     /// 保存请求已发出、后台任务未返回
     saving: bool,
     /// 后台任务返回的错误（中文，直接展示）
@@ -61,6 +63,7 @@ impl AddAccountModal {
             name,
             access_key,
             secret_key,
+            provider: ProviderKind::Qiniu,
             saving: false,
             error: None,
             done: false,
@@ -119,11 +122,21 @@ impl AddAccountModal {
         self.error = None;
         cx.notify();
 
+        let provider = self.provider;
         let services = Arc::clone(&self.services);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { services.add_qiniu_account(&name, &access_key, &secret_key) })
+                .spawn(async move {
+                    match provider {
+                        ProviderKind::Qiniu => {
+                            services.add_qiniu_account(&name, &access_key, &secret_key)
+                        }
+                        ProviderKind::Aliyun => {
+                            services.add_aliyun_account(&name, &access_key, &secret_key)
+                        }
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match result {
@@ -239,11 +252,30 @@ impl Render for AddAccountModal {
             .child(
                 h_flex()
                     .gap_2()
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Globe))
-                    .child("七牛云 Kodo")
-                    .child("（V1 暂仅支持七牛，阿里云后续版本接入）"),
+                    .child(
+                        Button::new("provider-qiniu")
+                            .label("七牛 Kodo")
+                            .when(self.provider == ProviderKind::Qiniu, |b| b.primary())
+                            .when(self.provider != ProviderKind::Qiniu, |b| b.ghost())
+                            .with_size(Size::Small)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.provider = ProviderKind::Qiniu;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("provider-aliyun")
+                            .label("阿里云 OSS")
+                            .when(self.provider == ProviderKind::Aliyun, |b| b.primary())
+                            .when(self.provider != ProviderKind::Aliyun, |b| b.ghost())
+                            .with_size(Size::Small)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.provider = ProviderKind::Aliyun;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(self.render_field(&theme, "名称", &self.name, Some("显示名，可随时修改")))
             .child(self.render_field(

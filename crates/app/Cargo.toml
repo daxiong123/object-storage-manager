@@ -12,6 +12,7 @@ object-storage-persistence = { workspace = true }
 object-storage-macos = { workspace = true }
 object-storage-core = { workspace = true }
 object-storage-qiniu = { workspace = true }
+object-storage-aliyun = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

@@ -38,7 +38,7 @@ use gpui_component::{
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
-use object_storage_core::{ByteProgress, StorageProvider as _};
+use object_storage_core::ByteProgress;
 use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
 use object_storage_transfer::{
     TaskRunner, TransferEngine, TransferKind, TransferOp, TransferRequest, TransferState,

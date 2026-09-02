@@ -12,10 +12,10 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use object_storage_core::{StorageError, StorageProvider};
+use crate::provider::BuiltProvider;
+use object_storage_core::StorageError;
 use object_storage_domain::{Account, Bucket, ListObjectsRequest, ObjectPage, ProviderKind};
 use object_storage_persistence::{PersistedTransfer, default_db_path};
-use object_storage_qiniu::QiniuProvider;
 use tokio::runtime::Runtime;
 
 use crate::account_service::{AccountError, AccountService};
@@ -97,7 +97,7 @@ impl AppServices {
     pub fn build_provider(
         &self,
         account_id: &str,
-    ) -> Result<(Account, QiniuProvider), AppServicesError> {
+    ) -> Result<(Account, BuiltProvider), AppServicesError> {
         // 1) 缓存命中：锁即取即放（永不与账号锁嵌套）
         let cached = {
             let cache = self.lock_cached_secret();
@@ -131,8 +131,7 @@ impl AppServices {
         Ok(self.lock_accounts().list()?)
     }
 
-    /// 添加七牛账号（V1 固定 ProviderKind::Qiniu；阿里云由 AccountService 拒绝并
-    /// 给出中文错误）。Secret 只入 Keychain，元数据只入 SQLite，编排见 AccountService。
+    /// 添加七牛账号。Secret 只入 Keychain，元数据只入 SQLite。
     pub fn add_qiniu_account(
         &self,
         name: &str,
@@ -142,6 +141,18 @@ impl AppServices {
         Ok(self
             .lock_accounts()
             .add(name, ProviderKind::Qiniu, access_key, secret_key)?)
+    }
+
+    /// 添加阿里云 OSS 账号。Secret 只入 Keychain，元数据只入 SQLite。
+    pub fn add_aliyun_account(
+        &self,
+        name: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<Account, AppServicesError> {
+        Ok(self
+            .lock_accounts()
+            .add(name, ProviderKind::Aliyun, access_key, secret_key)?)
     }
 
     /// 列举某账号的全部 Bucket（首次触碰钥匙串可能弹授权；之后走会话缓存）。
