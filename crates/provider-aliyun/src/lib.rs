@@ -15,7 +15,7 @@ use object_storage_core::{ByteProgress, StorageError, StorageProvider};
 use object_storage_domain::{
     Bucket, CloudObject, ListObjectsRequest, ListingEntry, ObjectPage, ProviderKind,
 };
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, DATE, HeaderName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use sign::AliyunCredential;
@@ -69,8 +69,9 @@ impl AliyunProvider {
         })
     }
 
-    /// 使用 `x-oss-date` 签名：StringToSign 的 Date 为空，时间放进 CanonicalizedOSSHeaders。
-    /// 避免 HTTP 栈自动插入的 `Date` 与签名用的时间不一致导致 SignatureDoesNotMatch。
+    /// 同时发送 `Date` 与 `x-oss-date`（同一 GMT 字符串）。
+    /// 实测 OSS 服务端 StringToSign 的 Date 行仍填该时间，并且把 `x-oss-date`
+    /// 列入 CanonicalizedOSSHeaders；Date 留空会 SignatureDoesNotMatch。
     fn signed_headers(
         &self,
         method: &str,
@@ -79,7 +80,7 @@ impl AliyunProvider {
     ) -> Result<(String, String), StorageError> {
         let date = sign::http_gmt(SystemTime::now())?;
         let oss_headers = format!("x-oss-date:{date}\n");
-        let sts = sign::string_to_sign(method, "", content_type, "", &oss_headers, resource);
+        let sts = sign::string_to_sign(method, "", content_type, &date, &oss_headers, resource);
         let auth = sign::authorization(&self.cred, &sts);
         Ok((date, auth))
     }
@@ -98,6 +99,7 @@ impl AliyunProvider {
         let resp = self
             .http
             .get(url)
+            .header(DATE, date.clone())
             .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
@@ -218,6 +220,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .http
             .get(url)
+            .header(DATE, date.clone())
             .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
@@ -277,6 +280,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .http
             .get(url)
+            .header(DATE, date.clone())
             .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
@@ -307,6 +311,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .download_http
             .get(url)
+            .header(DATE, date.clone())
             .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
@@ -409,6 +414,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .upload_http
             .put(url)
+            .header(DATE, date.clone())
             .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(CONTENT_TYPE, content_type)
             .header(AUTHORIZATION, auth)
@@ -434,6 +440,7 @@ impl StorageProvider for AliyunProvider {
         let resp = self
             .http
             .delete(url)
+            .header(DATE, date.clone())
             .header(HeaderName::from_static("x-oss-date"), date.clone())
             .header(AUTHORIZATION, auth)
             .send()
@@ -714,7 +721,7 @@ mod tests {
         let date = req.header("x-oss-date").expect("必须带 x-oss-date");
         let expected = sign::authorization(
             &AliyunCredential::new("test-ak", "test-sk").unwrap(),
-            &sign::string_to_sign("GET", "", "", "", &format!("x-oss-date:{date}\n"), "/"),
+            &sign::string_to_sign("GET", "", "", date, &format!("x-oss-date:{date}\n"), "/"),
         );
         assert_eq!(auth, expected);
     }
@@ -766,7 +773,7 @@ mod tests {
                 "GET",
                 "",
                 "",
-                "",
+                date,
                 &format!("x-oss-date:{date}\n"),
                 &resource,
             ),
@@ -796,7 +803,7 @@ mod tests {
                 "DELETE",
                 "",
                 "",
-                "",
+                date,
                 &format!("x-oss-date:{date}\n"),
                 &resource,
             ),
