@@ -30,6 +30,9 @@ pub enum AppServicesError {
     Provider(#[from] StorageError),
     #[error("创建异步运行时失败：{0}")]
     Runtime(String),
+    /// rename 的复合失败（新对象已建成但旧对象未删等中间态）
+    #[error("{0}")]
+    Rename(String),
 }
 
 /// 会话内 Secret 缓存条目：仅保留最近使用账号的一条 SK。
@@ -214,6 +217,64 @@ impl AppServices {
             .block_on(provider.signed_get_url(bucket, key, ttl_secs))?)
     }
 
+    /// 远端重命名（云端无原子 rename）：下载到临时文件 → 上传新 key →
+    /// 删旧 key。失败语义：
+    /// - 下载/上传失败：旧对象完好，报错即止（不删旧）；
+    /// - 删旧失败：新对象已建成，报复合错误（不静默，用户可手动清理）。
+    ///
+    /// 临时文件名以进程 + 纳秒命名，落系统临时目录（非 Secret，可留痕）。
+    pub fn rename_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        old_key: &str,
+        new_key: &str,
+    ) -> Result<(), AppServicesError> {
+        if old_key == new_key {
+            return Err(StorageError::InvalidInput("新名称与原名称相同".into()).into());
+        }
+        let (_, provider) = self.build_provider(account_id)?;
+        let tmp = std::env::temp_dir().join(format!(
+            "cloudstorage-rename-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        self.runtime
+            .block_on(provider.download_object_to_file(bucket, old_key, &tmp, None))?;
+        let upload_result = self
+            .runtime
+            .block_on(provider.upload_object_from_file(bucket, new_key, &tmp, None));
+        if let Err(error) = upload_result {
+            let cleanup = std::fs::remove_file(&tmp);
+            return Err(AppServicesError::Rename(format!(
+                "上传新名称失败（旧对象保留）：{error}；临时文件清理：{}",
+                match cleanup {
+                    Ok(()) => "已完成".to_string(),
+                    Err(e) => format!("失败 {e}（残留：{}）", tmp.display()),
+                }
+            )));
+        }
+        let cleanup = std::fs::remove_file(&tmp);
+        if let Err(e) = cleanup {
+            eprintln!(
+                "[rename] 临时文件清理失败（不影响结果）：{}：{e}",
+                tmp.display()
+            );
+        }
+        if let Err(error) = self
+            .runtime
+            .block_on(provider.delete_object(bucket, old_key))
+        {
+            return Err(AppServicesError::Rename(format!(
+                "新对象已上传，但删除旧对象失败（远端同时存在 {old_key} 与 {new_key}）：{error}"
+            )));
+        }
+        Ok(())
+    }
+
     /// tokio 运行时句柄（Transfer Engine 用它 spawn 任务 future）。
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
@@ -375,6 +436,18 @@ mod tests {
             .unwrap();
         services.clear_transfers().unwrap();
         assert!(services.take_transfers().unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// rename 快速失败路径：同名直接拒绝，不建 provider（不碰钥匙串/网络）。
+    #[test]
+    fn rename_rejects_same_key_without_side_effects() {
+        let (db, dir) = temp_db("rename-same");
+        let services = AppServices::open_at(&db).unwrap();
+        let err = services
+            .rename_object("no-such-account", "b", "a.txt", "a.txt")
+            .unwrap_err();
+        assert!(err.to_string().contains("新名称与原名称相同"), "实际 {err}");
         fs::remove_dir_all(dir).unwrap();
     }
 }

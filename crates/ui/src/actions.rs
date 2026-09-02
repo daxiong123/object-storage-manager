@@ -33,6 +33,8 @@ actions!(
         SaveTextObject,
         // 全选当前对象列表：⌘A（仅 Workspace 上下文，不吞文本输入的原生响应链）
         SelectObjectAll,
+        // 行内重命名：Return（仅 Workspace 上下文，Finder 式，不弹 Dialog）
+        RenameObject,
     ]
 );
 
@@ -46,6 +48,10 @@ actions!(
 // 自建模态（添加账号等）的关闭：仅通过 context "AccountModal" 生效。
 // 输入框未处理 Esc 时会 propagate 到这里（与命令面板同一机制）。
 actions!(cloud_storage, [DismissModal]);
+
+// 行内重命名的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
+// 未设 clean_on_escape，Esc 由 Input escape() propagate 到这里。
+actions!(cloud_storage, [DismissRename]);
 
 // Edit 菜单专用：通过 `MenuItem::os_action` 触发 macOS 原生编辑行为。
 //
@@ -74,10 +80,14 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §7：⌘A 全选当前对象列表。绑定在 Workspace context（非全局），
         // 命令面板/输入框聚焦时按键由组件原生响应链处理，不会被吞。
         KeyBinding::new("cmd-a", SelectObjectAll, Some("Workspace")),
+        // 规范 §42：Return 进 Inline Rename（Finder 式）。绑定 Workspace context，
+        // 命令面板输入框聚焦时 Return 由面板自己的 PressEnter 处理，不受影响。
+        KeyBinding::new("enter", RenameObject, Some("Workspace")),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
         KeyBinding::new("down", PaletteSelectNext, Some("Palette")),
         KeyBinding::new("escape", DismissModal, Some("AccountModal")),
+        KeyBinding::new("escape", DismissRename, Some("Renaming")),
     ]);
 }

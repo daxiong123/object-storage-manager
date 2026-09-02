@@ -22,8 +22,8 @@ use gpui_component::{
 
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, PaletteClose,
-    PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh, SaveTextObject,
-    SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
+    PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject,
+    SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
 };
 
 /// 自定义命令处理器（无键位提示）。
@@ -123,6 +123,8 @@ impl CommandPaletteView {
             PaletteCommand::action("刷新", Box::new(Refresh)).keywords(&["refresh", "reload"]),
             PaletteCommand::action("全选对象", Box::new(SelectObjectAll))
                 .keywords(&["select", "all", "objects"]),
+            PaletteCommand::action("重命名…", Box::new(RenameObject))
+                .keywords(&["rename", "modify", "name"]),
             PaletteCommand::action("删除对象…", Box::new(DeleteObject))
                 .keywords(&["delete", "remove"]),
             PaletteCommand::action("预览对象", Box::new(PreviewObject))

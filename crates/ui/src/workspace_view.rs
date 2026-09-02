@@ -33,8 +33,9 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
-    button::ButtonVariants as _, h_flex, input::Input, input::InputState, progress::Progress,
-    resizable::h_resizable, resizable::resizable_panel, spinner::Spinner, v_flex,
+    button::ButtonVariants as _, h_flex, input::Input, input::InputEvent, input::InputState,
+    progress::Progress, resizable::h_resizable, resizable::resizable_panel, spinner::Spinner,
+    v_flex,
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
@@ -47,9 +48,9 @@ use object_storage_transfer::{
 
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenCommandPalette,
-    PreviewObject, Quit, Refresh, SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar,
-    UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissRename, DownloadObject,
+    OpenCommandPalette, PreviewObject, Quit, Refresh, RenameObject, SaveTextObject,
+    SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 
@@ -148,6 +149,10 @@ pub struct WorkspaceView {
     selected_object_keys: indexmap::IndexSet<String>,
     /// 范围选择锚点（entries 下标；上次普通/⌘点击的对象）。
     selection_anchor: Option<usize>,
+    /// 行内重命名进行中：(对象 key，输入框)。Some 时该行渲染为输入框。
+    renaming: Option<(String, Entity<InputState>)>,
+    /// rename 后台执行中（防重入）。
+    renaming_busy: bool,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -267,6 +272,26 @@ pub(crate) fn apply_object_selection(
     }
 }
 
+/// 由当前 key 和新名字推导 rename 目标 key：只替换最后一段（`/` 后的
+/// 文件名部分），保持目录前缀不变。名字含 `/` 视为非法（不允许借
+/// rename 移动目录，防误操作把对象搬进意外前缀）。
+pub(crate) fn rename_target_key(current_key: &str, new_name: &str) -> Result<String, String> {
+    let name = new_name.trim();
+    if name.is_empty() {
+        return Err("名称不能为空".into());
+    }
+    if name.contains('/') {
+        return Err("名称不能包含 /".into());
+    }
+    if name == "." || name == ".." {
+        return Err("名称不能是 . 或 ..".into());
+    }
+    match current_key.rsplit_once('/') {
+        Some((prefix, _)) => Ok(format!("{prefix}/{name}")),
+        None => Ok(name.to_string()),
+    }
+}
+
 impl WorkspaceView {
     pub fn new(services: Arc<AppServices>, cx: &mut Context<Self>) -> Self {
         // 传输引擎：任务执行体注入 AppServices 下载（provider 构建即锁即放），
@@ -349,6 +374,8 @@ impl WorkspaceView {
             selected_object_key: None,
             selected_object_keys: indexmap::IndexSet::new(),
             selection_anchor: None,
+            renaming: None,
+            renaming_busy: false,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -595,6 +622,7 @@ impl WorkspaceView {
         self.selected_object_key = None;
         self.selected_object_keys.clear();
         self.selection_anchor = None;
+        self.renaming = None;
     }
 
     /// 下钻到某个目录前缀。
@@ -1301,6 +1329,159 @@ impl WorkspaceView {
         self.selected_object_key = self.selected_object_keys.last().cloned();
         self.selection_anchor = anchor;
         cx.notify();
+    }
+
+    /// Return：进入行内重命名（Finder 式）。多选（≠1）时忽略——批量改名
+    /// 语义不明确，不做。已在重命名中则视为提交（输入框 Return 走这里前
+    /// 先被 Input 组件消费，此处兜底）。
+    fn handle_rename_object(
+        &mut self,
+        _: &RenameObject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.add_modal.is_some() {
+            return;
+        }
+        if self.renaming.is_some() || self.renaming_busy {
+            return;
+        }
+        if self.selected_object_keys.len() > 1 {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "多选状态下不支持重命名，请只选中一个对象".into(),
+            });
+            cx.notify();
+            return;
+        }
+        let Some(object) = self.selected_cloud_object() else {
+            return;
+        };
+        let key = object.key.clone();
+        let initial = display_name(&key).to_string();
+        let editor = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+        // Return 提交：单行 Input 对 Enter emit PressEnter 后 propagate（不会
+        // 二次触发 RenameObject——Workspace context 的 enter 绑定在 keymap 里
+        // 已被 Input context 的绑定先消费）。
+        cx.subscribe_in(&editor, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.commit_rename(cx);
+            }
+        })
+        .detach();
+        let focus_editor = editor.clone();
+        focus_editor.update(cx, |state, cx| state.focus(window, cx));
+        self.renaming = Some((key, editor));
+        cx.notify();
+    }
+
+    /// 提交行内重命名：读取输入 → 校验目标 key → 后台
+    /// 下载到临时文件 → 上传新 key → 删旧 key。失败不静默。
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some((old_key, editor)) = self.renaming.clone() else {
+            return;
+        };
+        if self.renaming_busy {
+            return;
+        }
+        let new_name = editor.read(cx).value().to_string();
+        // 无变化：直接退出编辑态（Finder 行为）
+        if new_name == display_name(&old_key) {
+            self.renaming = None;
+            cx.notify();
+            return;
+        }
+        let new_key = match rename_target_key(&old_key, &new_name) {
+            Ok(key) => key,
+            Err(message) => {
+                self.download_message = Some(DownloadMessage {
+                    is_error: true,
+                    text: message,
+                });
+                cx.notify();
+                return;
+            }
+        };
+        // 目标 key 已存在：明确提示冲突（云端 GET 不报错即存在，用列举
+        // 结果判断——entries 里查即可，覆盖当前列表可见范围；翻页场景
+        // 由上传侧 File::create 语义兜底？不，远端覆盖。用 provider 上传
+        // 是覆盖语义，所以必须先查；entries 不可靠，直接调 head？OSS 无
+        // head 封装。妥协：上传前查 entries + 明确告知覆盖风险）。
+        if self
+            .entries
+            .iter()
+            .any(|e| matches!(e, ListingEntry::Object(o) if o.key == new_key))
+        {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: format!("目标名称已存在：{}，请换一个名字", display_name(&new_key)),
+            });
+            cx.notify();
+            return;
+        }
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let services = Arc::clone(&self.services);
+        self.renaming_busy = true;
+        self.renaming = None;
+        self.download_message = None;
+        cx.notify();
+
+        let name = display_name(&old_key).to_string();
+        let new_key_display = display_name(&new_key).to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(
+                    async move { services.rename_object(&account_id, &bucket, &old_key, &new_key) },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.renaming_busy = false;
+                match result {
+                    Ok(()) => {
+                        this.reload_objects(cx);
+                        this.download_message = Some(DownloadMessage {
+                            is_error: false,
+                            text: format!("已重命名：{name} → {new_key_display}"),
+                        });
+                    }
+                    Err(error) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: format!("重命名失败：{error}"),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 取消行内重命名（Esc：Input escape() propagate → context "Renaming"）。
+    fn handle_dismiss_rename(
+        &mut self,
+        _: &DismissRename,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((key, _)) = &self.renaming {
+            eprintln!("[rename] cancelled key={key}");
+        }
+        self.cancel_rename(cx);
+    }
+
+    /// 取消行内重命名。
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn handle_upload_files(
@@ -2722,6 +2903,30 @@ impl WorkspaceView {
                     );
                 }
                 ListingEntry::Object(object) => {
+                    // 行内重命名进行中：该行渲染为输入框（Finder 式）
+                    if self
+                        .renaming
+                        .as_ref()
+                        .is_some_and(|(key, _)| *key == object.key)
+                    {
+                        let editor = self.renaming.as_ref().expect("刚检查过").1.clone();
+                        list = list.child(
+                            h_flex()
+                                .id(("object-row-rename", ix))
+                                // Esc 取消绑定在此 context（Input propagate 后命中）
+                                .key_context("Renaming")
+                                .mx_3()
+                                .px_2()
+                                .py(px(2.))
+                                .rounded(px(6.))
+                                .gap_2()
+                                .text_size(px(13.))
+                                .bg(theme.list_active)
+                                .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
+                                .child(div().flex_1().min_w_0().child(Input::new(&editor).small())),
+                        );
+                        continue;
+                    }
                     let selected = self.selected_object_keys.contains(&object.key);
                     let key = object.key.clone();
                     let size = format_size(object.size);
@@ -3597,6 +3802,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_copy_object_url))
             .on_action(cx.listener(Self::handle_save_text_object))
             .on_action(cx.listener(Self::handle_select_all))
+            .on_action(cx.listener(Self::handle_rename_object))
+            .on_action(cx.listener(Self::handle_dismiss_rename))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
@@ -3931,6 +4138,44 @@ mod tests {
     #[test]
     fn delete_summary_handles_missing_extensions() {
         assert_eq!(delete_summary(&["a/b".into(), "c".into()]), "（b、c）");
+    }
+
+    #[test]
+    fn rename_target_key_replaces_last_segment_only() {
+        assert_eq!(
+            rename_target_key("a/b/c.txt", "d.txt").unwrap(),
+            "a/b/d.txt"
+        );
+        assert_eq!(rename_target_key("top.txt", "new.txt").unwrap(), "new.txt");
+        // 无扩展名：替换最后一段
+        assert_eq!(rename_target_key("a/b", "c").unwrap(), "a/c");
+        // 目录前缀保持（含中文）
+        assert_eq!(
+            rename_target_key("报告/2024/summary.pdf", "2025.pdf").unwrap(),
+            "报告/2024/2025.pdf"
+        );
+    }
+
+    #[test]
+    fn rename_target_key_rejects_invalid_names() {
+        assert!(rename_target_key("a/b", "").is_err(), "空名");
+        assert!(rename_target_key("a/b", "  ").is_err(), "纯空白");
+        assert!(
+            rename_target_key("a/b", "x/y").is_err(),
+            "含 / 等于移动目录，禁止"
+        );
+        assert!(rename_target_key("a/b", ".").is_err());
+        assert!(rename_target_key("a/b", "..").is_err());
+    }
+
+    #[test]
+    fn rename_target_key_allows_dotfiles_and_inner_dots() {
+        // .gitignore 这类点开头的名字合法；名字中间的点也合法
+        assert_eq!(
+            rename_target_key("a/b", ".gitignore").unwrap(),
+            "a/.gitignore"
+        );
+        assert_eq!(rename_target_key("a/b.tar.gz", "c.zip").unwrap(), "a/c.zip");
     }
 
     #[test]

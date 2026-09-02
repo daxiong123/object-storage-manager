@@ -6,7 +6,7 @@ use object_storage_ui::{self as ui, WorkspaceView};
 use std::sync::Arc;
 use ui::actions::{
     CloseWindow, Copy, CopyObjectUrl, Cut, DeleteObject, DownloadObject, OpenCommandPalette, Paste,
-    Quit, Redo, Refresh, SaveTextObject, SelectAll, SelectObjectAll, ToggleInspector,
+    Quit, Redo, Refresh, RenameObject, SaveTextObject, SelectAll, SelectObjectAll, ToggleInspector,
     ToggleSidebar, Undo, UploadFiles, UploadFolder,
 };
 
@@ -54,6 +54,7 @@ fn app_menus() -> Vec<Menu> {
                 MenuItem::action("上传文件夹…", UploadFolder),
                 MenuItem::separator(),
                 MenuItem::action("全选", SelectObjectAll),
+                MenuItem::action("重命名…", RenameObject),
                 MenuItem::action("复制链接", CopyObjectUrl),
                 MenuItem::action("保存并上传", SaveTextObject),
                 MenuItem::separator(),
