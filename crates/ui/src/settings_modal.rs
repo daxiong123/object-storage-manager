@@ -177,10 +177,11 @@ impl Render for SettingsModal {
             .on_action(cx.listener(Self::handle_dismiss))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &gpui::MouseDownEvent, _window, _cx| {
-                    // 卡片内点击阻止冒泡到遮罩（见 overlay 的空白关闭）
-                    let _ = this;
-                }),
+                |_event: &gpui::MouseDownEvent, _window, cx| {
+                    // 卡片内点击阻断冒泡：否则事件到达遮罩的空白关闭
+                    // handler，弹窗被误关（与 AddAccountModal 同机制）
+                    cx.stop_propagation();
+                },
             )
             .child(
                 v_flex()
