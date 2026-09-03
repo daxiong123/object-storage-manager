@@ -3278,13 +3278,24 @@ impl WorkspaceView {
     }
 
     /// 对象列表本体：目录行（下钻）与对象行（选中进检查器）+ 底部统计与翻页。
+    /// 容器 capture 阶段先清空选择（点击空白 = 取消全选，Finder 语义），
+    /// 随后命中的行处理器重新写入选择 —— 事件顺序：capture（父→子）。
     fn render_object_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = v_flex()
             .id("object-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .py_1();
+            .py_1()
+            .capture_any_mouse_down(cx.listener(
+                |this, _: &MouseDownEvent, _window, cx| {
+                    if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
+                        return;
+                    }
+                    this.clear_object_selection();
+                    cx.notify();
+                },
+            ));
 
         if self.entries.is_empty() && self.objects_state == AsyncState::Idle {
             list = list.child(
@@ -3330,7 +3341,8 @@ impl WorkspaceView {
             match entry {
                 ListingEntry::CommonPrefix(prefix) => {
                     let label = display_name(prefix).to_string();
-                    let prefix = prefix.clone();
+                    let prefix_sel = prefix.clone();
+                    let prefix_nav = prefix.clone();
                     list = list.child(
                         h_flex()
                             .id(("object-row", ix))
@@ -3341,15 +3353,26 @@ impl WorkspaceView {
                             .gap_2()
                             .text_size(px(13.))
                             .hover(|row| row.bg(theme.accent))
-                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                                // 目录点击 = 下钻；经统一选择路径保留选中集合
-                                this.handle_object_row_click(
-                                    ix,
-                                    ClickedEntry::CommonPrefix(prefix.clone()),
-                                    event.modifiers(),
-                                    cx,
-                                );
-                                this.open_prefix(prefix.clone(), cx);
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(
+                                    move |this,
+                                          event: &MouseDownEvent,
+                                          _window,
+                                          cx| {
+                                        // 目录选择在下钻前应用（capture 清空之后）
+                                        this.handle_object_row_click(
+                                            ix,
+                                            ClickedEntry::CommonPrefix(prefix_sel.clone()),
+                                            event.modifiers,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // 目录点击 = 下钻（mouse up 时）
+                                this.open_prefix(prefix_nav.clone(), cx);
                             }))
                             .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
                             .child(div().truncate().child(label)),
@@ -3397,15 +3420,20 @@ impl WorkspaceView {
                             // hover 是可交互反馈用 accent
                             .when(selected, |row| row.bg(theme.list_active))
                             .hover(|row| row.bg(theme.accent))
-                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                                eprintln!("[preview] selected key={key}");
-                                this.handle_object_row_click(
-                                    ix,
-                                    ClickedEntry::Object(key.clone()),
-                                    event.modifiers(),
-                                    cx,
-                                );
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    // 选择在 mouse down 时应用（Finder 语义；
+                                    // capture 容器先清空，此处再写入）
+                                    eprintln!("[preview] selected key={key}");
+                                    this.handle_object_row_click(
+                                        ix,
+                                        ClickedEntry::Object(key.clone()),
+                                        event.modifiers,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
                             .child(
                                 div()
