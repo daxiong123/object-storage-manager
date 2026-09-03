@@ -2623,7 +2623,7 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return; // 已打开（⌘K 重复触发为无操作）
         }
-        let extra = self.bucket_jump_commands();
+        let extra = self.bucket_jump_commands(cx);
         let palette = cx.new(|cx| CommandPaletteView::new(window, cx, extra));
         // 面板关闭（open=false）后由观察者丢弃实体并归还焦点。
         cx.observe_in(&palette, window, Self::handle_palette_changed)
@@ -2635,16 +2635,25 @@ impl WorkspaceView {
 
     /// 「跳转到 Bucket」动态命令：当前账号下的每个空间一条，点击即选中
     /// （触发对象列表加载）。命令面板每次打开都重建，此处数据天然最新。
-    /// 分发带数据的 `SelectBucketByName` Action，由 WorkspaceView 统一处理。
-    fn bucket_jump_commands(&self) -> Vec<PaletteCommand> {
+    ///
+    /// 为什么不走 Action 派发：`execute_selected` 先 close 面板（焦点立即
+    /// 归还 Workspace 根），Handler 里的 `dispatch_action` 是 **deferred**——
+    /// 捕获的是派发调用时刻的焦点（已关闭的面板输入框），下一帧按该焦点
+    /// 找 dispatch tree 节点落空，Action 静默丢失（E2 验收问题根因）。
+    /// 因此直接经 WeakEntity 调用 WorkspaceView 方法，绕开焦点链。
+    fn bucket_jump_commands(&self, cx: &Context<Self>) -> Vec<PaletteCommand> {
+        let weak = cx.weak_entity();
         self.buckets
             .iter()
             .map(|bucket| {
                 let name = bucket.name.clone();
+                let weak = weak.clone();
                 PaletteCommand::handler(
                     format!("跳转：{name}"),
                     move |_window: &mut gpui::Window, cx: &mut gpui::App| {
-                        cx.dispatch_action(&SelectBucketByName(name.clone()));
+                        let _ = weak.update(cx, |this, cx| {
+                            this.select_bucket(&name, cx);
+                        });
                     },
                 )
             })
