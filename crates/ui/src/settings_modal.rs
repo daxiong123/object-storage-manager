@@ -87,6 +87,20 @@ impl SettingsModal {
         self.closed
     }
 
+    /// 在 Finder 中显示 settings.json（「打开配置文件」入口）。
+    /// 文件可能尚不存在（从未保存过）：先落一份当前值再显示。
+    fn reveal_settings_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.settings_path.clone();
+        if !path.exists() {
+            if let Err(error) = self.initial.save_at(path.clone()) {
+                self.error = Some(format!("创建配置文件失败：{error}"));
+                cx.notify();
+                return;
+            }
+        }
+        cx.reveal_path(&path);
+    }
+
     pub fn saving(&self) -> bool {
         self.saving
     }
@@ -258,20 +272,22 @@ impl Render for SettingsModal {
                                     .on_click(cx.listener(Self::handle_save)),
                             ),
                     )
-                    // 路径可能超过弹窗宽度：独占一行 + truncate（验收反馈）
+                    // 配置文件入口（验收反馈：不显示路径，直接提供打开）
                     .child(
                         h_flex()
                             .gap_1()
                             .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Info))
-                            .child(div().min_w_0().truncate().child("保存在"))
                             .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .child(self.settings_path.display().to_string()),
+                                Icon::new(IconName::FolderOpen).text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Button::new("settings-open-file")
+                                    .label("打开配置文件")
+                                    .link()
+                                    .with_size(Size::Small)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reveal_settings_file(window, cx);
+                                    })),
                             ),
                     ),
             )
