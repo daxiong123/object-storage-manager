@@ -665,6 +665,10 @@ impl WorkspaceView {
         }
         self.selected_bucket = Some(name.to_string());
         self.current_prefix = None;
+        // 跳桶 = 重上下文切换：关闭过滤条（与 Finder 语义一致；
+        // ⌘R 刷新/翻页保留过滤词——只关这里，不动 reload_objects）
+        self.object_filter = None;
+        self.filtered_ix = None;
         self.reload_objects(cx);
     }
 
@@ -707,6 +711,9 @@ impl WorkspaceView {
 
     /// 下钻到某个目录前缀。
     fn open_prefix(&mut self, prefix: String, cx: &mut Context<Self>) {
+        // 目录切换 = 重上下文切换：关闭过滤条（与跳桶同理）
+        self.object_filter = None;
+        self.filtered_ix = None;
         self.current_prefix = Some(prefix);
         self.reload_objects(cx);
     }
