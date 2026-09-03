@@ -3162,7 +3162,22 @@ impl WorkspaceView {
                 .bg(theme.background)
                 .child(self.render_content_toolbar(theme, &bucket, cx)),
             cx,
-        );
+        )
+        // 点击内容区任意非交互处 = 清空选择（Finder 语义）。capture（父先
+        // 于子）先快照再清空；⌘/⇧ 行处理器消费快照做 toggle/range。
+        // 行/按钮的 mouse-down 随后在 bubble 阶段覆盖写入。
+        .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+            if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
+                this.selection_before_capture = None;
+                return;
+            }
+            this.selection_before_capture = Some((
+                this.selected_object_keys.clone(),
+                this.selection_anchor,
+            ));
+            this.clear_object_selection_keep_baseline();
+            cx.notify();
+        }));
         // ⌘F 过滤条（开启时出现在 toolbar 与列表之间）
         if let Some(bar) = self.render_filter_bar(theme, cx) {
             content = content.child(bar);
@@ -3308,36 +3323,14 @@ impl WorkspaceView {
     }
 
     /// 对象列表本体：目录行（下钻）与对象行（选中进检查器）+ 底部统计与翻页。
-    /// 容器 capture 阶段先清空选择（点击空白 = 取消全选，Finder 语义），
-    /// 随后命中的行处理器重新写入选择 —— 事件顺序：capture（父→子）。
+    /// 点击空白清空由内容区容器的 capture 处理（见 render_content）。
     fn render_object_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = v_flex()
             .id("object-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .py_1()
-            .capture_any_mouse_down(cx.listener(
-                |this, event: &MouseDownEvent, _window, cx| {
-                    // capture（父先于子）：先保存当前选择基线，再清空。
-                    // 有修饰键（⌘/⇧）时行处理器会基于保存的基线做
-                    // toggle/range；无修饰键（普通点击/空白点击）基线作废。
-                    this.selection_before_capture =
-                        if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
-                            None
-                        } else {
-                            Some((
-                                this.selected_object_keys.clone(),
-                                this.selection_anchor,
-                            ))
-                        };
-                    if this.selection_before_capture.is_some() {
-                        this.clear_object_selection_keep_baseline();
-                        cx.notify();
-                    }
-                    let _ = event;
-                },
-            ));
+            .py_1();
 
         if self.entries.is_empty() && self.objects_state == AsyncState::Idle {
             list = list.child(
