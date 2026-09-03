@@ -41,8 +41,17 @@ Host: host[:port]\n
 |---|---|---|---|
 | 列举空间 | UC `GET https://uc.qiniuapi.com/buckets` | V2 | bucket 名字符串数组 |
 | 列举文件 | RSF `GET https://rsf.qbox.me/list?bucket=&marker=&limit=&prefix=&delimiter=` | V2 | `{marker, items[], commonPrefixes[]}` |
-| 表单上传 | Up `POST https://upload.qiniup.com/`（默认华东/智能；区域域名后续按 UC `/v4/query`） | **上传凭证**（非 V2 请求签名） | `{hash,key}` |
+| 区域查询 | UC `GET https://uc.qiniuapi.com/v4/query?ak=&bucket=`（**公开接口，无 Authorization**） | 无 | `{hosts:[{region,ttl,up:{domains[]},io,rs,rsf,...}]}`（旧名 `regions[]`） |
+| 表单上传 | `POST https://{up host}/`（host 来自 /v4/query `up.domains[0]`，进程内按 ttl 缓存；查询失败回退 `upload.qiniup.com`） | **上传凭证**（非 V2 请求签名） | `{hash,key}` |
 | 删除对象 | RS `POST https://rs.qbox.me/delete/<urlsafe_base64(bucket:key)>` | V2，无 body | 空 JSON `{}` |
+
+### 区域查询（/v4/query，官方 Rust SDK `BucketRegionsQueryer` 同构）
+
+- **无需签名**：query 里带 `ak` 明文即可（官方 SDK do_sync_query 不带 Authorization）。
+- `ttl` 在 **host 级别**（`hosts[i].ttl`），不在响应顶层；缺省 86400。
+- 旧字段名 `regions[]` 与新名 `hosts[]` 等价（serde alias 兼容两者）。
+- 上传 host 取 `hosts[0].up.domains[0]`（preferred 在前）。
+- 非华东 bucket 传华东域名会被慢路由甚至拒绝——上传必须按 bucket 解析区域。
 
 ### 上传凭证（官方 `Credential::sign_with_data`）
 

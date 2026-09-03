@@ -30,8 +30,39 @@ pub use sign::QiniuCredential;
 const DEFAULT_UC_ENDPOINT: &str = "https://uc.qiniuapi.com";
 /// 官方 RSF 服务端点（列举文件）
 const DEFAULT_RSF_ENDPOINT: &str = "https://rsf.qbox.me";
-/// 官方表单上传入口（华东/智能；区域专用域名后续里程碑按 UC v4/query 解析）
+/// 官方表单上传入口（华东/智能；区域专用域名按 UC /v4/query 解析并缓存，
+/// 查询失败回退到本入口）
 const DEFAULT_UP_ENDPOINT: &str = "https://upload.qiniup.com";
+/// 默认上传入口的 host（回退时替换 up host 用）
+const DEFAULT_UP_ENDPOINT_HOST: &str = "upload.qiniup.com";
+
+/// UC /v4/query 响应体（官方 Rust SDK `structs.rs` 同构；
+/// `hosts` 为新字段名，`regions` 为旧别名——serde alias 处理）。
+#[derive(Debug, serde::Deserialize)]
+struct RegionQueryBody {
+    #[serde(default, alias = "regions")]
+    hosts: Vec<RegionQueryHost>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RegionQueryHost {
+    /// 上传服务域名组（preferred 在前）
+    up: RegionQueryDomains,
+    /// 该 host 的缓存有效期（秒）；缺省 86400（官方 default_ttl）。
+    /// ttl 在 host 级别而非响应顶层（官方 RegionResponseBody 同构）。
+    #[serde(default = "default_region_ttl")]
+    ttl: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RegionQueryDomains {
+    #[serde(default)]
+    domains: Vec<String>,
+}
+
+fn default_region_ttl() -> u64 {
+    86_400
+}
 /// 官方 RS 服务端点（对象管理：删除/stat/move）
 const DEFAULT_RS_ENDPOINT: &str = "https://rs.qbox.me";
 
@@ -49,6 +80,18 @@ pub struct QiniuProvider {
     up_base: reqwest::Url,
     /// 下载域名协议（生产恒为 https；测试指向本地 mock 时切 http）
     download_use_https: bool,
+    /// 区域缓存（bucket → 上传端点）：UC /v4/query 结果 + 到期时刻。
+    /// 只缓存 up 域名（本 App 用到的区域能力只有上传；下载走空间绑定域名，
+    /// 删除/列举走全局 RS/RSF，均可路由）。
+    region_cache: std::sync::Mutex<std::collections::HashMap<String, CachedUpEndpoint>>,
+}
+
+/// 区域上传端点缓存条目。
+struct CachedUpEndpoint {
+    /// 上传域名（https 前缀在用时装上，避免缓存里混协议）
+    host: String,
+    /// 缓存到期时刻（UC 响应 ttl；到期后重新查询）
+    expires_at: std::time::Instant,
 }
 
 impl QiniuProvider {
@@ -112,6 +155,7 @@ impl QiniuProvider {
             rs_base,
             up_base,
             download_use_https: true,
+            region_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -173,6 +217,95 @@ impl QiniuProvider {
             ))
         })?;
         Ok(domains)
+    }
+
+    /// 查询空间所在区域的上传域名。UC `GET /v4/query?ak=&bucket=`
+    /// （公开接口，无需签名——官方 Rust SDK `BucketRegionsQueryer::do_sync_query`
+    /// 同样不带 Authorization）。响应含 `hosts[]`（兼容旧字段名 `regions[]`），
+    /// 每项 `up.domains[]` 是该区域上传域名（preferred 在前）。
+    ///
+    /// 结果按 bucket 缓存（TTL 取响应 `ttl` 秒，缺省 86400）；查询失败回退
+    /// 默认智能上传入口 `upload.qiniup.com`（可路由任意区域，慢但可用）。
+    async fn bucket_up_host(&self, bucket: &str) -> String {
+        // 1) 缓存命中（未过期）直接用
+        if let Some(host) = self.cached_up_host(bucket) {
+            return host;
+        }
+        // 2) UC 查询
+        match self.query_up_host(bucket).await {
+            Ok((host, ttl)) => {
+                self.cache_up_host(bucket, &host, ttl);
+                host
+            }
+            Err(error) => {
+                eprintln!(
+                    "[qiniu] region query failed (bucket={bucket}), fallback to {DEFAULT_UP_ENDPOINT_HOST}: {error}"
+                );
+                DEFAULT_UP_ENDPOINT_HOST.to_string()
+            }
+        }
+    }
+
+    fn cached_up_host(&self, bucket: &str) -> Option<String> {
+        let cache = self.region_cache.lock().expect("区域缓存锁毒化");
+        cache
+            .get(bucket)
+            .filter(|c| c.expires_at > std::time::Instant::now())
+            .map(|c| c.host.clone())
+    }
+
+    /// 本地 mock 测试模式：UC 端点指向 127.0.0.1/localhost 时，上传也直接
+    /// 打到 `up_base`（测试用端点），不做真实区域解析。
+    fn is_test_mode(&self) -> bool {
+        matches!(
+            self.uc_base.host_str(),
+            Some("127.0.0.1") | Some("localhost")
+        )
+    }
+
+    fn cache_up_host(&self, bucket: &str, host: &str, ttl_secs: u64) {
+        let mut cache = self.region_cache.lock().expect("区域缓存锁毒化");
+        cache.insert(
+            bucket.to_string(),
+            CachedUpEndpoint {
+                host: host.to_string(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(ttl_secs),
+            },
+        );
+    }
+
+    async fn query_up_host(&self, bucket: &str) -> Result<(String, u64), StorageError> {
+        let mut url = self.uc_url("v4/query")?;
+        url.set_query(Some(&format!(
+            "ak={}&bucket={}",
+            sign::percent_encode_query_value(self.cred.access_key()),
+            sign::percent_encode_query_value(bucket)
+        )));
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| StorageError::Network(format!("bucket_region: {e}")))?;
+        let resp = self.check_status(resp, "bucket_region").await?;
+        let text = text_or_invalid(resp, "bucket_region").await?;
+        let body: RegionQueryBody = serde_json::from_str(&text).map_err(|e| {
+            StorageError::InvalidResponse(format!(
+                "bucket_region: {e}; body={}",
+                truncate(&text, 500)
+            ))
+        })?;
+        let Some(first) = body.hosts.first() else {
+            return Err(StorageError::InvalidResponse(format!(
+                "bucket_region: 空间 {bucket} 区域查询返回空 hosts"
+            )));
+        };
+        if first.up.domains.is_empty() {
+            return Err(StorageError::InvalidResponse(format!(
+                "bucket_region: 空间 {bucket} 区域查询无 up 域名"
+            )));
+        }
+        Ok((first.up.domains[0].clone(), first.ttl))
     }
 
     /// 生成带签名的下载 URL。token 含 SK 派生签名，调用方不得写入日志。
@@ -515,6 +648,17 @@ impl StorageProvider for QiniuProvider {
             .as_secs()
             + 3600;
         let token = sign::upload_token(&self.cred, bucket, key, deadline);
+        // 区域上传域名：UC /v4/query 解析（带缓存）；非华东 bucket 上传到
+        // 华东域名会被慢路由甚至拒绝，因此必须按 bucket 解析。
+        // 测试模式（本地 mock）直接用注入的 up_base。
+        let up_url = if self.is_test_mode() {
+            self.up_base.clone()
+        } else {
+            let up_host = self.bucket_up_host(bucket).await;
+            format!("https://{up_host}/")
+                .parse()
+                .map_err(|e| StorageError::InvalidInput(format!("上传端点不合法: {e}")))?
+        };
         let file_name = source
             .file_name()
             .and_then(|n| n.to_str())
@@ -561,7 +705,7 @@ impl StorageProvider for QiniuProvider {
 
         let resp = self
             .upload_http
-            .post(self.up_base.clone())
+            .post(up_url)
             .multipart(form)
             .send()
             .await
@@ -1087,6 +1231,81 @@ mod tests {
             .block_on(provider.delete_object("b1", ""))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
+    }
+
+    #[test]
+    fn region_query_parses_up_domains_and_caches() {
+        // UC mock 返回官方 /v4/query 结构（新字段名 hosts + preferred domains）
+        let body = r#"{
+            "hosts": [
+                {
+                    "region": "z1",
+                    "ttl": 3600,
+                    "up": {"domains": ["up-z1.qiniup.com", "upload-z1.qiniup.com"]},
+                    "io": {"domains": ["iovip-z1.qiniuio.com"]},
+                    "uc": {"domains": ["ucqbox.com"]},
+                    "rs": {"domains": ["rs-z1.qbox.me"]},
+                    "rsf": {"domains": ["rsf-z1.qbox.me"]},
+                    "api": {"domains": ["api-z1.qiniuapi.com"]},
+                    "s3": {"domains": ["s3-z1.qiniuapi.com"]}
+                }
+            ]
+        }"#;
+        let (addr, captured) = spawn_mock(200, body);
+        let provider = test_provider(addr);
+
+        // 测试模式 is_test_mode 挡住真实解析；这里直接调 query_up_host 验证解析
+        let (host, ttl) = tokio().block_on(provider.query_up_host("b1")).unwrap();
+        assert_eq!(
+            host, "up-z1.qiniup.com",
+            "取 up.domains 第一个（preferred）"
+        );
+        assert_eq!(ttl, 3600);
+        let req = captured.lock().unwrap().take().unwrap();
+        assert!(
+            req.request_line.starts_with("GET /v4/query?"),
+            "request_line={}",
+            req.request_line
+        );
+        assert!(
+            req.request_line.contains("bucket=b1"),
+            "请求必须带 bucket 参数"
+        );
+        assert!(
+            req.request_line.contains("ak=test-ak"),
+            "请求必须带 ak 参数"
+        );
+        assert!(
+            req.header("Authorization").is_none(),
+            "/v4/query 是公开接口，不带 Authorization"
+        );
+
+        // 缓存写入后命中（不再发请求）
+        provider.cache_up_host("b1", "cached.example.com", 600);
+        assert_eq!(
+            provider.cached_up_host("b1").as_deref(),
+            Some("cached.example.com")
+        );
+    }
+
+    #[test]
+    fn region_query_accepts_legacy_regions_field_and_default_ttl() {
+        // 旧字段名 regions + 无 ttl（官方 serde alias + default_ttl 语义）
+        let body = r#"{"regions": [{"up": {"domains": ["up-z0.qiniup.com"]}}]}"#;
+        let (addr, _captured) = spawn_mock(200, body);
+        let provider = test_provider(addr);
+        let (host, ttl) = tokio().block_on(provider.query_up_host("b1")).unwrap();
+        assert_eq!(host, "up-z0.qiniup.com");
+        assert_eq!(ttl, 86_400);
+    }
+
+    #[test]
+    fn region_query_error_response_fails_cleanly() {
+        // 631 空间不存在：check_status 报 Api 错误（不静默吞掉）
+        let (addr, _captured) = spawn_mock(631, r#"{"error":"no such bucket"}"#);
+        let provider = test_provider(addr);
+        let err = tokio().block_on(provider.query_up_host("b1")).unwrap_err();
+        assert!(matches!(err, StorageError::Api { .. }), "实际 {err:?}");
     }
 
     #[test]
