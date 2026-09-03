@@ -50,9 +50,9 @@ use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
-    DownloadObject, OpenCommandPalette, OpenSettings, PreviewObject, Quit, Refresh, RenameObject,
-    SaveTextObject, SelectBucketByName, SelectObjectAll, ToggleInspector, ToggleObjectFilter,
-    ToggleSidebar, UploadFiles, UploadFolder,
+    DownloadObject, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh,
+    RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
+    ToggleInspector, ToggleObjectFilter, ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 use crate::settings_modal::SettingsModal;
@@ -319,6 +319,25 @@ pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> V
         })
         .map(|(ix, _)| ix)
         .collect()
+}
+
+/// 判断本地缓存文件是否对应当前选中的对象（缓存复用判据）：
+/// 缓存文件名形如 `{nanos}-{display_name}`，只需后缀匹配 display_name。
+/// `None` path / 无 key 一律不复用（保守：多下载一次好过开错文件）。
+pub(crate) fn cached_copy_matches(path: Option<&std::path::Path>, object_key: &str) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    if object_key.is_empty() {
+        return false;
+    }
+    let name = display_name(object_key);
+    if name.is_empty() {
+        return false;
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(name) && n.len() > name.len())
 }
 
 impl WorkspaceView {
@@ -1072,6 +1091,141 @@ impl WorkspaceView {
             .expect("预览结果回传 UI 失败");
         })
         .detach();
+    }
+
+    /// 确保选中对象有本地副本：`preview_path` 已有（同 key）→ 直接复用；
+    /// 否则下载到临时目录（与预览同一缓存位置）。返回 (本地路径, key)。
+    /// 异步；结果经 `then` 回调（在 UI 线程执行）。
+    fn ensure_local_copy(
+        &mut self,
+        then: impl FnOnce(&mut Self, PathBuf, String, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self
+            .selected_cloud_object()
+            .map(|object| object.key.clone())
+        else {
+            return;
+        };
+        // 已有本地副本且对应当前对象：直接用
+        let current = self.selected_object_key.clone().unwrap_or_default();
+        if cached_copy_matches(self.preview_path.as_deref(), &current) {
+            let path = self.preview_path.clone().expect("刚检查过");
+            then(self, path, key, cx);
+            return;
+        }
+        if self.previewing {
+            return; // 已有下载在进行：防重入
+        }
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let name = display_name(&key).to_string();
+        let mut path = std::env::temp_dir();
+        path.push("CloudStorage");
+        path.push("preview");
+        path.push(format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("系统时间早于 Unix epoch")
+                .as_nanos(),
+            name
+        ));
+        self.previewing = true;
+        self.download_message = None;
+        cx.notify();
+        let services = Arc::clone(&self.services);
+        let key_for_result = key.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::create_dir_all(path.parent().expect("预览路径必须有父目录"))
+                        .map_err(|e| format!("创建缓存目录失败：{e}"))?;
+                    services
+                        .download_object(&account_id, &bucket, &key, &path)
+                        .map_err(|e| format!("下载对象失败：{e}"))?;
+                    Ok::<_, String>(path)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.previewing = false;
+                match result {
+                    Ok(path) => {
+                        this.preview_path = Some(path.clone());
+                        then(this, path, key_for_result, cx);
+                    }
+                    Err(error) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: error,
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// ⌘O / Inspector「打开」：用默认应用打开选中对象的本地副本
+    /// （spec §14：下载到 Temporary Directory → NSWorkspace open）。
+    fn handle_open_object(&mut self, _: &OpenObject, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
+            return;
+        }
+        self.ensure_local_copy(
+            |this, path, _key, cx| {
+                if let Err(error) = object_storage_macos::open_with_default_app(&path) {
+                    this.download_message = Some(DownloadMessage {
+                        is_error: true,
+                        text: format!("打开失败：{error}"),
+                    });
+                    cx.notify();
+                } else {
+                    this.download_message = Some(DownloadMessage {
+                        is_error: false,
+                        text: format!(
+                            "已用默认应用打开：{}",
+                            display_name(&path.display().to_string())
+                        ),
+                    });
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Inspector「在 Finder 中显示」（spec §16）：gpui reveal_path。
+    fn handle_reveal_in_finder(
+        &mut self,
+        _: &RevealInFinder,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
+            return;
+        }
+        self.ensure_local_copy(
+            |this, path, _key, cx| {
+                cx.reveal_path(&path);
+                this.download_message = Some(DownloadMessage {
+                    is_error: false,
+                    text: format!(
+                        "已在 Finder 中显示：{}",
+                        display_name(&path.display().to_string())
+                    ),
+                });
+                cx.notify();
+            },
+            cx,
+        );
     }
 
     fn start_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3638,6 +3792,28 @@ impl WorkspaceView {
                                         ),
                                 )
                                 .child(
+                                    Button::new("open-object")
+                                        .label("打开")
+                                        .disabled(self.previewing)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.handle_open_object(&OpenObject, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("reveal-object")
+                                        .label("Finder")
+                                        .disabled(self.previewing)
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.handle_reveal_in_finder(
+                                                &RevealInFinder,
+                                                window,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                                .child(
                                     Button::new("download-object")
                                         .label(if self.downloading {
                                             "下载中…"
@@ -4111,6 +4287,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_dismiss_filter))
             .on_action(cx.listener(Self::handle_select_bucket_by_name))
             .on_action(cx.listener(Self::handle_open_settings))
+            .on_action(cx.listener(Self::handle_open_object))
+            .on_action(cx.listener(Self::handle_reveal_in_finder))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
@@ -4553,6 +4731,32 @@ mod tests {
             entry_object("a/c.txt"),
         ];
         assert_eq!(filter_entries(&entries, Some("a")), vec![1, 2]);
+    }
+
+    #[test]
+    fn cached_copy_matches_requires_suffix_and_prefix() {
+        // 缓存文件名 = {nanos}-{display_name}；后缀命中且 nanos 前缀非空
+        assert!(cached_copy_matches(
+            Some(std::path::Path::new("/tmp/preview/123-a b.png")),
+            "x/a b.png"
+        ));
+        // key 不同 → 不复用
+        assert!(!cached_copy_matches(
+            Some(std::path::Path::new("/tmp/preview/123-a b.png")),
+            "x/other.png"
+        ));
+        // 纯名字相等（没有 nanos 前缀）不算命中——防止 /tmp/report.pdf 这种
+        // 巧合路径被误判为 report.pdf 的缓存
+        assert!(!cached_copy_matches(
+            Some(std::path::Path::new("/tmp/report.pdf")),
+            "report.pdf"
+        ));
+        // 无缓存 / 空 key
+        assert!(!cached_copy_matches(None, "a"));
+        assert!(!cached_copy_matches(
+            Some(std::path::Path::new("/tmp/1-a")),
+            ""
+        ));
     }
 
     #[test]

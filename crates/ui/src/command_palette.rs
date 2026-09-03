@@ -21,9 +21,10 @@ use gpui_component::{
 };
 
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenSettings,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenObject, OpenSettings,
     PaletteClose, PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject,
-    SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles, UploadFolder,
+    RevealInFinder, SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles,
+    UploadFolder,
 };
 
 /// 自定义命令处理器（无键位提示）。
@@ -129,6 +130,10 @@ impl CommandPaletteView {
             ]),
             PaletteCommand::action("下载对象…", Box::new(DownloadObject))
                 .keywords(&["download", "object"]),
+            PaletteCommand::action("用默认应用打开", Box::new(OpenObject))
+                .keywords(&["open", "with", "launch"]),
+            PaletteCommand::action("在 Finder 中显示", Box::new(RevealInFinder))
+                .keywords(&["finder", "show", "reveal", "folder"]),
             PaletteCommand::action("上传文件…", Box::new(UploadFiles))
                 .keywords(&["upload", "file"]),
             PaletteCommand::action("上传文件夹…", Box::new(UploadFolder)).keywords(&[

@@ -45,6 +45,10 @@ actions!(
         ToggleObjectFilter,
         // 打开设置：⌘,（菜单 / 快捷键共享）
         OpenSettings,
+        // 用默认应用打开选中对象（spec §14：下载到临时目录 → NSWorkspace open）
+        OpenObject,
+        // 在 Finder 中显示选中对象的本地副本（spec §16）
+        RevealInFinder,
     ]
 );
 
@@ -101,6 +105,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-f", ToggleObjectFilter, Some("Workspace")),
         // 规范 ⌘,：设置。
         KeyBinding::new("cmd-,", OpenSettings, None),
+        // 规范 ⌘O：用默认应用打开选中对象。
+        KeyBinding::new("cmd-o", OpenObject, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
