@@ -167,6 +167,9 @@ pub struct WorkspaceView {
     /// capture 清空前的选择快照：(集合, 锚点)。行 mouse-down 处理器
     /// 消费（⌘/⇧ 基线）；普通点击不消费（下一次 capture 覆盖）。
     selection_before_capture: Option<(indexmap::IndexSet<String>, Option<usize>)>,
+    /// 本次 mouse-down 是否已命中对象行（行处理器置位；内容区容器读取后
+    /// 复位——未消费即点击空白，清空选择）。
+    row_mouse_down_consumed: bool,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -442,6 +445,7 @@ impl WorkspaceView {
             settings_path,
             settings_modal: None,
             selection_before_capture: None,
+            row_mouse_down_consumed: false,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -700,9 +704,6 @@ impl WorkspaceView {
 
     /// capture 清空：清集合但保留锚点（⇧ 范围基线），并把集合暂存到
     /// `selection_before_capture` 供 ⌘/⇧ 行处理器取回。
-    /// 调用约定：capture 里先写 `selection_before_capture`，行处理器消费后
-    /// 置回 None；普通点击（无修饰键）不消费，锚点随 clear_object_selection
-    /// 清掉——由 handle_object_row_click 的普通分支覆盖锚点。
     fn clear_object_selection_keep_baseline(&mut self) {
         self.selected_object_key = None;
         self.selected_object_keys.clear();
@@ -1486,6 +1487,8 @@ impl WorkspaceView {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
+        // 标记本次 mouse-down 命中了行（容器 handler 据此跳过空白清空）
+        self.row_mouse_down_consumed = true;
         // capture 阶段已清空集合；⌘/⇧ 需要点击前的选择基线（toggle/range）。
         // 普通点击直接用空集合（单选语义），基线随后作废。
         let (baseline, baseline_anchor) = if modifiers.platform || modifiers.shift {
@@ -3163,21 +3166,29 @@ impl WorkspaceView {
                 .child(self.render_content_toolbar(theme, &bucket, cx)),
             cx,
         )
-        // 点击内容区任意非交互处 = 清空选择（Finder 语义）。capture（父先
-        // 于子）先快照再清空；⌘/⇧ 行处理器消费快照做 toggle/range。
-        // 行/按钮的 mouse-down 随后在 bubble 阶段覆盖写入。
-        .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-            if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
-                this.selection_before_capture = None;
-                return;
-            }
-            this.selection_before_capture = Some((
-                this.selected_object_keys.clone(),
-                this.selection_anchor,
-            ));
-            this.clear_object_selection_keep_baseline();
-            cx.notify();
-        }));
+        // 点击空白清空（Finder 语义）：gpui bubble 顺序 = 子先于父（后注册
+        // 先执行），行的 mouse-down 先写选择并置消费标记；容器随后执行——
+        // 未被行/按钮消费（按钮 stop_propagation 不冒泡）即点击空白 → 清空。
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                if !this.row_mouse_down_consumed {
+                    // 快照语义与 capture 版一致（⌘/⇧ 不会走到这——带修饰键
+                    // 的点击一定命中行；保险起见同样保留快照）
+                    if !(this.selected_object_keys.is_empty()
+                        && this.selected_object_key.is_none())
+                    {
+                        this.selection_before_capture = Some((
+                            this.selected_object_keys.clone(),
+                            this.selection_anchor,
+                        ));
+                        this.clear_object_selection_keep_baseline();
+                        cx.notify();
+                    }
+                }
+                this.row_mouse_down_consumed = false;
+            }),
+        );
         // ⌘F 过滤条（开启时出现在 toolbar 与列表之间）
         if let Some(bar) = self.render_filter_bar(theme, cx) {
             content = content.child(bar);
