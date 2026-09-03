@@ -2441,22 +2441,17 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// 设置模态观察：saved（保存成功 → 应用并丢弃）/ closed（取消）后丢弃实体。
+    /// 设置模态观察：每次保存（弹窗保持打开，验收反馈）取出并应用新值；
+    /// 仅 closed（取消/Esc/点遮罩）时丢弃实体。
     fn handle_settings_modal_changed(
         &mut self,
         modal: Entity<SettingsModal>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (closed, saved) = {
-            let m = modal.read(cx);
-            (m.closed(), m.done().cloned())
-        };
-        if !closed && saved.is_none() {
-            return;
-        }
-        self.settings_modal = None;
-        window.focus(&self.focus_handle);
+        let closed = modal.read(cx).closed();
+        // 保存成功（弹窗不关）：就地应用新设置 + 底部提示
+        let saved = modal.update(cx, |modal, _| modal.take_saved());
         if let Some((settings, changed)) = saved {
             self.settings = settings;
             if changed {
@@ -2468,7 +2463,13 @@ impl WorkspaceView {
                     ),
                 });
             }
+            cx.notify();
         }
+        if !closed {
+            return;
+        }
+        self.settings_modal = None;
+        window.focus(&self.focus_handle);
         cx.notify();
     }
 

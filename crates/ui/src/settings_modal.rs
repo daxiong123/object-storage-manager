@@ -28,8 +28,10 @@ pub struct SettingsModal {
     /// 保存请求已发出、后台任务未返回
     saving: bool,
     error: Option<String>,
-    /// 保存成功（携带生效的设置；WorkspaceView 据此应用并丢弃实体）
-    saved: Option<(Settings, bool)>,
+    /// 保存成功后的就地提示（弹窗不关，验收反馈）
+    saved_note: Option<String>,
+    /// 待 WorkspaceView 应用的新设置（观察者 take_saved 取走）
+    pending_saved: Option<(Settings, bool)>,
     /// 已取消（WorkspaceView 据此丢弃本实体并归还焦点）
     closed: bool,
     /// 保存时的目标路径（后台任务要用；从 load 时的路径推导）
@@ -63,7 +65,8 @@ impl SettingsModal {
             clipboard,
             saving: false,
             error: None,
-            saved: None,
+            saved_note: None,
+            pending_saved: None,
             closed: false,
             settings_path,
             _services: Arc::new(()),
@@ -74,8 +77,10 @@ impl SettingsModal {
         self.ttl.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    pub fn done(&self) -> Option<&(Settings, bool)> {
-        self.saved.as_ref()
+    /// 取出「已保存但尚未被 WorkspaceView 应用」的设置（观察者每次保存
+    /// 后调用一次；弹窗保持打开，就地提示见 saved_note）。
+    pub fn take_saved(&mut self) -> Option<(Settings, bool)> {
+        self.pending_saved.take()
     }
 
     pub fn closed(&self) -> bool {
@@ -149,9 +154,14 @@ impl SettingsModal {
         self.saving = false;
         match save_result {
             Ok(()) => {
-                // 与 initial 比较出「是否有变化」（WorkspaceView 据此决定是否提示）
+                // 保存成功：**不关闭弹层**（验收反馈）——就地显示成功状态，
+                // 新设置经 pending_saved 交观察者应用；initial 同步为本值
+                //（再点保存 = 无变化）。
                 let changed = settings != self.initial;
-                self.saved = Some((settings, changed));
+                self.initial = settings.clone();
+                self.pending_saved = Some((settings, changed));
+                self.saved_note = Some("已保存 ✓ 关闭后生效提示见窗口底部".into());
+                self.error = None;
             }
             Err(error) => {
                 self.error = Some(format!("保存设置失败：{error}"));
@@ -165,6 +175,7 @@ impl Render for SettingsModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let error = self.error.clone();
+        let saved_note = self.saved_note.clone();
 
         div()
             .key_context("SettingsModal")
@@ -221,13 +232,19 @@ impl Render for SettingsModal {
                             .text_color(theme.danger)
                             .child(text)
                     }))
+                    .children(saved_note.map(|text| {
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.success)
+                            .child(text)
+                    }))
                     .child(
                         h_flex()
                             .justify_end()
                             .gap_2()
                             .child(
                                 Button::new("settings-cancel")
-                                    .label("取消")
+                                    .label("关闭")
                                     .ghost()
                                     .with_size(Size::Small)
                                     .on_click(cx.listener(Self::handle_cancel)),
@@ -241,13 +258,21 @@ impl Render for SettingsModal {
                                     .on_click(cx.listener(Self::handle_save)),
                             ),
                     )
+                    // 路径可能超过弹窗宽度：独占一行 + truncate（验收反馈）
                     .child(
                         h_flex()
                             .gap_1()
                             .text_size(px(11.))
                             .text_color(theme.muted_foreground)
                             .child(Icon::new(IconName::Info))
-                            .child(format!("保存在 {}", self.settings_path.display())),
+                            .child(div().min_w_0().truncate().child("保存在"))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(self.settings_path.display().to_string()),
+                            ),
                     ),
             )
     }
