@@ -165,11 +165,13 @@ pub struct WorkspaceView {
     /// 设置模态（⌘,）。Some 时渲染遮罩。
     settings_modal: Option<Entity<SettingsModal>>,
     /// capture 清空前的选择快照：(集合, 锚点)。行 mouse-down 处理器
-    /// 消费（⌘/⇧ 基线）；普通点击不消费（下一次 capture 覆盖）。
+    /// 消费（⌘/⇧ 基线）；普通点击不消费（下一次快照覆盖）。
     selection_before_capture: Option<(indexmap::IndexSet<String>, Option<usize>)>,
-    /// 本次 mouse-down 是否已命中对象行（行处理器置位；内容区容器读取后
-    /// 复位——未消费即点击空白，清空选择）。
-    row_mouse_down_consumed: bool,
+    /// 本帧渲染的对象行 bounds（paint 阶段写入；窗口级 mouse-down 钩子
+    /// 据此做命中检测：点击不在任何行/按钮 bounds 内 = 空白 → 清空）。
+    row_bounds: std::cell::RefCell<Vec<gpui::Bounds<gpui::Pixels>>>,
+    /// 内容区 bounds（paint 阶段写入；钩子只处理内容区内的点击）。
+    content_bounds: std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -445,7 +447,8 @@ impl WorkspaceView {
             settings_path,
             settings_modal: None,
             selection_before_capture: None,
-            row_mouse_down_consumed: false,
+            row_bounds: std::cell::RefCell::new(Vec::new()),
+            content_bounds: std::cell::RefCell::new(None),
             downloading: false,
             uploading: false,
             deleting: false,
@@ -699,14 +702,6 @@ impl WorkspaceView {
         self.selected_object_key = None;
         self.selected_object_keys.clear();
         self.selection_anchor = None;
-        self.renaming = None;
-    }
-
-    /// capture 清空：清集合但保留锚点（⇧ 范围基线），并把集合暂存到
-    /// `selection_before_capture` 供 ⌘/⇧ 行处理器取回。
-    fn clear_object_selection_keep_baseline(&mut self) {
-        self.selected_object_key = None;
-        self.selected_object_keys.clear();
         self.renaming = None;
     }
 
@@ -1487,18 +1482,10 @@ impl WorkspaceView {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
-        // 标记本次 mouse-down 命中了行（容器 handler 据此跳过空白清空）
-        self.row_mouse_down_consumed = true;
-        // capture 阶段已清空集合；⌘/⇧ 需要点击前的选择基线（toggle/range）。
-        // 普通点击直接用空集合（单选语义），基线随后作废。
-        let (baseline, baseline_anchor) = if modifiers.platform || modifiers.shift {
-            self.selection_before_capture
-                .take()
-                .unwrap_or_else(|| (indexmap::IndexSet::new(), None))
-        } else {
-            self.selection_before_capture = None;
-            (indexmap::IndexSet::new(), None)
-        };
+        // 直接用当前选中集合做基线（行点击不会触发空白清空钩子——几何
+        // 命中检测保证两者互斥，集合在行处理时是完整的点击前状态）
+        let (baseline, baseline_anchor) =
+            (self.selected_object_keys.clone(), self.selection_anchor);
         let intent = ObjectSelectionIntent {
             command: modifiers.platform,
             shift: modifiers.shift,
@@ -3165,29 +3152,6 @@ impl WorkspaceView {
                 .bg(theme.background)
                 .child(self.render_content_toolbar(theme, &bucket, cx)),
             cx,
-        )
-        // 点击空白清空（Finder 语义）：gpui bubble 顺序 = 子先于父（后注册
-        // 先执行），行的 mouse-down 先写选择并置消费标记；容器随后执行——
-        // 未被行/按钮消费（按钮 stop_propagation 不冒泡）即点击空白 → 清空。
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                if !this.row_mouse_down_consumed {
-                    // 快照语义与 capture 版一致（⌘/⇧ 不会走到这——带修饰键
-                    // 的点击一定命中行；保险起见同样保留快照）
-                    if !(this.selected_object_keys.is_empty()
-                        && this.selected_object_key.is_none())
-                    {
-                        this.selection_before_capture = Some((
-                            this.selected_object_keys.clone(),
-                            this.selection_anchor,
-                        ));
-                        this.clear_object_selection_keep_baseline();
-                        cx.notify();
-                    }
-                }
-                this.row_mouse_down_consumed = false;
-            }),
         );
         // ⌘F 过滤条（开启时出现在 toolbar 与列表之间）
         if let Some(bar) = self.render_filter_bar(theme, cx) {
@@ -3249,7 +3213,82 @@ impl WorkspaceView {
         }
 
         content = content.child(self.render_object_list(theme, cx));
+        content = content.child(self.render_blank_clear_layer(cx));
         content.into_any_element()
+    }
+
+    /// 空白点击清空（Finder 语义）——canvas + window 级监听 + 几何命中检测。
+    /// 不依赖容器事件分发顺序：钩子只处理「坐标在内容区但不在任何行内」
+    /// 的点击（行点击由行自己的处理器负责，互不干扰，顺序无关）。
+    /// 前两版 capture/bubble 方案因 gpui hit-test 只统计滚动 hitbox 链而
+    /// 不可靠，已废弃。
+    fn render_blank_clear_layer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.weak_entity();
+        gpui::canvas(
+            |bounds, window, _cx| {
+                // 每帧执行：记录内容区 bounds
+                if let Some(Some(view)) = window.root::<crate::WorkspaceView>() {
+                    view.update(_cx, |this, _| {
+                        *this.content_bounds.borrow_mut() = Some(bounds);
+                    });
+                }
+            },
+            move |_bounds, _state, window, _cx| {
+                window.on_mouse_event({
+                    let weak = weak.clone();
+                    move |event: &MouseDownEvent, phase, _window, cx| {
+                        // 只在 bubble 阶段处理一次
+                        if phase != gpui::DispatchPhase::Bubble {
+                            return;
+                        }
+                        let Some(view) = weak.upgrade() else {
+                            return;
+                        };
+                        view.update(cx, |this, cx| {
+                            let Some(content) = *this.content_bounds.borrow() else {
+                                return;
+                            };
+                            if !content.contains(&event.position) {
+                                return;
+                            }
+                            let hit_row = this
+                                .row_bounds
+                                .borrow()
+                                .iter()
+                                .any(|b| b.contains(&event.position));
+                            if hit_row {
+                                return;
+                            }
+                            // 空白点击：有选择则清空（含修饰键——Finder 语义：
+                            // 空白点击永远清空，⌘ 只对行点击有意义）
+                            if this.selected_object_keys.is_empty()
+                                && this.selected_object_key.is_none()
+                            {
+                                return;
+                            }
+                            this.clear_object_selection();
+                            this.selection_before_capture = None;
+                            cx.notify();
+                        });
+                    }
+                });
+            },
+        )
+    }
+
+    /// 行 bounds 记录器：透明 canvas 包住一行，paint 阶段把自身 bounds
+    /// 写入 row_bounds（供空白点击命中检测）。不拦截任何事件。
+    fn row_bounds_recorder(&self) -> gpui::Canvas<()> {
+        gpui::canvas(
+            |bounds, window, _cx| {
+                if let Some(Some(view)) = window.root::<crate::WorkspaceView>() {
+                    view.update(_cx, |this, _| {
+                        this.row_bounds.borrow_mut().push(bounds);
+                    });
+                }
+            },
+            |_bounds, _state, _window, _cx| {},
+        )
     }
 
     /// ⌘F 过滤条：输入框 + 命中统计。context "ObjectFilter" 接 Esc 关闭。
@@ -3334,8 +3373,10 @@ impl WorkspaceView {
     }
 
     /// 对象列表本体：目录行（下钻）与对象行（选中进检查器）+ 底部统计与翻页。
-    /// 点击空白清空由内容区容器的 capture 处理（见 render_content）。
+    /// 行 bounds 记入 row_bounds（paint 阶段），供空白点击命中检测。
     fn render_object_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧重建（paint 阶段逐行写入）
+        self.row_bounds.borrow_mut().clear();
         let mut list = v_flex()
             .id("object-list")
             .flex_1()
@@ -3392,6 +3433,7 @@ impl WorkspaceView {
                     list = list.child(
                         h_flex()
                             .id(("object-row", ix))
+                            .relative()
                             .mx_3()
                             .px_2()
                             .py(px(4.))
@@ -3399,22 +3441,18 @@ impl WorkspaceView {
                             .gap_2()
                             .text_size(px(13.))
                             .hover(|row| row.bg(theme.accent))
+                            .child(self.row_bounds_recorder().absolute().inset_0())
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(
-                                    move |this,
-                                          event: &MouseDownEvent,
-                                          _window,
-                                          cx| {
-                                        // 目录选择在下钻前应用（capture 清空之后）
-                                        this.handle_object_row_click(
-                                            ix,
-                                            ClickedEntry::CommonPrefix(prefix_sel.clone()),
-                                            event.modifiers,
-                                            cx,
-                                        );
-                                    },
-                                ),
+                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                    // 目录选择在下钻前应用（capture 清空之后）
+                                    this.handle_object_row_click(
+                                        ix,
+                                        ClickedEntry::CommonPrefix(prefix_sel.clone()),
+                                        event.modifiers,
+                                        cx,
+                                    );
+                                }),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // 目录点击 = 下钻（mouse up 时）
@@ -3456,6 +3494,7 @@ impl WorkspaceView {
                     list = list.child(
                         h_flex()
                             .id(("object-row", ix))
+                            .relative()
                             .mx_3()
                             .px_2()
                             .py(px(4.))
@@ -3466,11 +3505,10 @@ impl WorkspaceView {
                             // hover 是可交互反馈用 accent
                             .when(selected, |row| row.bg(theme.list_active))
                             .hover(|row| row.bg(theme.accent))
+                            .child(self.row_bounds_recorder().absolute().inset_0())
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    // 选择在 mouse down 时应用（Finder 语义；
-                                    // capture 容器先清空，此处再写入）
                                     eprintln!("[preview] selected key={key}");
                                     this.handle_object_row_click(
                                         ix,
