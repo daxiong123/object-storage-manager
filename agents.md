@@ -101,6 +101,7 @@ crates/
 | Quit 处理 | 全局 `cx.on_action` 在 **bubble 末尾**（源码 `app.rs:1696`，不是 capture）：有窗口时 `WorkspaceView::handle_quit` 先处理，窗口全关后仍可 ⌘Q。有活动传输时走 gpui `window.prompt`（NSAlert sheet + oneshot，**禁止 runModal**）三按钮：暂停并退出（默认 Return）/ 取消（Esc）/ 立即退出；暂停并退出把活动任务写入 SQLite `transfers` 表（无 Secret 列）后 `cx.quit()`，下次启动 `take_transfers` 入队恢复（paused 保持暂停，其余自动继续）；立即退出 `clear_transfers` 后退出；落盘失败 Fail Fast 不退出 |
 | Sidebar/Inspector | **自建视图**，不用 gpui-component `Sidebar`（组件固定 255px/48px，与规范 180/220/360 + 44px rail 冲突）；可拖拽宽度用 gpui-component `resizable`，按布局变体用不同 group id 保持各自记忆宽度 |
 | GPUI API 陷阱 | gpui 0.2.2 / gpui-component 0.5.1 已验证的 API 事实与陷阱清单见 `docs/notes/gpui-api-notes.md`；写 UI 前先查，不凭记忆猜签名 |
+| **已知问题：点击空白清空选择（B6）未生效** | 三种方案均失败（capture hit-test 只认 BlockMouseExceptScroll 链、bubble 顺序假设不成立、canvas 几何命中检测行 bounds 未生效——待查 root cause：canvas prepaint 里 `window.root()` 拿到的可能是 Root 而非 WorkspaceView，`downcast` 失败导致 bounds 从未写入，静默 return 违反 Fail Fast）。**遗留**：⌘/⇧/⌘⇧ 行为正常，仅空白清空无效。下一步排查：给 canvas prepaint 的 downcast 失败路径加 eprintln 日志确认 bounds 是否写入；或改用 `cx.on_mouse_event`（App 级）+ 持久 bounds 快照。恢复验收前先跑 `cargo run` 加日志验证 |
 
 ## 6. 目录与数据
 
