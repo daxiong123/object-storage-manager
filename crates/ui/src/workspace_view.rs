@@ -164,6 +164,9 @@ pub struct WorkspaceView {
     settings_path: PathBuf,
     /// 设置模态（⌘,）。Some 时渲染遮罩。
     settings_modal: Option<Entity<SettingsModal>>,
+    /// capture 清空前的选择快照：(集合, 锚点)。行 mouse-down 处理器
+    /// 消费（⌘/⇧ 基线）；普通点击不消费（下一次 capture 覆盖）。
+    selection_before_capture: Option<(indexmap::IndexSet<String>, Option<usize>)>,
     /// 对象下载进行中（Inspector 按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -438,6 +441,7 @@ impl WorkspaceView {
             settings,
             settings_path,
             settings_modal: None,
+            selection_before_capture: None,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -691,6 +695,17 @@ impl WorkspaceView {
         self.selected_object_key = None;
         self.selected_object_keys.clear();
         self.selection_anchor = None;
+        self.renaming = None;
+    }
+
+    /// capture 清空：清集合但保留锚点（⇧ 范围基线），并把集合暂存到
+    /// `selection_before_capture` 供 ⌘/⇧ 行处理器取回。
+    /// 调用约定：capture 里先写 `selection_before_capture`，行处理器消费后
+    /// 置回 None；普通点击（无修饰键）不消费，锚点随 clear_object_selection
+    /// 清掉——由 handle_object_row_click 的普通分支覆盖锚点。
+    fn clear_object_selection_keep_baseline(&mut self) {
+        self.selected_object_key = None;
+        self.selected_object_keys.clear();
         self.renaming = None;
     }
 
@@ -1471,6 +1486,16 @@ impl WorkspaceView {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
+        // capture 阶段已清空集合；⌘/⇧ 需要点击前的选择基线（toggle/range）。
+        // 普通点击直接用空集合（单选语义），基线随后作废。
+        let (baseline, baseline_anchor) = if modifiers.platform || modifiers.shift {
+            self.selection_before_capture
+                .take()
+                .unwrap_or_else(|| (indexmap::IndexSet::new(), None))
+        } else {
+            self.selection_before_capture = None;
+            (indexmap::IndexSet::new(), None)
+        };
         let intent = ObjectSelectionIntent {
             command: modifiers.platform,
             shift: modifiers.shift,
@@ -1489,8 +1514,13 @@ impl WorkspaceView {
         let (next, anchor, preview) = apply_object_selection(
             intent,
             &ordered_keys,
-            &self.selected_object_keys,
-            self.selection_anchor,
+            &baseline,
+            // ⇧ 基线锚点优先（capture 保留了旧锚点）；否则用当前
+            if baseline_anchor.is_some() {
+                baseline_anchor
+            } else {
+                self.selection_anchor
+            },
             clicked,
         );
         self.selected_object_keys = next;
@@ -3288,12 +3318,24 @@ impl WorkspaceView {
             .overflow_y_scroll()
             .py_1()
             .capture_any_mouse_down(cx.listener(
-                |this, _: &MouseDownEvent, _window, cx| {
-                    if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
-                        return;
+                |this, event: &MouseDownEvent, _window, cx| {
+                    // capture（父先于子）：先保存当前选择基线，再清空。
+                    // 有修饰键（⌘/⇧）时行处理器会基于保存的基线做
+                    // toggle/range；无修饰键（普通点击/空白点击）基线作废。
+                    this.selection_before_capture =
+                        if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
+                            None
+                        } else {
+                            Some((
+                                this.selected_object_keys.clone(),
+                                this.selection_anchor,
+                            ))
+                        };
+                    if this.selection_before_capture.is_some() {
+                        this.clear_object_selection_keep_baseline();
+                        cx.notify();
                     }
-                    this.clear_object_selection();
-                    cx.notify();
+                    let _ = event;
                 },
             ));
 
