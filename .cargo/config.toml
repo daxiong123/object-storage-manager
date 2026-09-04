@@ -2,3 +2,10 @@
 # 最低系统版本决策：macOS 14+（见 agents.md §2）
 [env]
 MACOSX_DEPLOYMENT_TARGET = "14.0"
+
+# macOS 27 beta (Tahoe) ld 在 deployment target 14 下默认启用 chained fixups，
+# 其产出的 __LINKEDIT string pool 会被同版本 dyld 拒绝加载（"mis-aligned LINKEDIT
+# string pool"）→ 所有 proc-macro dylib 报 E0463 "can't find crate"。
+# 显式关闭 fixup chains（回到传统 rebase/bind），对运行时性能影响可忽略。
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-no_fixup_chains"]

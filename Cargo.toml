@@ -56,4 +56,6 @@ object-storage-common = { path = "crates/common" }
 
 [profile.release]
 lto = "thin"
-strip = "symbols"
+# 注意：不能在此设 strip = "symbols"——cargo 会把 strip 应用到 proc-macro
+# dylib，符号表被剥掉后 rustc 无法加载，所有 derive 宏 crate 报
+# "can't find crate"（E0463）。最终二进制在打包 .app 时手动 strip。
