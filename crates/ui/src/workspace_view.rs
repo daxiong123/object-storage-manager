@@ -4104,16 +4104,18 @@ impl WorkspaceView {
                                         div()
                                             .size(px(56.))
                                             .rounded(px(14.))
-                                            .bg(theme.selection)
-                                            .border_1()
-                                            .border_color(theme.border)
                                             .flex()
                                             .items_center()
                                             .justify_center()
+                                            .overflow_hidden()
+                                            .shadow_sm()
                                             .child(
-                                                Icon::new(IconName::Folder)
-                                                    .size_7()
-                                                    .text_color(theme.foreground),
+                                                img(Arc::new(gpui::Image::from_bytes(
+                                                    gpui::ImageFormat::Png,
+                                                    crate::APP_ICON_PNG.to_vec(),
+                                                )))
+                                                .size(px(56.))
+                                                .object_fit(ObjectFit::Cover),
                                             ),
                                     )
                                     .child(

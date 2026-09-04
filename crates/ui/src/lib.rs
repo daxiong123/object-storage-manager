@@ -15,6 +15,9 @@ pub use settings_modal::SettingsModal;
 pub use theme::observe_appearance;
 pub use workspace_view::WorkspaceView;
 
+/// 应用图标（512px PNG，构建期嵌入）。「关于」弹层与 Dock/Finder 图标共用同一来源。
+pub const APP_ICON_PNG: &'static [u8] = include_bytes!("../assets/app-icon.png");
+
 /// 应用初始化（在 gpui_component::init 之后调用）。
 pub fn init(cx: &mut gpui::App) {
     // 全局快捷键（⌘Q / ⌘W / ⌘⌥S / ⌘⌥I）。
