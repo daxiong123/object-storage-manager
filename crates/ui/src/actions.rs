@@ -44,6 +44,8 @@ actions!(
         ToggleObjectFilter,
         // 打开设置：⌘,（菜单 / 快捷键共享）
         OpenSettings,
+        // 打开关于弹窗：菜单（设置上方）/ 命令面板共享
+        OpenAbout,
         // 用默认应用打开选中对象（spec §14：下载到临时目录 → NSWorkspace open）
         OpenObject,
         // 在 Finder 中显示选中对象的本地副本（spec §16）

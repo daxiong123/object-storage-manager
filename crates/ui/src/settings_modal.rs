@@ -1,19 +1,25 @@
-//! 设置模态（⌘,）。自建 overlay，与「添加账号」同一机制。
+//! 设置窗口（⌘,）。自建 overlay，OpenChamber 式两栏布局：
+//! 左侧分组导航（200px）+ 右侧分页内容（Section / FieldRow 语义）。
 //!
-//! 字段：签名链接有效期（秒）/ 剪贴板自动清除（秒，0=关闭）。
 //! 保存 = 校验 → 写 `settings.json`（`Settings::save`，Fail Fast）→
 //! 回调 WorkspaceView 应用到运行时字段。保存中禁止关闭（同 AddAccountModal）。
+//! 弹层规范（agents.md）：Esc / 遮罩 / 标题栏 ✕ 三路关闭，busy 中由 close 拒绝；
+//! 卡片阻断冒泡；footer「关闭在左、保存在右」。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, PathPromptOptions, Render, Styled, Window, div, px,
+    ParentElement as _, PathPromptOptions, Render, StatefulInteractiveElement as _, Styled, Window,
+    div, px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable as _, Icon, IconName, Sizable as _, Size, button::Button,
-    button::ButtonVariants as _, h_flex, input::Input, input::InputState, v_flex,
+    ActiveTheme, Disableable as _, Icon, IconName, IndexPath, Sizable as _, Size, button::Button,
+    button::ButtonVariants as _, h_flex, input::Input, input::InputState, input::NumberInput,
+    input::NumberInputEvent, input::StepAction, radio::Radio, select::Select, select::SelectEvent,
+    select::SelectState, v_flex,
 };
 
 use object_storage_persistence::{
@@ -44,22 +50,71 @@ fn parse_f32_field(value: &str, message: &str) -> Result<f32, String> {
     value.trim().parse::<f32>().map_err(|_| message.to_string())
 }
 
+/// 设置导航分组（左侧栏），按展示顺序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    General,
+    Appearance,
+    CodeFont,
+    Transfer,
+}
+
+impl SettingsSection {
+    fn title(self) -> &'static str {
+        match self {
+            Self::General => "通用",
+            Self::Appearance => "外观",
+            Self::CodeFont => "代码字体",
+            Self::Transfer => "传输与下载",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::General => "签名链接与剪贴板行为。",
+            Self::Appearance => "主题模式、界面字体与字号缩放。",
+            Self::CodeFont => "代码与技术字段使用的等宽字体。",
+            Self::Transfer => "传输队列并发与默认下载目录。",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::General => IconName::Settings,
+            Self::Appearance => IconName::Palette,
+            Self::CodeFont => IconName::ALargeSmall,
+            Self::Transfer => IconName::ArrowDown,
+        }
+    }
+
+    const ALL: [Self; 4] = [
+        Self::General,
+        Self::Appearance,
+        Self::CodeFont,
+        Self::Transfer,
+    ];
+}
+
 /// 设置保存成功后由 WorkspaceView 回收的载荷。
 pub struct SettingsModal {
     initial: Settings,
     ttl: Entity<InputState>,
     clipboard: Entity<InputState>,
     appearance_mode: AppearanceMode,
-    ui_font_family: Entity<InputState>,
+    /// 界面字体下拉（含自定义字体名；None 选项 = 系统默认）
+    ui_font_select: Entity<SelectState<Vec<FontOption>>>,
     ui_font_scale: Entity<InputState>,
-    code_font_family: Entity<InputState>,
+    /// 代码字体下拉
+    code_font_select: Entity<SelectState<Vec<FontOption>>>,
     code_font_size: Entity<InputState>,
     transfer_concurrency: Entity<InputState>,
     default_download_dir: Option<PathBuf>,
+    /// 左侧导航当前分组
+    active_section: SettingsSection,
     /// 保存请求已发出、后台任务未返回
     saving: bool,
     error: Option<String>,
-    /// 保存成功后的就地提示（弹窗不关，验收反馈）
+    /// 保存成功后的就地提示（footer 左侧；弹窗不关，验收反馈）
     saved_note: Option<String>,
     /// 待 WorkspaceView 应用的新设置（观察者 take_saved 取走）
     pending_saved: Option<(Settings, bool)>,
@@ -86,15 +141,26 @@ impl SettingsModal {
         });
         let clipboard = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("60（0 = 不自动清除）")
+                .placeholder("60")
                 .clean_on_escape()
                 .default_value(settings.clipboard_clear_secs.to_string())
         });
-        let ui_font_family = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("系统默认")
-                .clean_on_escape()
-                .default_value(settings.ui_font_family.clone().unwrap_or_default())
+        // 字体下拉选项：空串 = 系统默认 + 预设 + 当前自定义值（保证预选中命中）。
+        let ui_font_items: Vec<FontOption> =
+            font_select_items(UI_FONT_PRESETS, settings.ui_font_family.as_deref())
+                .into_iter()
+                .map(FontOption)
+                .collect();
+        let ui_font_select = cx.new(|cx| {
+            SelectState::new(
+                ui_font_items,
+                selected_font_index(
+                    &font_select_items(UI_FONT_PRESETS, settings.ui_font_family.as_deref()),
+                    settings.ui_font_family.as_deref(),
+                ),
+                window,
+                cx,
+            )
         });
         let ui_font_scale = cx.new(|cx| {
             InputState::new(window, cx)
@@ -102,11 +168,21 @@ impl SettingsModal {
                 .clean_on_escape()
                 .default_value(settings.ui_font_scale.to_string())
         });
-        let code_font_family = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Menlo")
-                .clean_on_escape()
-                .default_value(settings.code_font_family.clone().unwrap_or_default())
+        let code_font_items: Vec<FontOption> =
+            font_select_items(CODE_FONT_PRESETS, settings.code_font_family.as_deref())
+                .into_iter()
+                .map(FontOption)
+                .collect();
+        let code_font_select = cx.new(|cx| {
+            SelectState::new(
+                code_font_items,
+                selected_font_index(
+                    &font_select_items(CODE_FONT_PRESETS, settings.code_font_family.as_deref()),
+                    settings.code_font_family.as_deref(),
+                ),
+                window,
+                cx,
+            )
         });
         let code_font_size = cx.new(|cx| {
             InputState::new(window, cx)
@@ -121,17 +197,82 @@ impl SettingsModal {
                 .default_value(settings.transfer_concurrency.to_string())
         });
         let default_download_dir = settings.default_download_dir.clone();
+        // 字体选择确认后清掉过期的「已保存」提示（值已变化）。
+        cx.subscribe_in(
+            &ui_font_select,
+            window,
+            |this, _, _: &SelectEvent<_>, _, cx| {
+                this.saved_note = None;
+                cx.notify();
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &code_font_select,
+            window,
+            |this, _, _: &SelectEvent<_>, _, cx| {
+                this.saved_note = None;
+                cx.notify();
+            },
+        )
+        .detach();
+        // NumberInput 的 +/− 按钮只 emit Step 事件，数值写回由订阅方完成——
+        // 不订阅则加减无效（验收问题）。步长 1；缩放字段按 f32 走独立订阅。
+        let subscribe_step_u32 =
+            |state: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>| {
+                cx.subscribe_in(
+                    state,
+                    window,
+                    |_, input: &Entity<InputState>, event: &NumberInputEvent, window, cx| {
+                        input.update(cx, |input, cx| {
+                            let value: u32 = input.value().trim().parse().unwrap_or(0);
+                            let next = match event {
+                                NumberInputEvent::Step(StepAction::Increment) => {
+                                    value.saturating_add(1)
+                                }
+                                NumberInputEvent::Step(StepAction::Decrement) => {
+                                    value.saturating_sub(1)
+                                }
+                            };
+                            input.set_value(next.to_string(), window, cx);
+                        });
+                    },
+                )
+                .detach();
+            };
+        subscribe_step_u32(&code_font_size, window, cx);
+        subscribe_step_u32(&transfer_concurrency, window, cx);
+        {
+            // 界面字号缩放：步长 0.05，范围 clamp 到 0.85–1.40（与 tokens 一致）。
+            cx.subscribe_in(
+                &ui_font_scale,
+                window,
+                |_, input: &Entity<InputState>, event: &NumberInputEvent, window, cx| {
+                    input.update(cx, |input, cx| {
+                        let value: f32 = input.value().trim().parse().unwrap_or(1.0);
+                        let next = match event {
+                            NumberInputEvent::Step(StepAction::Increment) => value + 0.05,
+                            NumberInputEvent::Step(StepAction::Decrement) => value - 0.05,
+                        };
+                        let next = next.clamp(0.85, 1.40);
+                        input.set_value(format!("{next:.2}"), window, cx);
+                    });
+                },
+            )
+            .detach();
+        }
         Self {
             initial: settings.clone(),
             ttl,
             clipboard,
             appearance_mode: settings.appearance_mode,
-            ui_font_family,
+            ui_font_select,
             ui_font_scale,
-            code_font_family,
+            code_font_select,
             code_font_size,
             transfer_concurrency,
             default_download_dir,
+            active_section: SettingsSection::General,
             saving: false,
             error: None,
             saved_note: None,
@@ -156,7 +297,7 @@ impl SettingsModal {
         self.closed
     }
 
-    /// 在 Finder 中显示 settings.json（「打开配置文件」入口）。
+    /// 在 Finder 中显示 settings.json（nav 底部「打开配置文件」入口）。
     /// 文件可能尚不存在（从未保存过）：先落一份当前值再显示。
     fn reveal_settings_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let path = self.settings_path.clone();
@@ -164,6 +305,7 @@ impl SettingsModal {
             && let Err(error) = self.initial.save_at(path.clone())
         {
             self.error = Some(format!("创建配置文件失败：{error}"));
+            self.saved_note = None;
             cx.notify();
             return;
         }
@@ -223,16 +365,6 @@ impl SettingsModal {
         cx.notify();
     }
 
-    fn set_input_value(
-        input: &Entity<InputState>,
-        value: impl Into<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let value = value.into();
-        input.update(cx, |input, cx| input.set_value(value, window, cx));
-    }
-
     fn build_settings(&self, cx: &mut Context<Self>) -> Result<Settings, String> {
         let ttl = parse_u64_field(
             self.ttl.read(cx).value().trim(),
@@ -254,13 +386,20 @@ impl SettingsModal {
             self.transfer_concurrency.read(cx).value().trim(),
             "传输并发数必须是整数",
         )?;
+        let font_value = |state: &Entity<SelectState<Vec<FontOption>>>| {
+            state.read(cx).selected_value().cloned().unwrap_or_default()
+        };
+        let ui_font_family = font_value(&self.ui_font_select);
+        let ui_font_family = optional_text(ui_font_family);
+        let code_font_family = font_value(&self.code_font_select);
+        let code_font_family = optional_text(code_font_family);
         let settings = Settings {
             signed_url_ttl_secs: ttl,
             clipboard_clear_secs: clipboard,
             appearance_mode: self.appearance_mode,
-            ui_font_family: optional_text(self.ui_font_family.read(cx).value().to_string()),
+            ui_font_family,
             ui_font_scale,
-            code_font_family: optional_text(self.code_font_family.read(cx).value().to_string()),
+            code_font_family,
             code_font_size,
             transfer_concurrency,
             default_download_dir: self.default_download_dir.clone(),
@@ -318,7 +457,7 @@ impl SettingsModal {
         self.saving = false;
         match save_result {
             Ok(()) => {
-                // 保存成功：**不关闭弹层**（验收反馈）——就地显示成功状态，
+                // 保存成功：**不关闭窗口**——footer 显示成功状态，
                 // 新设置经 pending_saved 交观察者应用；initial 同步为本值
                 //（再点保存 = 无变化）。
                 let changed = settings != self.initial;
@@ -336,25 +475,20 @@ impl SettingsModal {
 }
 
 impl Render for SettingsModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let error = self.error.clone();
-        let saved_note = self.saved_note.clone();
-        let download_dir = self
-            .default_download_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "未设置（使用用户主目录）".into());
+        let active = self.active_section;
 
         div()
             .key_context("SettingsModal")
-            .w(px(560.))
-            .max_h(px(680.))
+            .w(px(800.))
+            .h(px(560.))
             .bg(theme.background)
             .border_1()
             .border_color(theme.border)
             .rounded(px(10.))
             .shadow_lg()
+            .overflow_hidden()
             .on_action(cx.listener(Self::handle_dismiss))
             .on_mouse_down(
                 MouseButton::Left,
@@ -366,229 +500,361 @@ impl Render for SettingsModal {
             )
             .child(
                 v_flex()
-                    .p_4()
-                    .gap_4()
+                    .size_full()
+                    // 标题栏
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("设置"),
+                            )
+                            .child(
+                                Button::new("settings-close")
+                                    .icon(Icon::new(IconName::Close).size_4())
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(Self::handle_cancel)),
+                            ),
+                    )
+                    // 中部：左导航 + 右内容。
+                    // 注意：h_flex 默认 items_center，这里必须显式 items_stretch
+                    //（gpui 无 items_stretch 方法，items_center 之外的默认即
+                    // stretch）——只写 h_flex() 会让页面容器被垂直居中，
+                    // 顶部留出大片空白（验收问题）。页面容器自身
+                    // items_start 保证内容自顶部排布。
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .flex_row()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(self.render_nav(&theme, cx))
+                            .child(self.render_page(active, &theme, window, cx)),
+                    )
+                    // footer：状态提示（左）+ 操作按钮（右）
+                    .child(self.render_footer(&theme, cx)),
+            )
+    }
+}
+
+impl SettingsModal {
+    fn render_nav(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = self.active_section;
+        v_flex()
+            .w(px(200.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.border)
+            .justify_between()
+            .child(
+                v_flex()
+                    .p_2()
+                    .gap_0p5()
+                    .children(SettingsSection::ALL.map(|section| {
+                        let selected = active == section;
+                        let (text_color, bg) = if selected {
+                            (theme.sidebar_accent_foreground, theme.list_active)
+                        } else {
+                            (theme.foreground, gpui::transparent_black())
+                        };
+                        div()
+                            .id(match section {
+                                SettingsSection::General => "settings-nav-general",
+                                SettingsSection::Appearance => "settings-nav-appearance",
+                                SettingsSection::CodeFont => "settings-nav-code-font",
+                                SettingsSection::Transfer => "settings-nav-transfer",
+                            })
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .h(px(32.))
+                            .rounded(px(6.))
+                            .bg(bg)
+                            .text_color(text_color)
+                            .text_size(tokens::text(13.))
+                            .when(!selected, |el| {
+                                el.hover(|el| {
+                                    el.bg(theme.accent).text_color(theme.accent_foreground)
+                                })
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.active_section = section;
+                                    this.saved_note = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(Icon::new(section.icon()).size_4().text_color(if selected {
+                                theme.sidebar_accent_foreground
+                            } else {
+                                theme.muted_foreground
+                            }))
+                            .child(section.title())
+                    })),
+            )
+            .child(
+                // nav footer：打开配置文件（对齐 OpenChamber nav footer）
+                v_flex()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .p_2()
+                    .child(
+                        Button::new("settings-open-file")
+                            .label("打开配置文件")
+                            .icon(Icon::new(IconName::FolderOpen).size_3())
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.reveal_settings_file(window, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn render_page(
+        &self,
+        section: SettingsSection,
+        theme: &gpui_component::Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .id("settings-page")
+            .flex_1()
+            .min_h_0()
+            .h_full()
+            .items_start()
+            .overflow_y_scroll()
+            .child(
+                // 页头：标题 + 描述
+                v_flex()
+                    .px_5()
+                    .pt_4()
+                    .pb_3()
+                    .gap_1()
                     .child(
                         div()
-                            .text_size(tokens::text(16.))
+                            .text_size(tokens::text(15.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("设置"),
+                            .child(section.title()),
                     )
                     .child(
-                        v_flex()
-                            .gap_2()
-                            .child(section_title("链接与剪贴板", &theme))
-                            .child(field(
-                                "签名链接有效期（秒）",
-                                Input::new(&self.ttl).small(),
-                                &theme,
-                            ))
-                            .child(field(
-                                "复制链接后自动清空剪贴板（秒，0 = 不清除）",
-                                Input::new(&self.clipboard).small(),
-                                &theme,
-                            )),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(section_title("外观", &theme))
-                            .child(
-                                h_flex().gap_2().children(
-                                    [
-                                        (AppearanceMode::System, "跟随系统"),
-                                        (AppearanceMode::Light, "浅色"),
-                                        (AppearanceMode::Dark, "深色"),
-                                    ]
-                                    .into_iter()
-                                    .map(|(mode, label)| {
-                                        div()
-                                            .px_3()
-                                            .py_1()
-                                            .rounded(px(6.))
-                                            .text_size(tokens::text(12.))
-                                            .bg(if self.appearance_mode == mode {
-                                                theme.list_active
-                                            } else {
-                                                theme.sidebar
-                                            })
-                                            .hover(|el| el.bg(theme.accent))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.set_appearance_mode(mode, cx)
-                                                }),
-                                            )
-                                            .child(label)
-                                    }),
-                                ),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(label("界面字体", &theme))
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("ui-font-system")
-                                                    .label("系统默认")
-                                                    .ghost()
-                                                    .with_size(Size::Small)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            Self::set_input_value(
-                                                                &this.ui_font_family,
-                                                                "",
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("ui-font-sf")
-                                                    .label("SF Pro")
-                                                    .ghost()
-                                                    .with_size(Size::Small)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            Self::set_input_value(
-                                                                &this.ui_font_family,
-                                                                "SF Pro",
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("ui-font-pingfang")
-                                                    .label("苹方")
-                                                    .ghost()
-                                                    .with_size(Size::Small)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            Self::set_input_value(
-                                                                &this.ui_font_family,
-                                                                "PingFang SC",
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                    .child(Input::new(&self.ui_font_family).small()),
-                            )
-                            .child(field(
-                                "界面字号缩放（0.85 - 1.40）",
-                                Input::new(&self.ui_font_scale).small(),
-                                &theme,
-                            )),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(section_title("代码字体", &theme))
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(label("字体族", &theme))
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("code-font-menlo")
-                                                    .label("Menlo")
-                                                    .ghost()
-                                                    .with_size(Size::Small)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            Self::set_input_value(
-                                                                &this.code_font_family,
-                                                                "",
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("code-font-sfmono")
-                                                    .label("SF Mono")
-                                                    .ghost()
-                                                    .with_size(Size::Small)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            Self::set_input_value(
-                                                                &this.code_font_family,
-                                                                "SF Mono",
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("code-font-jetbrains")
-                                                    .label("JetBrains Mono")
-                                                    .ghost()
-                                                    .with_size(Size::Small)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            Self::set_input_value(
-                                                                &this.code_font_family,
-                                                                "JetBrains Mono",
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                    .child(Input::new(&self.code_font_family).small()),
-                            )
-                            .child(field(
-                                "字号（10 - 24）",
-                                Input::new(&self.code_font_size).small(),
-                                &theme,
-                            )),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(section_title("传输与下载", &theme))
-                            .child(field(
-                                "传输并发数（1 - 8）",
-                                Input::new(&self.transfer_concurrency).small(),
-                                &theme,
-                            ))
-                            .child(label("默认下载目录", &theme))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .px_3()
-                                            .py_2()
-                                            .rounded(px(6.))
-                                            .bg(theme.sidebar)
-                                            .text_size(tokens::text(12.))
-                                            .truncate()
-                                            .child(download_dir),
-                                    )
-                                    .child(
-                                        Button::new("settings-pick-download-dir")
-                                            .label("选择…")
-                                            .with_size(Size::Small)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.choose_default_download_dir(cx);
-                                            })),
-                                    )
-                                    .child(
+                        div()
+                            .text_size(tokens::text(12.))
+                            .text_color(theme.muted_foreground)
+                            .child(section.description()),
+                    ),
+            )
+            .children(match section {
+                SettingsSection::General => self.render_general_section(theme, cx),
+                SettingsSection::Appearance => self.render_appearance_section(theme, window, cx),
+                SettingsSection::CodeFont => self.render_code_font_section(theme, window, cx),
+                SettingsSection::Transfer => self.render_transfer_section(theme, cx),
+            })
+    }
+
+    // ---- 各页 Section（分隔线 + FieldRow 左标签右控件） ----
+
+    fn render_general_section(
+        &self,
+        theme: &gpui_component::Theme,
+        _cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        vec![
+            section_divider(theme)
+                .child(field_row(
+                    "签名链接有效期",
+                    Some("对象签名 GET 链接的有效秒数。"),
+                    field_input(Input::new(&self.ttl)),
+                    theme,
+                ))
+                .into_any_element(),
+            section_divider(theme)
+                .child(field_row(
+                    "清空剪贴板",
+                    Some("复制签名链接后自动清除的秒数，0 = 不清除。"),
+                    field_input(Input::new(&self.clipboard)),
+                    theme,
+                ))
+                .into_any_element(),
+        ]
+    }
+
+    fn render_appearance_section(
+        &self,
+        theme: &gpui_component::Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mode = self.appearance_mode;
+        let radio = |section_id: &'static str,
+                     mode_value: AppearanceMode,
+                     label: &'static str,
+                     theme: &gpui_component::Theme| {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Radio::new(section_id)
+                        .checked(mode == mode_value)
+                        .on_click({
+                            let theme = theme.clone();
+                            cx.listener(move |this, checked: &bool, _, cx| {
+                                if *checked {
+                                    this.set_appearance_mode(mode_value, cx);
+                                }
+                                let _ = &theme;
+                            })
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(tokens::text(13.))
+                        .text_color(theme.foreground)
+                        .child(label),
+                )
+        };
+        vec![
+            section_divider(theme)
+                .child(field_row(
+                    "外观模式",
+                    Some("跟随系统时自动响应系统浅色/深色切换。"),
+                    v_flex()
+                        .gap_2()
+                        .child(radio(
+                            "appearance-system",
+                            AppearanceMode::System,
+                            "跟随系统",
+                            theme,
+                        ))
+                        .child(radio(
+                            "appearance-light",
+                            AppearanceMode::Light,
+                            "浅色",
+                            theme,
+                        ))
+                        .child(radio(
+                            "appearance-dark",
+                            AppearanceMode::Dark,
+                            "深色",
+                            theme,
+                        )),
+                    theme,
+                ))
+                .into_any_element(),
+            section_divider(theme)
+                .child(field_row(
+                    "界面字体",
+                    Some("选择系统默认或预设字体。"),
+                    font_select("ui-font", &self.ui_font_select, cx),
+                    theme,
+                ))
+                .into_any_element(),
+            section_divider(theme)
+                .child(field_row(
+                    "界面字号缩放",
+                    Some("0.85 – 1.40，影响全部界面文字。"),
+                    number_field_input(&self.ui_font_scale),
+                    theme,
+                ))
+                .into_any_element(),
+        ]
+    }
+
+    fn render_code_font_section(
+        &self,
+        theme: &gpui_component::Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        vec![
+            section_divider(theme)
+                .child(field_row(
+                    "字体族",
+                    Some("默认使用 macOS 等宽字体，可选预设。"),
+                    font_select("code-font", &self.code_font_select, cx),
+                    theme,
+                ))
+                .into_any_element(),
+            section_divider(theme)
+                .child(field_row(
+                    "字号",
+                    Some("10 – 24，用于代码预览与技术字段。"),
+                    number_field_input(&self.code_font_size),
+                    theme,
+                ))
+                .into_any_element(),
+        ]
+    }
+
+    fn render_transfer_section(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let download_dir = self
+            .default_download_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未设置（使用用户主目录）".into());
+        vec![
+            section_divider(theme)
+                .child(field_row(
+                    "传输并发数",
+                    Some("同时进行的上传/下载任务数，1 – 8。"),
+                    number_field_input(&self.transfer_concurrency),
+                    theme,
+                ))
+                .into_any_element(),
+            section_divider(theme)
+                .child(field_row(
+                    "默认下载目录",
+                    Some("下载时先确认使用该目录，仍可另存。"),
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w_full()
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded(px(6.))
+                                .bg(theme.sidebar)
+                                .border_1()
+                                .border_color(theme.border)
+                                .text_size(tokens::text(12.))
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(download_dir),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("settings-pick-download-dir")
+                                        .label("选择…")
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.choose_default_download_dir(cx);
+                                        })),
+                                )
+                                .when(self.default_download_dir.is_some(), |el| {
+                                    el.child(
                                         Button::new("settings-clear-download-dir")
                                             .label("清除")
                                             .ghost()
@@ -596,86 +862,180 @@ impl Render for SettingsModal {
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.clear_default_download_dir(cx);
                                             })),
-                                    ),
-                            ),
-                    )
-                    .children(error.map(|text| {
-                        div()
-                            .text_size(tokens::text(12.))
-                            .text_color(theme.danger)
-                            .child(text)
-                    }))
-                    .children(saved_note.map(|text| {
-                        div()
-                            .text_size(tokens::text(12.))
-                            .text_color(theme.success)
-                            .child(text)
-                    }))
+                                    )
+                                }),
+                        ),
+                    theme,
+                ))
+                .into_any_element(),
+        ]
+    }
+
+    fn render_footer(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .py_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                // 状态区：错误优先于成功提示（占位保持高度稳定）
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(tokens::text(12.))
+                    .text_color(if self.error.is_some() {
+                        theme.danger
+                    } else {
+                        theme.success
+                    })
                     .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("settings-cancel")
-                                    .label("关闭")
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .on_click(cx.listener(Self::handle_cancel)),
-                            )
-                            .child(
-                                Button::new("settings-save")
-                                    .label("保存")
-                                    .primary()
-                                    .with_size(Size::Small)
-                                    .disabled(self.saving)
-                                    .on_click(cx.listener(Self::handle_save)),
-                            ),
-                    )
-                    // 配置文件入口（验收反馈：不显示路径，直接提供打开）
+                        self.error
+                            .clone()
+                            .or_else(|| self.saved_note.clone())
+                            .unwrap_or_default(),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .text_size(tokens::text(11.))
-                            .child(
-                                Icon::new(IconName::FolderOpen).text_color(theme.muted_foreground),
-                            )
-                            .child(
-                                Button::new("settings-open-file")
-                                    .label("打开配置文件")
-                                    .link()
-                                    .with_size(Size::Small)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.reveal_settings_file(window, cx);
-                                    })),
-                            ),
+                        Button::new("settings-cancel")
+                            .label("关闭")
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(Self::handle_cancel)),
+                    )
+                    .child(
+                        Button::new("settings-save")
+                            .label("保存")
+                            .primary()
+                            .with_size(Size::Small)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(Self::handle_save)),
                     ),
             )
     }
 }
 
-fn section_title(title: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {
+// ---- 布局原语（Section / FieldRow，对齐 OpenChamber 语义） ----
+
+/// Section：顶部分隔线 + 纵向 padding；第一段分隔线由页头承担视觉起点。
+fn section_divider(theme: &gpui_component::Theme) -> gpui::Div {
     div()
-        .pt_2()
-        .text_size(tokens::text(13.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.foreground)
-        .child(title)
+        .w_full()
+        .border_t_1()
+        .border_color(theme.border)
+        .px_5()
+        .pt_4()
+        .pb_4()
 }
 
-fn label(text: &'static str, theme: &gpui_component::Theme) -> impl IntoElement {
-    div()
-        .text_size(tokens::text(12.))
-        .text_color(theme.muted_foreground)
-        .child(text)
-}
-
-fn field(
+/// FieldRow：左标签列（label + helper）+ 右控件簇，左右两栏顶对齐。
+fn field_row(
     label_text: &'static str,
-    input: impl IntoElement,
+    helper: Option<&'static str>,
+    control: impl IntoElement,
     theme: &gpui_component::Theme,
-) -> impl IntoElement {
-    v_flex()
-        .gap_1()
-        .child(label(label_text, theme))
-        .child(input)
+) -> gpui::Div {
+    h_flex()
+        .items_start()
+        .gap_4()
+        .child(
+            v_flex()
+                .w(px(180.))
+                .flex_shrink_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_size(tokens::text(13.))
+                        .text_color(theme.foreground)
+                        .child(label_text),
+                )
+                .children(helper.map(|text| {
+                    div()
+                        .text_size(tokens::text(11.))
+                        .text_color(theme.muted_foreground)
+                        .child(text)
+                })),
+        )
+        .child(control.into_any_element())
 }
+
+/// 控件簇统一宽度上限（对齐 OpenChamber `max-w-[24rem]`）。
+fn field_input(input: Input) -> gpui::AnyElement {
+    div().w(px(240.)).child(input.small()).into_any_element()
+}
+
+/// 数值输入（带 +/− 步进按钮；步进事件由 validate 兜底，范围校验在保存时）。
+fn number_field_input(state: &Entity<InputState>) -> gpui::AnyElement {
+    div()
+        .w(px(140.))
+        .child(NumberInput::new(state).with_size(Size::Small))
+        .into_any_element()
+}
+
+/// 字体下拉：固定宽度，选择即写回（SelectEvent::Confirm 在 new 时订阅）。
+fn font_select(
+    _id: &'static str,
+    state: &Entity<SelectState<Vec<FontOption>>>,
+    _cx: &mut Context<SettingsModal>,
+) -> gpui::AnyElement {
+    div()
+        .w(px(240.))
+        .child(Select::new(state).with_size(Size::Small))
+        .into_any_element()
+}
+
+/// 字体下拉选项：`""` = 系统默认占位显示 + 预设；若当前值不在其中则追加
+/// （保证任意已有自定义字体都能预选中且可还原）。
+fn font_select_items(presets: &[&'static str], current: Option<&str>) -> Vec<String> {
+    let mut items: Vec<String> = std::iter::once(String::new())
+        .chain(presets.iter().map(|p| p.to_string()))
+        .collect();
+    if let Some(value) = current
+        && !value.is_empty()
+        && !items.contains(&value.to_string())
+    {
+        items.push(value.to_string());
+    }
+    items
+}
+
+/// 选项索引：当前值（None 或 "" 视为系统默认）在 items 中的位置。
+fn selected_font_index(items: &[String], current: Option<&str>) -> Option<IndexPath> {
+    let target = current.unwrap_or("");
+    items
+        .iter()
+        .position(|item| item == target)
+        .map(IndexPath::new)
+}
+
+/// Select 显示标题：空串显示「系统默认」。
+#[derive(Clone)]
+struct FontOption(String);
+
+impl gpui_component::select::SelectItem for FontOption {
+    type Value = String;
+
+    fn title(&self) -> gpui::SharedString {
+        if self.0.is_empty() {
+            "系统默认".into()
+        } else {
+            self.0.clone().into()
+        }
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
+const UI_FONT_PRESETS: &[&str] = &["SF Pro", "PingFang SC"];
+const CODE_FONT_PRESETS: &[&str] = &["Menlo", "SF Mono", "JetBrains Mono"];

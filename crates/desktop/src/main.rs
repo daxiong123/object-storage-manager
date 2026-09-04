@@ -5,9 +5,10 @@ use object_storage_app::AppServices;
 use object_storage_ui::{self as ui, WorkspaceView};
 use std::sync::Arc;
 use ui::actions::{
-    CloseWindow, Copy, CopyObjectUrl, Cut, DeleteObject, DownloadObject, OpenCommandPalette,
-    OpenObject, OpenSettings, Paste, Quit, Redo, Refresh, RenameObject, RevealInFinder,
-    SaveTextObject, SelectAll, SelectObjectAll, ToggleSidebar, Undo, UploadFiles, UploadFolder,
+    CloseWindow, Copy, CopyObjectUrl, Cut, DeleteObject, DownloadObject, OpenAbout,
+    OpenCommandPalette, OpenObject, OpenSettings, Paste, Quit, Redo, Refresh, RenameObject,
+    RevealInFinder, SaveTextObject, SelectAll, SelectObjectAll, ToggleSidebar, Undo, UploadFiles,
+    UploadFolder,
 };
 
 /// macOS 应用菜单（规范 §11/§22：与快捷键共享同一 Action；§26：⌘ 符号随键位自动显示）。
@@ -18,6 +19,8 @@ fn app_menus() -> Vec<Menu> {
         Menu {
             name: "CloudStorage".into(),
             items: vec![
+                MenuItem::action("关于 CloudStorage", OpenAbout),
+                MenuItem::separator(),
                 MenuItem::action("设置…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("退出 CloudStorage", Quit),

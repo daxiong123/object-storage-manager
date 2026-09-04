@@ -27,7 +27,7 @@
 use std::sync::{OnceLock, RwLock};
 
 use gpui::{App, SharedString};
-use gpui_component::{Theme, ThemeConfig, ThemeMode};
+use gpui_component::{Theme, ThemeConfig, ThemeMode, highlighter::HighlightThemeStyle};
 use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings};
 
 use crate::tokens;
@@ -210,6 +210,9 @@ fn config(
         cfg.font_family = prefs.ui_font_family.clone().map(SharedString::from);
         cfg.mono_font_size = Some(prefs.code_font_size as f32);
         cfg.mono_font_family = prefs.code_font_family.clone().map(SharedString::from);
+        // 代码编辑器（code_editor 文本预览/编辑）高亮配色：跟随亮/暗模式，
+        // 否则库默认主题与我们的中性灰底不协调（验收问题）。
+        cfg.highlight = Some(highlight_theme_style(mode));
         let hex = |v: [f32; 4]| SharedString::from(hsla_to_hex(v));
         let c = &mut cfg.colors;
         c.primary = o.primary.map(hex);
@@ -226,6 +229,64 @@ fn config(
         cfg
     }
     build(mode, name, o, prefs)
+}
+
+/// 代码高亮主题（编辑器底/前景/活动行/行号 + 常用语法 token）。
+/// 亮暗两套同结构：暗色提高各 token 亮度保持辨识度；具体取值锚定
+/// gpui-component 默认主题的语义（keyword/number 同族蓝、string 绿、
+/// comment 灰、constant/boolean 暖红、type 紫），中性色与 surface 族一致。
+///
+/// `ThemeStyle` 字段私有且无 pub 构造器，只能走 serde 反序列化——
+/// 与库加载内置主题（default-theme.json）同路径，hex 字符串即 gpui
+/// `Hsla` 的 serde 格式。
+fn highlight_theme_style(mode: ThemeMode) -> HighlightThemeStyle {
+    let dark = mode.is_dark();
+    let keyword = hsl_hex(210.0, 0.85, if dark { 0.68 } else { 0.42 });
+    let string = hsl_hex(105.0, 0.55, if dark { 0.62 } else { 0.30 });
+    let comment = hsl_hex(220.0, 0.08, if dark { 0.52 } else { 0.48 });
+    let warm = hsl_hex(5.0, 0.75, if dark { 0.68 } else { 0.44 });
+    let function = hsl_hex(230.0, 0.75, if dark { 0.74 } else { 0.36 });
+    let type_ = hsl_hex(262.0, 0.60, if dark { 0.74 } else { 0.44 });
+    let plain = if dark {
+        hsl_hex(220.0, 0.10, 0.86)
+    } else {
+        hsl_hex(220.0, 0.10, 0.24)
+    };
+    let operator = hsl_hex(220.0, 0.12, if dark { 0.78 } else { 0.30 });
+    let punctuation = hsl_hex(220.0, 0.10, if dark { 0.70 } else { 0.34 });
+    let number = keyword.clone();
+    let comment_doc = hsl_hex(220.0, 0.08, if dark { 0.56 } else { 0.44 });
+
+    let json = serde_json::json!({
+        "editor.background": if dark { hsl_hex(220.0, 0.14, 0.10) } else { hsl_hex(210.0, 0.20, 0.985) },
+        "editor.foreground": plain.clone(),
+        "editor.active_line.background": if dark { hsl_hex(220.0, 0.14, 0.145) } else { hsl_hex(210.0, 0.24, 0.945) },
+        "editor.line_number": hsl_hex(220.0, 0.08, if dark { 0.42 } else { 0.62 }),
+        "editor.active_line_number": hsl_hex(210.0, if dark { 0.40 } else { 0.55 }, if dark { 0.72 } else { 0.38 }),
+        "syntax": {
+            "keyword": { "color": keyword },
+            "string": { "color": string },
+            "comment": { "color": comment },
+            "comment.doc": { "color": comment_doc },
+            "number": { "color": number },
+            "boolean": { "color": warm },
+            "constant": { "color": warm },
+            "function": { "color": function },
+            "type": { "color": type_ },
+            "variable": { "color": plain },
+            "property": { "color": plain },
+            "operator": { "color": operator },
+            "punctuation": { "color": punctuation },
+        },
+    });
+    serde_json::from_value(json)
+        .unwrap_or_else(|error| panic!("内置高亮主题 JSON 必须合法: {error}"))
+}
+
+/// HSL → hex 字符串（`#RRGGBB`，gpui `Hsla` serde 支持的格式之一）。
+fn hsl_hex(h_deg: f32, s: f32, l: f32) -> String {
+    let hex = hsla_to_hex([h_deg / 360.0, s, l, 1.0]);
+    hex[..7].to_string()
 }
 
 /// 把应用主题写入全局 Theme：亮/暗两套 `ThemeConfig` 挂到 pub 字段

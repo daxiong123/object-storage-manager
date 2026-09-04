@@ -4062,6 +4062,7 @@ dependencies = [
  "object-storage-persistence",
  "object-storage-transfer",
  "raw-window-handle",
+ "serde_json",
 ]
 
 [[package]]

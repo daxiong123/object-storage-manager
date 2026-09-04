@@ -52,8 +52,8 @@ use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
-    DownloadObject, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh,
-    RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
+    DownloadObject, OpenAbout, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit,
+    Refresh, RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
     ToggleObjectFilter, ToggleSidebar, UnifiedDismiss, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
@@ -281,6 +281,8 @@ pub struct WorkspaceView {
     top_more_open: bool,
     /// 当前是否显示对象详情弹层。
     details_overlay_open: bool,
+    /// 当前是否显示「关于」弹层（独立于设置模态）。
+    about_overlay_open: bool,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 文本保存覆盖确认 sheet 已弹出
@@ -843,6 +845,7 @@ impl WorkspaceView {
             object_menu_open: None,
             top_more_open: false,
             details_overlay_open: false,
+            about_overlay_open: false,
             delete_prompt_open: false,
             save_prompt_open: false,
             copying_url: false,
@@ -4034,6 +4037,149 @@ impl WorkspaceView {
             .into_any_element()
     }
 
+    /// 「关于」弹层：无输入框，按弹层规范走 Overlay context + UnifiedDismiss，
+    /// 遮罩点击关，卡片阻断冒泡。
+    fn render_about_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .key_context("Overlay")
+            .on_action(cx.listener(|this, _: &UnifiedDismiss, _, cx| this.close_about_overlay(cx)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| this.close_about_overlay(cx)),
+            )
+            .child(
+                v_flex()
+                    .w(px(420.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(10.))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // 标题栏：标题 + 关闭按钮（规范：标题栏右侧 ✕）
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("关于 CloudStorage"),
+                            )
+                            .child(
+                                Button::new("close-about-overlay")
+                                    .icon(Icon::new(IconName::Close))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("关闭")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.close_about_overlay(cx)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        // 内容：应用标识 + 信息卡
+                        v_flex()
+                            .px_4()
+                            .pb_4()
+                            .gap_3()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .size(px(56.))
+                                            .rounded(px(14.))
+                                            .bg(theme.selection)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                Icon::new(IconName::Folder)
+                                                    .size_7()
+                                                    .text_color(theme.foreground),
+                                            ),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_size(tokens::text(18.))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(theme.foreground)
+                                                    .child("CloudStorage"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(tokens::text(12.))
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(format!(
+                                                        "版本 {} · macOS 14+",
+                                                        env!("CARGO_PKG_VERSION")
+                                                    )),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.sidebar)
+                                    .p_3()
+                                    .child(
+                                        v_flex()
+                                            .gap_2()
+                                            .child(about_kv(
+                                                "应用定位",
+                                                "高性能三栏 Workspace，键盘优先。",
+                                                theme,
+                                            ))
+                                            .child(about_kv(
+                                                "技术栈",
+                                                "Rust · GPUI · Tokio · SQLite · Keychain",
+                                                theme,
+                                            ))
+                                            .child(about_kv(
+                                                "数据安全",
+                                                "Secret 只存 macOS Keychain，不落盘。",
+                                                theme,
+                                            ))
+                                            .child(about_kv(
+                                                "支持服务商",
+                                                "Qiniu Kodo · Aliyun OSS",
+                                                theme,
+                                            )),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn close_about_overlay(&mut self, cx: &mut Context<Self>) {
+        self.about_overlay_open = false;
+        cx.notify();
+    }
+
     fn render_rename_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some((old_key, editor)) = self.renaming.as_ref() else {
             return div().into_any_element();
@@ -4657,6 +4803,19 @@ impl WorkspaceView {
             .detach();
         modal.update(cx, |modal, cx| modal.focus_first(window, cx));
         self.settings_modal = Some(modal);
+        cx.notify();
+    }
+
+    /// 「关于」弹层（菜单在设置上方 / 命令面板共享）。与设置模态互斥。
+    fn handle_open_about(&mut self, _: &OpenAbout, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.about_overlay_open
+            || self.settings_modal.is_some()
+            || self.palette.is_some()
+            || self.add_modal.is_some()
+        {
+            return;
+        }
+        self.about_overlay_open = true;
         cx.notify();
     }
 
@@ -6876,6 +7035,24 @@ pub fn format_time(millis: i64) -> String {
         .unwrap_or_else(|| millis.to_string())
 }
 
+/// 「关于」弹层信息行：小标签 + 说明文字。
+fn about_kv(label: &'static str, value: &'static str, theme: &Theme) -> gpui::Div {
+    v_flex()
+        .gap_0p5()
+        .child(
+            div()
+                .text_size(tokens::text(11.))
+                .text_color(theme.muted_foreground)
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(tokens::text(13.))
+                .text_color(theme.foreground)
+                .child(value),
+        )
+}
+
 impl gpui::Focusable for WorkspaceView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
@@ -6921,6 +7098,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_dismiss_filter))
             .on_action(cx.listener(Self::handle_select_bucket_by_name))
             .on_action(cx.listener(Self::handle_open_settings))
+            .on_action(cx.listener(Self::handle_open_about))
             .on_action(cx.listener(Self::handle_open_object))
             .on_action(cx.listener(Self::handle_reveal_in_finder))
             .bg(theme.background)
@@ -6934,6 +7112,9 @@ impl Render for WorkspaceView {
         }
         if let Some(modal) = self.settings_modal.clone() {
             root = root.child(self.render_settings_modal_overlay(&modal, &theme, cx));
+        }
+        if self.about_overlay_open {
+            root = root.child(self.render_about_overlay(&theme, cx));
         }
         if self.details_overlay_open {
             root = root.child(self.render_details_overlay(&theme, cx));
