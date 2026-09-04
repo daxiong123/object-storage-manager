@@ -21,7 +21,7 @@
 // 也如此封装 objc 调用，文件对话框等直接用 gpui API，不自建 NSPanel）。
 #![allow(unexpected_cfgs)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
@@ -34,13 +34,15 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
     button::ButtonVariants as _, h_flex, input::Input, input::InputEvent, input::InputState,
-    progress::Progress, resizable::h_resizable, resizable::resizable_panel, spinner::Spinner,
-    v_flex,
+    progress::Progress, resizable::h_resizable, resizable::resizable_panel,
+    scroll::ScrollableElement, spinner::Spinner, v_flex,
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
 use object_storage_core::ByteProgress;
-use object_storage_domain::{Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry};
+use object_storage_domain::{
+    Account, Bucket, CloudObject, ListObjectsRequest, ListingEntry, ProviderKind,
+};
 use object_storage_transfer::{
     TaskRunner, TransferEngine, TransferKind, TransferOp, TransferRequest, TransferState,
     TransferTask,
@@ -52,10 +54,11 @@ use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
     DownloadObject, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh,
     RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
-    ToggleInspector, ToggleObjectFilter, ToggleSidebar, UploadFiles, UploadFolder,
+    ToggleObjectFilter, ToggleSidebar, UnifiedDismiss, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 use crate::settings_modal::SettingsModal;
+use crate::tokens;
 
 /// 左栏折叠后的图标栏宽度（规范：44px Icon Rail）。
 const RAIL_WIDTH: Pixels = px(44.);
@@ -63,10 +66,6 @@ const RAIL_WIDTH: Pixels = px(44.);
 const SIDEBAR_DEFAULT: Pixels = px(220.);
 const SIDEBAR_MIN: Pixels = px(180.);
 const SIDEBAR_MAX: Pixels = px(360.);
-/// Inspector 默认宽度（规范：默认 320，范围 280–520）。
-const INSPECTOR_DEFAULT: Pixels = px(320.);
-const INSPECTOR_MIN: Pixels = px(280.);
-const INSPECTOR_MAX: Pixels = px(520.);
 /// 对象列表单页条数（七牛列举单页上限内）。
 const OBJECTS_PAGE_LIMIT: u32 = 100;
 // 签名链接 TTL / 剪贴板清除秒数不再用编译期常量：运行时取 self.settings
@@ -96,6 +95,7 @@ struct CopyObjectUrlRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum InspectorTab {
     Preview,
     Details,
@@ -109,10 +109,96 @@ enum PreviewKind {
     System,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectMenuItem {
+    Details,
+    CopyUrl,
+    Download,
+    Rename,
+    CopyTo,
+    MoveTo,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopMoreMenuItem {
+    CopyTo,
+    MoveTo,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyMoveMode {
+    Copy,
+    Move,
+}
+
+struct CopyMoveState {
+    mode: CopyMoveMode,
+    source_keys: Vec<String>,
+    target_prefix: String,
+    filter: Entity<InputState>,
+    entries: Vec<ListingEntry>,
+    state: AsyncState,
+}
+
+fn object_menu_items() -> Vec<ObjectMenuItem> {
+    vec![
+        ObjectMenuItem::Details,
+        ObjectMenuItem::CopyUrl,
+        ObjectMenuItem::Download,
+        ObjectMenuItem::Rename,
+        ObjectMenuItem::CopyTo,
+        ObjectMenuItem::MoveTo,
+        ObjectMenuItem::Delete,
+    ]
+}
+
+fn top_more_menu_items() -> Vec<TopMoreMenuItem> {
+    vec![
+        TopMoreMenuItem::CopyTo,
+        TopMoreMenuItem::MoveTo,
+        TopMoreMenuItem::Delete,
+    ]
+}
+
+fn object_menu_item_label(item: ObjectMenuItem) -> &'static str {
+    match item {
+        ObjectMenuItem::Details => "详情",
+        ObjectMenuItem::CopyUrl => "获取地址",
+        ObjectMenuItem::Download => "下载",
+        ObjectMenuItem::Rename => "重命名",
+        ObjectMenuItem::CopyTo => "复制到",
+        ObjectMenuItem::MoveTo => "移动到",
+        ObjectMenuItem::Delete => "删除",
+    }
+}
+
+fn top_more_menu_item_label(item: TopMoreMenuItem) -> &'static str {
+    match item {
+        TopMoreMenuItem::CopyTo => "复制到",
+        TopMoreMenuItem::MoveTo => "移动到",
+        TopMoreMenuItem::Delete => "删除",
+    }
+}
+
+fn object_menu_item_icon(item: ObjectMenuItem) -> IconName {
+    match item {
+        ObjectMenuItem::Details => IconName::Info,
+        ObjectMenuItem::CopyUrl => IconName::ExternalLink,
+        ObjectMenuItem::Download => IconName::ArrowDown,
+        ObjectMenuItem::Rename => IconName::Replace,
+        ObjectMenuItem::CopyTo => IconName::Copy,
+        ObjectMenuItem::MoveTo => IconName::Folder,
+        ObjectMenuItem::Delete => IconName::Delete,
+    }
+}
+
 pub struct WorkspaceView {
     focus_handle: FocusHandle,
     sidebar_collapsed: bool,
-    inspector_collapsed: bool,
+    #[allow(dead_code)]
+    inspector_tab: InspectorTab,
     /// 当前打开的命令面板（⌘K）。Some 时在根容器上渲染模态遮罩层；
     /// 面板关闭（open=false）后由此处置 None 并归还焦点。
     palette: Option<Entity<CommandPaletteView>>,
@@ -148,9 +234,9 @@ pub struct WorkspaceView {
     /// 多选集合（规范 §7：Click/⌘Click/⇧Click/⌘A）。有序去重；
     /// `selected_object_key` 始终是其中最后一项（主选），供 Inspector/预览。
     selected_object_keys: indexmap::IndexSet<String>,
-    /// 范围选择锚点（entries 下标；上次普通/⌘点击的对象）。
+    /// 范围选择锚点（对象序号；上次普通/⌘点击的对象，不含目录前缀）。
     selection_anchor: Option<usize>,
-    /// 行内重命名进行中：(对象 key，输入框)。Some 时该行渲染为输入框。
+    /// 重命名弹窗进行中：(对象 key，输入框)。
     renaming: Option<(String, Entity<InputState>)>,
     /// rename 后台执行中（防重入）。
     renaming_busy: bool,
@@ -187,13 +273,29 @@ pub struct WorkspaceView {
     text_editor: Option<Entity<InputState>>,
     /// Space 触发预览时，系统格式下载完成后自动打开 Quick Look
     preview_open_quicklook: bool,
-    inspector_tab: InspectorTab,
+    /// 文件名/预览按钮触发的应用内预览弹层。
+    preview_overlay_open: bool,
+    /// 当前打开对象菜单的 object key。
+    object_menu_open: Option<String>,
+    /// 顶部「更多」菜单是否打开。
+    top_more_open: bool,
+    /// 当前是否显示对象详情弹层。
+    details_overlay_open: bool,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 文本保存覆盖确认 sheet 已弹出
     save_prompt_open: bool,
     /// 正在生成并复制签名链接
     copying_url: bool,
+    /// 新建目录弹窗输入。
+    create_folder_input: Option<Entity<InputState>>,
+    /// 新建目录上传占位对象中。
+    creating_folder: bool,
+    /// 复制/移动目标选择弹窗。
+    copy_move: Option<CopyMoveState>,
+    /// 复制/移动执行中。
+    copy_move_busy: bool,
+    copy_move_gen: u64,
     /// 最近一次下载结果提示（入队确认/失败；失败用 danger 色）
     download_message: Option<DownloadMessage>,
     /// 传输引擎：下载入队，状态经 watch 令牌事件驱动回填 `transfers`（不轮询）
@@ -222,7 +324,7 @@ pub(crate) struct ObjectSelectionIntent {
     pub select_all: bool,
     /// 是否点了空白处（清空选择；列表空白处点击才传 true）。
     pub clicked_empty: bool,
-    /// 点击项在 entries（含 CommonPrefixes）中的下标；⌘A / 空白点击时为 None。
+    /// 点击对象在 ordered_keys（不含目录前缀）中的下标；⌘A / 空白点击时为 None。
     pub clicked_index: Option<usize>,
 }
 
@@ -329,6 +431,281 @@ pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> V
         .collect()
 }
 
+fn object_selection_ix(entries: &[ListingEntry], key: &str) -> Option<usize> {
+    entries
+        .iter()
+        .filter_map(object_key)
+        .position(|object_key| object_key == key)
+}
+
+fn object_keys(entries: &[ListingEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(object_key)
+        .map(str::to_string)
+        .collect()
+}
+
+fn object_key_exists(entries: &[ListingEntry], key: &str) -> bool {
+    entries
+        .iter()
+        .filter_map(object_key)
+        .any(|object_key| object_key == key)
+}
+
+fn common_prefix_exists(entries: &[ListingEntry], prefix: &str) -> bool {
+    entries.iter().any(|entry| match entry {
+        ListingEntry::CommonPrefix(existing) => existing == prefix,
+        ListingEntry::Object(_) => false,
+    })
+}
+
+fn create_folder_target_key(
+    current_prefix: Option<&str>,
+    folder_name: &str,
+) -> Result<String, String> {
+    let name = folder_name.trim();
+    if name.is_empty() {
+        return Err("目录名不能为空".into());
+    }
+    if name.contains('/') {
+        return Err("目录名不能包含 /".into());
+    }
+    if name == "." || name == ".." {
+        return Err("目录名不能是 . 或 ..".into());
+    }
+    Ok(format!("{}{}{}", current_prefix.unwrap_or(""), name, "/"))
+}
+
+fn create_folder_validation_message(
+    current_prefix: Option<&str>,
+    folder_name: &str,
+    entries: &[ListingEntry],
+) -> Option<String> {
+    let key = match create_folder_target_key(current_prefix, folder_name) {
+        Ok(key) => key,
+        Err(message) => return Some(message),
+    };
+    if common_prefix_exists(entries, &key) || object_key_exists(entries, &key) {
+        return Some(format!(
+            "目录已存在：{}",
+            display_name(key.trim_end_matches('/'))
+        ));
+    }
+    None
+}
+
+fn breadcrumb_prefixes(prefix: Option<&str>) -> Vec<(String, String)> {
+    let Some(prefix) = prefix else {
+        return Vec::new();
+    };
+    let mut path = String::new();
+    prefix
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            path.push_str(segment);
+            path.push('/');
+            (segment.to_string(), path.clone())
+        })
+        .collect()
+}
+
+/// 长路径折叠：中段收起为 `…`（点击直达被收起的最深一层），保留首段与
+/// 最后 2 段（父目录 + 当前目录）。折叠后可见项数与 BREADCRUMB_MAX_VISIBLE
+/// 一致（首段 + … + 尾 2 段 = 4）。折叠决策在纯函数（单测锁死），渲染层
+/// 只消费结果。
+///
+/// 返回 `Option`：`None` = 未折叠（渲染完整路径）；
+/// `Some((collapsed_prefix, tail))` = 首段后插入省略项，点击直达
+/// `collapsed_prefix`（被收起段中最深一层的前缀），`tail` 为保留的尾段。
+const BREADCRUMB_MAX_VISIBLE: usize = 4;
+
+fn collapse_breadcrumb(segments: &[(String, String)]) -> Option<(String, Vec<(String, String)>)> {
+    if segments.len() <= BREADCRUMB_MAX_VISIBLE {
+        return None;
+    }
+    // 折叠区为 [1, len-2)；最深被收起段是尾段前两段，其前缀即 `…` 的跳转目标
+    let collapsed_prefix = segments[segments.len() - 3].1.clone();
+    let tail = segments[segments.len() - 2..].to_vec();
+    Some((collapsed_prefix, tail))
+}
+
+fn rename_validation_message(
+    current_key: &str,
+    new_name: &str,
+    entries: &[ListingEntry],
+) -> Option<String> {
+    let new_key = match rename_target_key(current_key, new_name) {
+        Ok(key) => key,
+        Err(message) => return Some(message),
+    };
+    if new_key == current_key {
+        return Some("请输入一个不同的新名称".into());
+    }
+    if object_key_exists(entries, &new_key) {
+        return Some(format!(
+            "目标名称已存在：{}，请换一个名字",
+            display_name(&new_key)
+        ));
+    }
+    None
+}
+
+fn normalize_copy_move_target_prefix(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if trimmed.starts_with('/') {
+        return Err("目标目录不能以 / 开头".into());
+    }
+    if trimmed.split('/').any(|segment| segment == "..") {
+        return Err("目标目录不能包含 ..".into());
+    }
+    Ok(if trimmed.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/")
+    })
+}
+
+fn copy_move_target_key(source_key: &str, target_prefix: &str) -> String {
+    format!("{}{}", target_prefix, display_name(source_key))
+}
+
+fn copy_move_target_keys(
+    source_keys: &[String],
+    target_prefix: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let prefix = normalize_copy_move_target_prefix(target_prefix)?;
+    let targets: Vec<(String, String)> = source_keys
+        .iter()
+        .map(|source| (source.clone(), copy_move_target_key(source, &prefix)))
+        .collect();
+    if let Some((source, _)) = targets.iter().find(|(source, target)| source == target) {
+        return Err(format!("目标路径与源路径相同：{source}"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some((_, target)) = targets
+        .iter()
+        .find(|(_, target)| !seen.insert(target.as_str()))
+    {
+        return Err(format!(
+            "多个源对象会写入同一目标名称：{}",
+            display_name(target)
+        ));
+    }
+    Ok(targets)
+}
+
+fn prepare_copy_move_directory_load(
+    target_prefix: &mut String,
+    entries: &mut Vec<ListingEntry>,
+    state: &mut AsyncState,
+    next_prefix: String,
+) {
+    *target_prefix = next_prefix;
+    entries.clear();
+    *state = AsyncState::Loading;
+}
+
+fn can_commit_copy_move(
+    busy: bool,
+    directory_state: &AsyncState,
+    validation: Option<&str>,
+) -> bool {
+    !busy && *directory_state != AsyncState::Loading && validation.is_none()
+}
+
+fn copy_move_summary(mode: CopyMoveMode, success: usize, failures: &[(String, String)]) -> String {
+    let action = match mode {
+        CopyMoveMode::Copy => "复制",
+        CopyMoveMode::Move => "移动",
+    };
+    if failures.is_empty() {
+        return format!("已{action} {success} 个对象");
+    }
+    let detail = failures
+        .iter()
+        .take(3)
+        .map(|(key, error)| format!("{}：{}", display_name(key), error))
+        .collect::<Vec<_>>()
+        .join("；");
+    format!(
+        "{action}完成 {success} 个，失败 {} 个：{detail}",
+        failures.len()
+    )
+}
+
+/// 默认下载目录有效性：设置值存在且是目录才可用。
+/// 无效值（未设置/已被删除/指向文件）一律返回 None，由调用方退回面板默认位置。
+fn effective_default_download_dir(dir: Option<&Path>) -> Option<PathBuf> {
+    dir.filter(|path| path.is_dir()).map(Path::to_path_buf)
+}
+
+/// 下载目标路径：目标目录 + 云端 Key 的末段文件名。
+fn download_dest_path(dest_dir: &Path, object_key: &str) -> PathBuf {
+    dest_dir.join(display_name(object_key))
+}
+
+/// 单文件下载确认 sheet 文案（与批量下载同一交互结构：使用默认目录/另存为…/取消）。
+fn single_download_confirm_texts(object_key: &str, default_dir: &Path) -> (String, String) {
+    (
+        format!("将「{}」下载到默认目录。", display_name(object_key)),
+        format!(
+            "{}\n\n选择「另存为…」可保存到其他位置。",
+            default_dir.display()
+        ),
+    )
+}
+
+/// 批量下载确认 sheet 文案：说明 GPUI 0.2.2 目录选择器无初始目录参数的限制。
+fn batch_download_confirm_texts(count: usize, default_dir: &Path) -> (String, String) {
+    (
+        format!("将 {count} 个对象下载到默认目录。"),
+        format!(
+            "{}\n\nGPUI 0.2.2 的目录选择器不支持设置初始目录；如需选择其他位置，将打开系统目录面板。",
+            default_dir.display()
+        ),
+    )
+}
+
+/// 弹层规范锚点（详见 agents.md「弹层规范」行），回答「这套阻断配置下
+/// 卡片内的点击/滚动事件是否会冒泡误关弹层」——返回 `true` 即不合规。
+/// - `card_stops_mouse_down=false`：点卡片任意事件直接冒泡到遮罩 → 误关；
+/// - 含滚动列表（预览/复制移动）的弹层还必须阻断 `mouse_up`：仅阻断 down
+///   时，列表上的 mouse up 仍会走遮罩链路引发误关；
+/// - `busy` 与阻断无关（busy 由各 close handler 自行拒绝）。
+/// 仅测试消费（规范判据），生产路径按 agents.md 约定直接实现。
+#[allow(dead_code)]
+fn overlay_scroll_dismisses_modal(
+    busy: bool,
+    card_stops_mouse_down: bool,
+    card_stops_mouse_up: bool,
+    has_scrollable_list: bool,
+) -> bool {
+    let _ = busy;
+    if !card_stops_mouse_down {
+        return true;
+    }
+    has_scrollable_list && !card_stops_mouse_up
+}
+
+fn provider_url_scheme(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Aliyun => "oss",
+        ProviderKind::Qiniu => "kodo",
+    }
+}
+
+fn object_key(entry: &ListingEntry) -> Option<&str> {
+    match entry {
+        ListingEntry::Object(object) => Some(object.key.as_str()),
+        ListingEntry::CommonPrefix(_) => None,
+    }
+}
+
 /// 判断本地缓存文件是否对应当前选中的对象（缓存复用判据）：
 /// 缓存文件名形如 `{nanos}-{display_name}`，只需后缀匹配 display_name。
 /// `None` path / 无 key 一律不复用（保守：多下载一次好过开错文件）。
@@ -359,6 +736,7 @@ impl WorkspaceView {
                 .unwrap_or_else(|error| panic!("设置文件损坏或不可读（{path:?}）：{error}"));
             (settings, path)
         };
+        crate::theme::apply_settings(&settings, None, cx);
         // 传输引擎：任务执行体注入 AppServices 下载（provider 构建即锁即放），
         // 引擎把 future spawn 到 AppServices 的 tokio 运行时上（abort 即断流）。
         let runner: TaskRunner = {
@@ -395,7 +773,11 @@ impl WorkspaceView {
                 })
             })
         };
-        let engine = Arc::new(TransferEngine::new(services.runtime_handle(), runner, 2));
+        let engine = Arc::new(TransferEngine::new(
+            services.runtime_handle(),
+            runner,
+            settings.transfer_concurrency as usize,
+        ));
 
         // 系统事件 → 传输引擎（spec §25/§26，P0）。
         // - 睡眠（NSWorkspaceWillSleepNotification）→ suspend_all
@@ -420,7 +802,7 @@ impl WorkspaceView {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             sidebar_collapsed: false,
-            inspector_collapsed: false,
+            inspector_tab: InspectorTab::Preview,
             palette: None,
             add_modal: None,
             services,
@@ -457,10 +839,18 @@ impl WorkspaceView {
             preview_text: None,
             text_editor: None,
             preview_open_quicklook: false,
-            inspector_tab: InspectorTab::Preview,
+            preview_overlay_open: false,
+            object_menu_open: None,
+            top_more_open: false,
+            details_overlay_open: false,
             delete_prompt_open: false,
             save_prompt_open: false,
             copying_url: false,
+            create_folder_input: None,
+            creating_folder: false,
+            copy_move: None,
+            copy_move_busy: false,
+            copy_move_gen: 0,
             download_message: None,
             engine: Arc::clone(&engine),
             transfers: Vec::new(),
@@ -707,6 +1097,9 @@ impl WorkspaceView {
         self.selected_object_keys.clear();
         self.selection_anchor = None;
         self.renaming = None;
+        self.object_menu_open = None;
+        self.top_more_open = false;
+        self.details_overlay_open = false;
     }
 
     /// 下钻到某个目录前缀。
@@ -715,6 +1108,16 @@ impl WorkspaceView {
         self.object_filter = None;
         self.filtered_ix = None;
         self.current_prefix = Some(prefix);
+        self.reload_objects(cx);
+    }
+
+    fn open_bucket_root(&mut self, cx: &mut Context<Self>) {
+        if self.current_prefix.is_none() {
+            return;
+        }
+        self.object_filter = None;
+        self.filtered_ix = None;
+        self.current_prefix = None;
         self.reload_objects(cx);
     }
 
@@ -817,8 +1220,114 @@ impl WorkspaceView {
         })
     }
 
-    /// 下载选中对象：gpui 平台保存面板（`cx.prompt_for_new_path`，异步回调）
-    /// 拿目标路径 → 后台执行 AppServices 下载（阻塞式，见 agents.md §5 线程模型）。
+    fn selected_provider_kind(&self) -> Option<ProviderKind> {
+        let account_id = self.selected_account_id.as_ref()?;
+        self.accounts
+            .iter()
+            .find(|account| account.id == *account_id)
+            .map(|account| account.provider)
+    }
+
+    fn selected_object_keys_vec(&self) -> Vec<String> {
+        if self.selected_object_keys.is_empty() {
+            self.selected_cloud_object()
+                .map(|object| vec![object.key.clone()])
+                .unwrap_or_default()
+        } else {
+            self.selected_object_keys.iter().cloned().collect()
+        }
+    }
+
+    /// 行级操作按钮以“该行对象”为作用域，避免当前多选集合导致误批量操作。
+    fn select_object_for_row_action(&mut self, key: &str) {
+        let anchor = object_selection_ix(&self.entries, key);
+        self.selected_object_keys.clear();
+        self.selected_object_keys.insert(key.to_string());
+        self.selected_object_key = Some(key.to_string());
+        self.selection_anchor = anchor;
+        self.renaming = None;
+    }
+
+    fn open_object_menu(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.select_object_for_row_action(key);
+        self.object_menu_open = Some(key.to_string());
+        self.preview_overlay_open = false;
+        self.details_overlay_open = false;
+        cx.notify();
+    }
+
+    fn toggle_object_menu(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.object_menu_open.as_deref() == Some(key) {
+            self.object_menu_open = None;
+            cx.notify();
+        } else {
+            self.open_object_menu(key, cx);
+        }
+    }
+
+    fn toggle_top_more_menu(&mut self, cx: &mut Context<Self>) {
+        self.top_more_open = !self.top_more_open;
+        self.object_menu_open = None;
+        cx.notify();
+    }
+
+    fn close_top_more_menu(&mut self) {
+        self.top_more_open = false;
+    }
+
+    fn open_details_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.selected_cloud_object().is_none() {
+            return;
+        }
+        self.object_menu_open = None;
+        self.preview_overlay_open = false;
+        self.details_overlay_open = true;
+        cx.notify();
+    }
+
+    fn close_details_overlay(&mut self, cx: &mut Context<Self>) {
+        self.details_overlay_open = false;
+        cx.notify();
+    }
+
+    fn handle_object_menu_item(
+        &mut self,
+        item: ObjectMenuItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.object_menu_open = None;
+        match item {
+            ObjectMenuItem::Details => self.open_details_overlay(cx),
+            ObjectMenuItem::CopyUrl => self.copy_object_url(cx),
+            ObjectMenuItem::Download => self.start_object_download(window, cx),
+            ObjectMenuItem::Rename => self.handle_rename_object(&RenameObject, window, cx),
+            ObjectMenuItem::CopyTo => self.open_copy_move_overlay(CopyMoveMode::Copy, window, cx),
+            ObjectMenuItem::MoveTo => self.open_copy_move_overlay(CopyMoveMode::Move, window, cx),
+            ObjectMenuItem::Delete => self.confirm_and_delete_object(window, cx),
+        }
+        cx.notify();
+    }
+
+    fn handle_top_more_menu_item(
+        &mut self,
+        item: TopMoreMenuItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_top_more_menu();
+        match item {
+            TopMoreMenuItem::CopyTo => self.open_copy_move_overlay(CopyMoveMode::Copy, window, cx),
+            TopMoreMenuItem::MoveTo => self.open_copy_move_overlay(CopyMoveMode::Move, window, cx),
+            TopMoreMenuItem::Delete => self.confirm_and_delete_object(window, cx),
+        }
+        cx.notify();
+    }
+
+    /// 下载选中对象：与批量下载一致的确认交互——
+    /// - 已设置有效默认目录：先弹确认 sheet（使用默认目录 / 另存为… / 取消）
+    /// - 未设置：直接打开保存面板（初始目录 = HOME）
+    /// 最终都经 gpui 平台 API（`cx.prompt_for_new_path`，异步回调）拿目标路径。
     /// 用户取消 = 无操作。
     ///
     /// 为什么必须用 gpui 平台 API、不能在事件处理器里同步 `runModal`：
@@ -826,13 +1335,13 @@ impl WorkspaceView {
     /// 还持有借用 → "RefCell already borrowed" panic 闪退。gpui 自带的面板从
     /// foreground executor 任务发起 `beginWithCompletionHandler:`，结果经
     /// oneshot 回传，天生规避重入。详见 docs/notes/gpui-api-notes.md「文件对话框」。
-    fn start_object_download(&mut self, cx: &mut Context<Self>) {
+    fn start_object_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.downloading {
             return; // 防重入
         }
         // 多选（≥2）走批量目录流程；单选维持原保存面板。
         if self.selected_object_keys.len() > 1 {
-            self.start_batch_download(cx);
+            self.start_batch_download(window, cx);
             return;
         }
         let Some(key) = self.selected_cloud_object().map(|o| o.key.clone()) else {
@@ -849,10 +1358,88 @@ impl WorkspaceView {
         self.download_message = None;
         cx.notify();
 
-        // 面板初始目录：用户主目录（HOME 缺失时退化到根目录，仅影响初始位置）
-        let directory = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let suggested_name = display_name(&key);
-        let receiver = cx.prompt_for_new_path(&directory, Some(suggested_name));
+        // 默认目录确认 sheet：与批量下载交互对齐（使用默认目录/另存为…/取消）
+        if let Some(default_dir) =
+            effective_default_download_dir(self.settings.default_download_dir.as_deref())
+        {
+            let (message, detail) = single_download_confirm_texts(&key, &default_dir);
+            let receiver = window.prompt(
+                PromptLevel::Info,
+                &message,
+                Some(&detail),
+                &[
+                    PromptButton::ok("使用默认目录"),
+                    PromptButton::new("另存为…"),
+                    PromptButton::cancel("取消"),
+                ],
+                cx,
+            );
+            cx.spawn(async move |this, cx| {
+                let answer = match receiver.await {
+                    Ok(answer) => answer,
+                    Err(_) => {
+                        this.update(cx, |this, cx| {
+                            this.downloading = false;
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+                this.update(cx, |this, cx| match answer {
+                    0 => this.enqueue_single_download(&account_id, &bucket, &key, cx),
+                    1 => {
+                        let directory = this.download_initial_directory();
+                        this.prompt_for_single_download_destination(
+                            account_id, bucket, key, directory, cx,
+                        )
+                    }
+                    _ => {
+                        this.downloading = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
+        // 无默认目录：保存面板初始目录 = HOME（仅影响初始位置）
+        let directory = self.download_initial_directory();
+        self.prompt_for_single_download_destination(account_id, bucket, key, directory, cx);
+    }
+
+    /// 单文件下载入队（默认目录路径）。
+    fn enqueue_single_download(
+        &mut self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let dest = download_dest_path(&self.download_initial_directory(), key);
+        self.downloading = false;
+        self.engine
+            .enqueue_download(account_id, bucket, key, dest, display_name(key).to_string());
+        self.download_message = Some(DownloadMessage {
+            is_error: false,
+            text: format!("已加入传输队列：{}", display_name(key)),
+        });
+        cx.notify();
+    }
+
+    /// 打开保存面板拿单文件目标路径（异步回调，规避模态重入）。
+    fn prompt_for_single_download_destination(
+        &mut self,
+        account_id: String,
+        bucket: String,
+        key: String,
+        directory: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let suggested_name = display_name(&key).to_string();
+        let receiver = cx.prompt_for_new_path(&directory, Some(&*suggested_name));
 
         cx.spawn(async move |this, cx| {
             // 面板结果在无借用作用域内先归一化，再一次性回主线程提交
@@ -916,10 +1503,16 @@ impl WorkspaceView {
         .detach();
     }
 
+    fn download_initial_directory(&self) -> PathBuf {
+        effective_default_download_dir(self.settings.default_download_dir.as_deref())
+            .or_else(std::env::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
     /// 批量下载（多选 ≥2）：先选目标目录（gpui `prompt_for_paths`
     /// `directories: true, multiple: false`）→ 逐项入队到该目录。
     /// 目标文件名 = display_name(key)；重名由传输引擎按路径覆盖写（File::create）。
-    fn start_batch_download(&mut self, cx: &mut Context<Self>) {
+    fn start_batch_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.downloading {
             return;
         }
@@ -937,6 +1530,57 @@ impl WorkspaceView {
         self.download_message = None;
         cx.notify();
 
+        if let Some(default_dir) =
+            effective_default_download_dir(self.settings.default_download_dir.as_deref())
+        {
+            let (message, detail) = batch_download_confirm_texts(keys.len(), &default_dir);
+            let receiver = window.prompt(
+                PromptLevel::Info,
+                &message,
+                Some(&detail),
+                &[
+                    PromptButton::ok("使用默认目录"),
+                    PromptButton::new("另选目录…"),
+                    PromptButton::cancel("取消"),
+                ],
+                cx,
+            );
+            cx.spawn(async move |this, cx| {
+                let answer = match receiver.await {
+                    Ok(answer) => answer,
+                    Err(_) => {
+                        this.update(cx, |this, cx| {
+                            this.downloading = false;
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+                this.update(cx, |this, cx| match answer {
+                    0 => this.enqueue_batch_downloads(&account_id, &bucket, &keys, default_dir, cx),
+                    1 => this.prompt_for_batch_download_directory(account_id, bucket, keys, cx),
+                    _ => {
+                        this.downloading = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
+        self.prompt_for_batch_download_directory(account_id, bucket, keys, cx);
+    }
+
+    fn prompt_for_batch_download_directory(
+        &mut self,
+        account_id: String,
+        bucket: String,
+        keys: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -985,30 +1629,41 @@ impl WorkspaceView {
             };
 
             this.update(cx, |this, cx| {
-                this.downloading = false;
-                for key in &keys {
-                    let name = display_name(key).to_string();
-                    this.engine.enqueue_download(
-                        account_id.as_str(),
-                        bucket.as_str(),
-                        key.as_str(),
-                        dest_dir.join(&name),
-                        name,
-                    );
-                }
-                this.download_message = Some(DownloadMessage {
-                    is_error: false,
-                    text: format!(
-                        "已加入传输队列：{} 个对象 → {}",
-                        keys.len(),
-                        dest_dir.display()
-                    ),
-                });
-                cx.notify();
+                this.enqueue_batch_downloads(&account_id, &bucket, &keys, dest_dir, cx)
             })
             .ok();
         })
         .detach();
+    }
+
+    fn enqueue_batch_downloads(
+        &mut self,
+        account_id: &str,
+        bucket: &str,
+        keys: &[String],
+        dest_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.downloading = false;
+        for key in keys {
+            let name = display_name(key).to_string();
+            self.engine.enqueue_download(
+                account_id,
+                bucket,
+                key.as_str(),
+                download_dest_path(&dest_dir, key),
+                name,
+            );
+        }
+        self.download_message = Some(DownloadMessage {
+            is_error: false,
+            text: format!(
+                "已加入传输队列：{} 个对象 → {}",
+                keys.len(),
+                dest_dir.display()
+            ),
+        });
+        cx.notify();
     }
 
     fn start_object_preview(&mut self, cx: &mut Context<Self>) {
@@ -1028,7 +1683,6 @@ impl WorkspaceView {
             return;
         };
         let name = display_name(&key).to_string();
-        eprintln!("[preview] requested key={key} bucket={bucket}");
         let mut path = std::env::temp_dir();
         path.push("CloudStorage");
         path.push("preview");
@@ -1055,7 +1709,9 @@ impl WorkspaceView {
                         .map_err(|e| format!("创建预览缓存目录失败：{e}"))?;
                     services
                         .download_object(&account_id, &bucket, &key, &path)
-                        .map_err(|e| format!("下载预览对象失败：{e}"))?;
+                        .map_err(|e| {
+                            preview_download_error_message(&bucket, &key, &e.to_string())
+                        })?;
                     let text = if is_text_object(&key) {
                         let metadata = std::fs::metadata(&path)
                             .map_err(|e| format!("读取预览文件信息失败：{e}"))?;
@@ -1074,13 +1730,8 @@ impl WorkspaceView {
                 .await;
             this.update(cx, |this, cx| {
                 this.previewing = false;
-                eprintln!(
-                    "[preview] download result: {}",
-                    if result.is_ok() { "ok" } else { "error" }
-                );
                 match result {
                     Ok((path, text)) => {
-                        eprintln!("[preview] inline path={}", path.display());
                         this.preview_path = Some(path.clone());
                         this.preview_text = text;
                         if this.preview_open_quicklook {
@@ -1166,7 +1817,9 @@ impl WorkspaceView {
                         .map_err(|e| format!("创建缓存目录失败：{e}"))?;
                     services
                         .download_object(&account_id, &bucket, &key, &path)
-                        .map_err(|e| format!("下载对象失败：{e}"))?;
+                        .map_err(|e| {
+                            preview_download_error_message(&bucket, &key, &e.to_string())
+                        })?;
                     Ok::<_, String>(path)
                 })
                 .await;
@@ -1263,6 +1916,28 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn ensure_preview_text_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_editor.is_some() {
+            return;
+        }
+        if !self.preview_overlay_open {
+            return;
+        }
+        let Some(text) = self.preview_text.clone() else {
+            return;
+        };
+        let language = self
+            .selected_cloud_object()
+            .map(|object| syntax_language(&object.key))
+            .unwrap_or("text");
+        let editor = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor(language)
+                .default_value(text)
+        });
+        self.text_editor = Some(editor);
+    }
+
     fn save_text_edit(&mut self, cx: &mut Context<Self>) {
         let (Some(editor), Some(path), Some(account_id), Some(bucket), Some(object)) = (
             self.text_editor.clone(),
@@ -1283,6 +1958,7 @@ impl WorkspaceView {
             cx.notify();
             return;
         }
+        self.preview_text = Some(text.clone());
         self.engine.enqueue_upload(
             &account_id,
             &bucket,
@@ -1290,7 +1966,6 @@ impl WorkspaceView {
             path,
             display_name(&object).to_string(),
         );
-        self.text_editor = None;
         self.download_message = Some(DownloadMessage {
             is_error: false,
             text: format!("已加入覆盖上传队列：{}", display_name(&object)),
@@ -1455,33 +2130,39 @@ impl WorkspaceView {
         }
     }
 
+    fn open_preview_overlay(&mut self, cx: &mut Context<Self>) {
+        self.preview_overlay_open = true;
+        self.object_menu_open = None;
+        self.details_overlay_open = false;
+        self.preview_open_quicklook = false;
+        self.start_object_preview(cx);
+    }
+
+    fn close_preview_overlay(&mut self, cx: &mut Context<Self>) {
+        self.preview_overlay_open = false;
+        cx.notify();
+    }
+
     fn handle_preview_object(
         &mut self,
         _: &PreviewObject,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(key) = self.selected_object_key.clone() {
-            if preview_kind(&key) == PreviewKind::System && self.preview_path.is_some() {
-                self.open_system_preview(cx);
-                return;
-            }
-            self.preview_open_quicklook = preview_kind(&key) == PreviewKind::System;
-        }
-        self.start_object_preview(cx);
+        self.open_preview_overlay(cx);
     }
 
     fn handle_download_object(
         &mut self,
         _: &DownloadObject,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_object_download(cx);
+        self.start_object_download(window, cx);
     }
 
     /// 对象行点击 → 多选语义（规范 §7）。纯决策在 `apply_object_selection`，
-    /// 这里只负责取上下文 + 回写状态 + 普通点击触发预览。
+    /// 这里只负责取上下文 + 回写状态；预览由文件名/预览按钮显式触发。
     fn handle_object_row_click(
         &mut self,
         ix: usize,
@@ -1493,22 +2174,22 @@ impl WorkspaceView {
         // 命中检测保证两者互斥，集合在行处理时是完整的点击前状态）
         let (baseline, baseline_anchor) =
             (self.selected_object_keys.clone(), self.selection_anchor);
+        let ordered_keys = object_keys(&self.entries);
+        let clicked_index = match &clicked {
+            ClickedEntry::Object(key) => {
+                ordered_keys.iter().position(|object_key| object_key == key)
+            }
+            ClickedEntry::CommonPrefix(_) => Some(ix),
+            ClickedEntry::None => None,
+        };
         let intent = ObjectSelectionIntent {
             command: modifiers.platform,
             shift: modifiers.shift,
             select_all: false,
             clicked_empty: false,
-            clicked_index: Some(ix),
+            clicked_index,
         };
-        let ordered_keys: Vec<String> = self
-            .entries
-            .iter()
-            .filter_map(|e| match e {
-                ListingEntry::Object(o) => Some(o.key.clone()),
-                ListingEntry::CommonPrefix(_) => None,
-            })
-            .collect();
-        let (next, anchor, preview) = apply_object_selection(
+        let (next, anchor, _) = apply_object_selection(
             intent,
             &ordered_keys,
             &baseline,
@@ -1523,9 +2204,8 @@ impl WorkspaceView {
         self.selected_object_keys = next;
         self.selected_object_key = self.selected_object_keys.last().cloned();
         self.selection_anchor = anchor;
-        if preview {
-            self.start_object_preview(cx);
-        }
+        self.object_menu_open = None;
+        self.top_more_open = false;
         cx.notify();
     }
 
@@ -1549,14 +2229,7 @@ impl WorkspaceView {
             clicked_empty: false,
             clicked_index: None,
         };
-        let ordered_keys: Vec<String> = self
-            .entries
-            .iter()
-            .filter_map(|e| match e {
-                ListingEntry::Object(o) => Some(o.key.clone()),
-                ListingEntry::CommonPrefix(_) => None,
-            })
-            .collect();
+        let ordered_keys = object_keys(&self.entries);
         let (next, anchor, _) = apply_object_selection(
             intent,
             &ordered_keys,
@@ -1570,9 +2243,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Return：进入行内重命名（Finder 式）。多选（≠1）时忽略——批量改名
-    /// 语义不明确，不做。已在重命名中则视为提交（输入框 Return 走这里前
-    /// 先被 Input 组件消费，此处兜底）。
+    /// Return：打开重命名弹窗。多选（≠1）时忽略——批量改名语义不明确，不做。
     fn handle_rename_object(
         &mut self,
         _: &RenameObject,
@@ -1614,7 +2285,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// 提交行内重命名：读取输入 → 校验目标 key → 后台
+    /// 提交重命名：读取输入 → 校验目标 key → 后台
     /// 下载到临时文件 → 上传新 key → 删旧 key。失败不静默。
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
         let Some((old_key, editor)) = self.renaming.clone() else {
@@ -1626,7 +2297,14 @@ impl WorkspaceView {
         let new_name = editor.read(cx).value().to_string();
         // 无变化：直接退出编辑态（Finder 行为）
         if new_name == display_name(&old_key) {
-            self.renaming = None;
+            cx.notify();
+            return;
+        }
+        if let Some(message) = rename_validation_message(&old_key, &new_name, &self.entries) {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: message,
+            });
             cx.notify();
             return;
         }
@@ -1646,15 +2324,7 @@ impl WorkspaceView {
         // 由上传侧 File::create 语义兜底？不，远端覆盖。用 provider 上传
         // 是覆盖语义，所以必须先查；entries 不可靠，直接调 head？OSS 无
         // head 封装。妥协：上传前查 entries + 明确告知覆盖风险）。
-        if self
-            .entries
-            .iter()
-            .any(|e| matches!(e, ListingEntry::Object(o) if o.key == new_key))
-        {
-            self.download_message = Some(DownloadMessage {
-                is_error: true,
-                text: format!("目标名称已存在：{}，请换一个名字", display_name(&new_key)),
-            });
+        if object_key_exists(&self.entries, &new_key) {
             cx.notify();
             return;
         }
@@ -1703,7 +2373,7 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// 取消行内重命名（Esc：Input escape() propagate → context "Renaming"）。
+    /// 取消重命名（Esc：Input escape() propagate → context "Renaming"）。
     fn handle_dismiss_rename(
         &mut self,
         _: &DismissRename,
@@ -1713,14 +2383,438 @@ impl WorkspaceView {
         if let Some((key, _)) = &self.renaming {
             eprintln!("[rename] cancelled key={key}");
         }
+        if self.create_folder_input.is_some() {
+            self.close_create_folder_overlay(cx);
+            return;
+        }
+        if self.copy_move.is_some() {
+            self.close_copy_move_overlay(cx);
+            return;
+        }
         self.cancel_rename(cx);
     }
 
-    /// 取消行内重命名。
+    /// 取消重命名。
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         if self.renaming.take().is_some() {
             cx.notify();
         }
+    }
+
+    fn open_create_folder_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_bucket.is_none()
+            || self.create_folder_input.is_some()
+            || self.creating_folder
+            || self.palette.is_some()
+            || self.add_modal.is_some()
+        {
+            return;
+        }
+        let editor = cx.new(|cx| InputState::new(window, cx).default_value("新建目录"));
+        cx.subscribe_in(&editor, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.commit_create_folder(cx);
+            }
+        })
+        .detach();
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        self.object_menu_open = None;
+        self.create_folder_input = Some(editor);
+        cx.notify();
+    }
+
+    fn close_create_folder_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.creating_folder {
+            return;
+        }
+        if self.create_folder_input.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn commit_create_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.create_folder_input.clone() else {
+            return;
+        };
+        if self.creating_folder {
+            return;
+        }
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let folder_name = editor.read(cx).value().to_string();
+        if let Some(message) = create_folder_validation_message(
+            self.current_prefix.as_deref(),
+            &folder_name,
+            &self.entries,
+        ) {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: message,
+            });
+            cx.notify();
+            return;
+        }
+        let key = match create_folder_target_key(self.current_prefix.as_deref(), &folder_name) {
+            Ok(key) => key,
+            Err(message) => {
+                self.download_message = Some(DownloadMessage {
+                    is_error: true,
+                    text: message,
+                });
+                cx.notify();
+                return;
+            }
+        };
+        let services = Arc::clone(&self.services);
+        let display_key = key.clone();
+        self.creating_folder = true;
+        self.download_message = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let tmp = std::env::temp_dir().join(format!(
+                        "cloudstorage-empty-folder-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or_default()
+                    ));
+                    std::fs::File::create(&tmp).map_err(|e| format!("创建临时空文件失败：{e}"))?;
+                    let upload = services.upload_object(&account_id, &bucket, &key, &tmp);
+                    let cleanup = std::fs::remove_file(&tmp);
+                    if let Err(e) = cleanup {
+                        eprintln!(
+                            "[create_folder] 临时文件清理失败（不影响结果）：{}：{e}",
+                            tmp.display()
+                        );
+                    }
+                    upload.map_err(|e| e.to_string())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.creating_folder = false;
+                match result {
+                    Ok(_) => {
+                        this.create_folder_input = None;
+                        this.download_message = Some(DownloadMessage {
+                            is_error: false,
+                            text: format!("已新建目录：{}", display_key),
+                        });
+                        this.reload_objects(cx);
+                    }
+                    Err(error) => {
+                        this.download_message = Some(DownloadMessage {
+                            is_error: true,
+                            text: format!("新建目录失败：{error}"),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_copy_move_overlay(
+        &mut self,
+        mode: CopyMoveMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some()
+            || self.add_modal.is_some()
+            || self.copy_move_busy
+            || self.selected_bucket.is_none()
+        {
+            return;
+        }
+        let source_keys = self.selected_object_keys_vec();
+        if source_keys.is_empty() {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "请先选中对象".into(),
+            });
+            cx.notify();
+            return;
+        }
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("输入或搜索目标目录…"));
+        cx.subscribe_in(&filter, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+            if let InputEvent::PressEnter { .. } = event {
+                this.commit_copy_move(cx);
+            }
+        })
+        .detach();
+        filter.update(cx, |state, cx| state.focus(window, cx));
+        self.object_menu_open = None;
+        self.top_more_open = false;
+        self.copy_move = Some(CopyMoveState {
+            mode,
+            source_keys,
+            target_prefix: self.current_prefix.clone().unwrap_or_default(),
+            filter,
+            entries: Vec::new(),
+            state: AsyncState::Loading,
+        });
+        cx.notify();
+        self.load_copy_move_entries(cx);
+    }
+
+    fn load_copy_move_entries(&mut self, cx: &mut Context<Self>) {
+        self.copy_move_gen += 1;
+        let generation = self.copy_move_gen;
+
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let Some(prefix) = self
+            .copy_move
+            .as_ref()
+            .map(|state| state.target_prefix.clone())
+        else {
+            return;
+        };
+        let region = self
+            .buckets
+            .iter()
+            .find(|b| b.name == bucket)
+            .and_then(|b| b.region.clone());
+        let services = Arc::clone(&self.services);
+
+        if let Some(state) = &mut self.copy_move {
+            prepare_copy_move_directory_load(
+                &mut state.target_prefix,
+                &mut state.entries,
+                &mut state.state,
+                prefix.clone(),
+            );
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let request = ListObjectsRequest {
+                bucket,
+                prefix: if prefix.is_empty() {
+                    None
+                } else {
+                    Some(prefix)
+                },
+                delimiter: Some("/".into()),
+                marker: None,
+                limit: OBJECTS_PAGE_LIMIT,
+                region,
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move { services.list_objects(&account_id, request) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.copy_move_gen != generation {
+                    return;
+                }
+                let Some(state) = &mut this.copy_move else {
+                    return;
+                };
+                match result {
+                    Ok(page) => {
+                        state.entries = page.entries;
+                        state.state = AsyncState::Idle;
+                    }
+                    Err(e) => {
+                        state.entries.clear();
+                        state.state = AsyncState::Failed(e.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn close_copy_move_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.copy_move_busy {
+            return;
+        }
+        if self.copy_move.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn copy_move_target_prefix(&self, cx: &mut Context<Self>) -> Result<String, String> {
+        let Some(state) = &self.copy_move else {
+            return Err("复制/移动弹窗未打开".into());
+        };
+        let input = state.filter.read(cx).value().to_string();
+        if input.trim().is_empty() {
+            return Ok(state.target_prefix.clone());
+        }
+        normalize_copy_move_target_prefix(&input)
+    }
+
+    fn copy_move_validation_message(&self, cx: &mut Context<Self>) -> Option<String> {
+        let Some(state) = &self.copy_move else {
+            return None;
+        };
+        let target_prefix = match self.copy_move_target_prefix(cx) {
+            Ok(prefix) => prefix,
+            Err(message) => return Some(message),
+        };
+        let targets = match copy_move_target_keys(&state.source_keys, &target_prefix) {
+            Ok(targets) => targets,
+            Err(message) => return Some(message),
+        };
+        if target_prefix == state.target_prefix
+            && let Some((_, target)) = targets
+                .iter()
+                .find(|(_, target)| object_key_exists(&state.entries, target))
+        {
+            return Some(format!("目标对象已存在：{target}"));
+        }
+        None
+    }
+
+    fn enter_copy_move_prefix(
+        &mut self,
+        prefix: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = &mut self.copy_move {
+            prepare_copy_move_directory_load(
+                &mut state.target_prefix,
+                &mut state.entries,
+                &mut state.state,
+                prefix.clone(),
+            );
+            state
+                .filter
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.load_copy_move_entries(cx);
+    }
+
+    fn go_up_copy_move_prefix(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.copy_move {
+            let prefix = parent_prefix(&state.target_prefix)
+                .map(str::to_string)
+                .unwrap_or_default();
+            prepare_copy_move_directory_load(
+                &mut state.target_prefix,
+                &mut state.entries,
+                &mut state.state,
+                prefix,
+            );
+            state
+                .filter
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.load_copy_move_entries(cx);
+    }
+
+    fn commit_copy_move(&mut self, cx: &mut Context<Self>) {
+        if self.copy_move_busy {
+            return;
+        }
+        let Some(state) = &self.copy_move else {
+            return;
+        };
+        if !can_commit_copy_move(self.copy_move_busy, &state.state, None) {
+            return;
+        }
+        if let Some(message) = self.copy_move_validation_message(cx) {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: message,
+            });
+            cx.notify();
+            return;
+        }
+        let Some(account_id) = self.selected_account_id.clone() else {
+            return;
+        };
+        let Some(bucket) = self.selected_bucket.clone() else {
+            return;
+        };
+        let mode = state.mode;
+        let target_prefix = match self.copy_move_target_prefix(cx) {
+            Ok(prefix) => prefix,
+            Err(message) => {
+                self.download_message = Some(DownloadMessage {
+                    is_error: true,
+                    text: message,
+                });
+                cx.notify();
+                return;
+            }
+        };
+        let targets = match copy_move_target_keys(&state.source_keys, &target_prefix) {
+            Ok(targets) => targets,
+            Err(message) => {
+                self.download_message = Some(DownloadMessage {
+                    is_error: true,
+                    text: message,
+                });
+                cx.notify();
+                return;
+            }
+        };
+        let services = Arc::clone(&self.services);
+        self.copy_move_busy = true;
+        self.download_message = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut success = 0usize;
+                    let mut failures = Vec::new();
+                    for (source, target) in targets {
+                        let result = match mode {
+                            CopyMoveMode::Copy => {
+                                services.copy_object(&account_id, &bucket, &source, &target)
+                            }
+                            CopyMoveMode::Move => {
+                                services.move_object(&account_id, &bucket, &source, &target)
+                            }
+                        };
+                        match result {
+                            Ok(()) => success += 1,
+                            Err(error) => failures.push((source, error.to_string())),
+                        }
+                    }
+                    (success, failures)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.copy_move_busy = false;
+                this.copy_move = None;
+                let (success, failures) = result;
+                this.download_message = Some(DownloadMessage {
+                    is_error: !failures.is_empty(),
+                    text: copy_move_summary(mode, success, &failures),
+                });
+                this.reload_objects(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ⌘F：开/关对象列表过滤。开启时焦点入过滤框；关闭时清空查询。
@@ -2414,6 +3508,1131 @@ impl WorkspaceView {
             .child(modal.clone())
     }
 
+    fn render_preview_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(object) = self.selected_cloud_object() else {
+            return div().into_any_element();
+        };
+        let name = display_name(&object.key).to_string();
+        let kind = preview_kind(&object.key);
+        let file_type = object.mime_type.clone().unwrap_or_else(|| match kind {
+            PreviewKind::Image => "image/*".into(),
+            PreviewKind::Text => format!("text/{}", syntax_language(&object.key)),
+            PreviewKind::System => "未知类型".into(),
+        });
+        let error = self
+            .download_message
+            .as_ref()
+            .filter(|message| message.is_error)
+            .map(|message| message.text.clone());
+
+        let preview_content = if self.previewing {
+            v_flex()
+                .size_full()
+                .w_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(Spinner::new())
+                .child(
+                    div()
+                        .text_size(tokens::text(13.))
+                        .text_color(theme.muted_foreground)
+                        .child("正在准备预览…"),
+                )
+                .into_any_element()
+        } else if let Some(error) = error {
+            v_flex()
+                .size_full()
+                .w_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_6()
+                .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
+                .child(
+                    div()
+                        .max_w(px(520.))
+                        .text_size(tokens::text(13.))
+                        .text_color(theme.muted_foreground)
+                        .child(error),
+                )
+                .into_any_element()
+        } else if let Some(editor) = self.text_editor.clone() {
+            v_flex()
+                .size_full()
+                .w_full()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(tokens::text(11.))
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} · 可编辑文本", syntax_language(&object.key))),
+                )
+                .child(
+                    Input::new(&editor)
+                        .flex_1()
+                        .w_full()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size),
+                )
+                .into_any_element()
+        } else if let Some(text) = self.preview_text.clone() {
+            v_flex()
+                .size_full()
+                .w_full()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(tokens::text(11.))
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} · UTF-8", syntax_language(&object.key))),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .w_full()
+                        .overflow_y_scrollbar()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.sidebar)
+                        .p_3()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size)
+                        .child(text),
+                )
+                .into_any_element()
+        } else if kind == PreviewKind::Image {
+            match self.preview_path.clone() {
+                Some(path) => img(path)
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
+                    .into_any_element(),
+            }
+        } else {
+            v_flex()
+                .size_full()
+                .w_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_6()
+                .child(Icon::new(IconName::Eye).text_color(theme.muted_foreground))
+                .child(
+                    div()
+                        .text_size(tokens::text(15.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("暂不支持应用内直接预览"),
+                )
+                .child(
+                    div()
+                        .max_w(px(420.))
+                        .text_size(tokens::text(12.))
+                        .text_color(theme.muted_foreground)
+                        .child("此文件可下载到本机后使用系统应用打开；PDF、Office、视频等格式建议使用系统 Quick Look。"),
+                )
+                .into_any_element()
+        };
+
+        let can_open_system = kind == PreviewKind::System && self.preview_path.is_some();
+        let meta_label = |label: &'static str| {
+            div()
+                .w(px(110.))
+                .flex_shrink_0()
+                .text_size(tokens::text(12.))
+                .text_color(theme.muted_foreground)
+                .child(label)
+        };
+        let meta_value = |value: String| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(tokens::text(12.))
+                .child(value)
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .key_context("Overlay")
+            .on_action(
+                cx.listener(|this, _: &UnifiedDismiss, _, cx| this.close_preview_overlay(cx)),
+            )
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| this.close_preview_overlay(cx)),
+            )
+            .child(
+                v_flex()
+                    .w(px(800.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(10.))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_3()
+                            .px_4()
+                            .pt_4()
+                            .pb_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                Button::new("close-preview-overlay")
+                                    .icon(Icon::new(IconName::Close))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("关闭")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.close_preview_overlay(cx)
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div().w_full().px_4().child(
+                            div()
+                                .h(px(350.))
+                                .w_full()
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.sidebar)
+                                .child(preview_content),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .mx_4()
+                            .px_4()
+                            .py_3()
+                            .gap_5()
+                            .border_l_1()
+                            .border_r_1()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(meta_label("文件大小"))
+                                    .child(meta_value(format!(
+                                        "{} ({} B)",
+                                        format_size(object.size),
+                                        format_integer_grouped(object.size)
+                                    ))),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(meta_label("文件类型"))
+                                    .child(meta_value(file_type)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .mx_4()
+                            .my_3()
+                            .px_4()
+                            .py_3()
+                            .gap_3()
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(meta_label("原始文件URL"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(tokens::text(12.))
+                                    .child(object.key.clone()),
+                            )
+                            .when(self.preview_text.is_some(), |row| {
+                                if self.text_editor.is_some() {
+                                    row.child(
+                                        Button::new("preview-overlay-save-text")
+                                            .label("保存并上传")
+                                            .primary()
+                                            .with_size(Size::Small)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.confirm_and_save_text_edit(window, cx)
+                                            })),
+                                    )
+                                } else {
+                                    row.child(
+                                        Button::new("preview-overlay-edit-text")
+                                            .label("编辑")
+                                            .with_size(Size::Small)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_text_edit(window, cx)
+                                            })),
+                                    )
+                                }
+                            })
+                            .when(can_open_system, |row| {
+                                row.child(
+                                    Button::new("preview-overlay-quicklook")
+                                        .label("系统预览")
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_system_preview(cx)
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("preview-overlay-download")
+                                    .label("下载")
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .disabled(self.downloading)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.start_object_download(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("preview-overlay-copy-url")
+                                    .label("复制")
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .disabled(self.copying_url)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.copy_object_url(cx)),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_object_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let mut menu = v_flex()
+            .w(px(154.))
+            .py_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .occlude()
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+
+        for (item_ix, item) in object_menu_items().into_iter().enumerate() {
+            let color = if item == ObjectMenuItem::Delete {
+                theme.danger
+            } else {
+                theme.foreground
+            };
+            menu = menu.child(
+                h_flex()
+                    .id(("object-menu-item", item_ix))
+                    .mx_1()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .rounded(px(6.))
+                    .text_size(tokens::text(13.))
+                    .text_color(color)
+                    .hover(|row| row.bg(theme.accent))
+                    .child(Icon::new(object_menu_item_icon(item)).text_color(color))
+                    .child(object_menu_item_label(item))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.handle_object_menu_item(item, window, cx)
+                    })),
+            );
+        }
+        menu.into_any_element()
+    }
+
+    fn render_top_more_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let has_selection = !self.selected_object_keys_vec().is_empty();
+        let mut menu = v_flex()
+            .w(px(120.))
+            .py_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .occlude()
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+
+        for (item_ix, item) in top_more_menu_items().into_iter().enumerate() {
+            let disabled = !has_selection
+                && matches!(
+                    item,
+                    TopMoreMenuItem::CopyTo | TopMoreMenuItem::MoveTo | TopMoreMenuItem::Delete
+                );
+            let color = if disabled {
+                theme.muted_foreground
+            } else if item == TopMoreMenuItem::Delete {
+                theme.danger
+            } else {
+                theme.foreground
+            };
+            menu = menu.child(
+                h_flex()
+                    .id(("top-more-menu-item", item_ix))
+                    .mx_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(6.))
+                    .text_size(tokens::text(13.))
+                    .text_color(color)
+                    .when(!disabled, |row| row.hover(|row| row.bg(theme.accent)))
+                    .child(top_more_menu_item_label(item))
+                    .when(!disabled, |row| {
+                        row.on_click(cx.listener(move |this, _, window, cx| {
+                            this.handle_top_more_menu_item(item, window, cx)
+                        }))
+                    }),
+            );
+        }
+        menu.into_any_element()
+    }
+
+    fn render_details_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(object) = self.selected_cloud_object() else {
+            return div().into_any_element();
+        };
+        let rows = [
+            ("名称", display_name(&object.key).to_string(), false),
+            ("Key", object.key.clone(), true),
+            ("大小", format_size(object.size), false),
+            (
+                "文件类型",
+                object
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "未知类型".into()),
+                false,
+            ),
+            (
+                "ETag",
+                object.etag.clone().unwrap_or_else(|| "-".into()),
+                true,
+            ),
+            ("上传时间", format_time(object.put_time_millis), false),
+        ];
+
+        let mut content = v_flex()
+            .mx_4()
+            .mb_4()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(8.));
+        for (label, value, mono) in rows {
+            let mut value_el = div().flex_1().min_w_0().truncate().child(value);
+            if mono {
+                value_el = value_el
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(theme.mono_font_size);
+            }
+            content = content.child(
+                h_flex()
+                    .px_4()
+                    .py_2()
+                    .gap_4()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(tokens::text(13.))
+                    .child(
+                        div()
+                            .w(px(96.))
+                            .flex_shrink_0()
+                            .text_color(theme.muted_foreground)
+                            .child(label),
+                    )
+                    .child(value_el),
+            );
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .key_context("Overlay")
+            .on_action(
+                cx.listener(|this, _: &UnifiedDismiss, _, cx| this.close_details_overlay(cx)),
+            )
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| this.close_details_overlay(cx)),
+            )
+            .child(
+                v_flex()
+                    .w(px(560.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(10.))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_3()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("对象详情"),
+                            )
+                            .child(
+                                Button::new("close-details-overlay")
+                                    .icon(Icon::new(IconName::Close))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("关闭")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.close_details_overlay(cx)
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
+    fn render_rename_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some((old_key, editor)) = self.renaming.as_ref() else {
+            return div().into_any_element();
+        };
+        let current_name = editor.read(cx).value().to_string();
+        let validation_message = rename_validation_message(old_key, &current_name, &self.entries);
+        let can_confirm = !self.renaming_busy && validation_message.is_none();
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .key_context("Renaming")
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    if !this.renaming_busy {
+                        this.cancel_rename(cx);
+                    }
+                }),
+            )
+            .child(
+                v_flex()
+                    .w(px(480.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(10.))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_3()
+                            .px_6()
+                            .pt_5()
+                            .pb_4()
+                            .child(
+                                div()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("重命名"),
+                            )
+                            .child(
+                                Button::new("close-rename-overlay")
+                                    .icon(Icon::new(IconName::Close))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("关闭")
+                                    .disabled(self.renaming_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .px_6()
+                            .gap_3()
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(74.))
+                                            .flex_shrink_0()
+                                            .text_size(tokens::text(13.))
+                                            .text_color(theme.foreground)
+                                            .child("原路径："),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(tokens::text(13.))
+                                            .child(old_key.clone()),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(74.))
+                                            .flex_shrink_0()
+                                            .text_size(tokens::text(13.))
+                                            .text_color(theme.foreground)
+                                            .child("重命名："),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(Input::new(editor).small()),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .child(div().w(px(74.)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(tokens::text(12.))
+                                            .text_color(theme.muted_foreground)
+                                            .line_height(px(20.))
+                                            .child("请注意，若您针对目录重命名则该目录下所有路径名称将一并修改"),
+                                    ),
+                            )
+                            .children(validation_message.map(|message| {
+                                h_flex()
+                                    .gap_4()
+                                    .child(div().w(px(74.)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(tokens::text(12.))
+                                            .text_color(theme.danger)
+                                            .line_height(px(20.))
+                                            .child(message),
+                                    )
+                            })),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .px_6()
+                            .pt_5()
+                            .pb_5()
+                            .child(
+                                Button::new("cancel-rename")
+                                    .label("取消")
+                                    .disabled(self.renaming_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
+                            )
+                            .child(
+                                Button::new("confirm-rename")
+                                    .label("确认修改")
+                                    .primary()
+                                    .disabled(!can_confirm)
+                                    .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx))),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_create_folder_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(editor) = self.create_folder_input.as_ref() else {
+            return div().into_any_element();
+        };
+        let folder_name = editor.read(cx).value().to_string();
+        let validation_message = create_folder_validation_message(
+            self.current_prefix.as_deref(),
+            &folder_name,
+            &self.entries,
+        );
+        let can_confirm = !self.creating_folder && validation_message.is_none();
+        let parent = self.current_prefix.as_deref().unwrap_or("/").to_string();
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .key_context("Renaming")
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.close_create_folder_overlay(cx);
+                }),
+            )
+            .child(
+                v_flex()
+                    .w(px(480.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(10.))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_3()
+                            .px_6()
+                            .pt_5()
+                            .pb_4()
+                            .child(
+                                div()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("新建目录"),
+                            )
+                            .child(
+                                Button::new("close-create-folder-overlay")
+                                    .icon(Icon::new(IconName::Close))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("关闭")
+                                    .disabled(self.creating_folder)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_create_folder_overlay(cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .px_6()
+                            .gap_3()
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(74.))
+                                            .flex_shrink_0()
+                                            .text_size(tokens::text(13.))
+                                            .text_color(theme.foreground)
+                                            .child("所在目录："),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(tokens::text(13.))
+                                            .child(parent),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(74.))
+                                            .flex_shrink_0()
+                                            .text_size(tokens::text(13.))
+                                            .text_color(theme.foreground)
+                                            .child("目录名："),
+                                    )
+                                    .child(
+                                        div().flex_1().min_w_0().child(Input::new(editor).small()),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .child(div().w(px(74.)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(tokens::text(12.))
+                                            .text_color(theme.muted_foreground)
+                                            .line_height(px(20.))
+                                            .child("对象存储目录会创建为以 / 结尾的占位对象。"),
+                                    ),
+                            )
+                            .children(validation_message.map(|message| {
+                                h_flex()
+                                    .gap_4()
+                                    .child(div().w(px(74.)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(tokens::text(12.))
+                                            .text_color(theme.danger)
+                                            .line_height(px(20.))
+                                            .child(message),
+                                    )
+                            })),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .px_6()
+                            .pt_5()
+                            .pb_5()
+                            .child(
+                                Button::new("cancel-create-folder")
+                                    .label("取消")
+                                    .disabled(self.creating_folder)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_create_folder_overlay(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("confirm-create-folder")
+                                    .label(if self.creating_folder {
+                                        "创建中…"
+                                    } else {
+                                        "创建"
+                                    })
+                                    .primary()
+                                    .disabled(!can_confirm)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.commit_create_folder(cx)),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_copy_move_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(state) = self.copy_move.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(bucket) = self.selected_bucket.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(provider) = self.selected_provider_kind() else {
+            return div().into_any_element();
+        };
+        let title = match state.mode {
+            CopyMoveMode::Copy => "复制到",
+            CopyMoveMode::Move => "移动到",
+        };
+        let action = match state.mode {
+            CopyMoveMode::Copy => "复制",
+            CopyMoveMode::Move => "移动",
+        };
+        let query = state.filter.read(cx).value().to_string();
+        let validation_message = self.copy_move_validation_message(cx);
+        let is_loading_dirs = state.state == AsyncState::Loading;
+        let can_confirm = can_commit_copy_move(
+            self.copy_move_busy,
+            &state.state,
+            validation_message.as_deref(),
+        );
+        let target_prefix = self
+            .copy_move_target_prefix(cx)
+            .unwrap_or_else(|_| state.target_prefix.clone());
+        let location = format!(
+            "{}:// {} / {}",
+            provider_url_scheme(provider),
+            bucket,
+            if target_prefix.is_empty() {
+                String::new()
+            } else {
+                target_prefix.clone()
+            }
+        );
+        let query_lower = query.trim().to_lowercase();
+        let directories: Vec<String> = state
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ListingEntry::CommonPrefix(prefix) => Some(prefix.clone()),
+                ListingEntry::Object(_) => None,
+            })
+            .filter(|prefix| {
+                query_lower.is_empty()
+                    || display_name(prefix)
+                        .to_lowercase()
+                        .contains(query_lower.as_str())
+                    || prefix.to_lowercase().contains(query_lower.as_str())
+            })
+            .collect();
+
+        let mut list = v_flex()
+            .id("copy-move-dir-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
+        if is_loading_dirs {
+            list = list.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(theme.muted_foreground)
+                    .text_size(tokens::text(13.))
+                    .child(Spinner::new())
+                    .child("加载目录中…"),
+            );
+        } else if let AsyncState::Failed(message) = &state.state {
+            list = list.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(theme.danger)
+                    .text_size(tokens::text(13.))
+                    .child(Icon::new(IconName::TriangleAlert))
+                    .child(message.clone()),
+            );
+        } else if directories.is_empty() {
+            list = list.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.muted_foreground)
+                    .text_size(tokens::text(13.))
+                    .child("没有可显示的目录，可直接输入目标目录"),
+            );
+        }
+        for (ix, prefix) in directories.into_iter().enumerate() {
+            let target = prefix.clone();
+            list = list.child(
+                h_flex()
+                    .id(("copy-move-dir", ix))
+                    .px_4()
+                    .py_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(tokens::text(13.))
+                    .hover(|row| row.bg(theme.accent))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.enter_copy_move_prefix(target.clone(), window, cx)
+                        }),
+                    )
+                    .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(display_name(&prefix).to_string()),
+                    ),
+            );
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .key_context("Renaming")
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.close_copy_move_overlay(cx);
+                }),
+            )
+            .child(
+                v_flex()
+                    .w(px(760.))
+                    .h(px(560.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(10.))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_3()
+                            .px_6()
+                            .pt_5()
+                            .pb_3()
+                            .child(
+                                div()
+                                    .text_size(tokens::text(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
+                            .child(
+                                Button::new("close-copy-move-overlay")
+                                    .icon(Icon::new(IconName::Close))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("关闭")
+                                    .disabled(self.copy_move_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_copy_move_overlay(cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mx_6()
+                            .mb_3()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(4.))
+                            .bg(theme.sidebar)
+                            .text_size(tokens::text(12.))
+                            .text_color(theme.muted_foreground)
+                            .child(location),
+                    )
+                    .child(div().mx_6().mb_3().child(Input::new(&state.filter).small()))
+                    .child(
+                        h_flex()
+                            .mx_6()
+                            .px_4()
+                            .py_2()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.sidebar)
+                            .text_size(tokens::text(12.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("名称"),
+                    )
+                    .child(
+                        div()
+                            .mx_6()
+                            .flex_1()
+                            .min_h_0()
+                            .border_1()
+                            .border_t_0()
+                            .border_color(theme.border)
+                            .child(list),
+                    )
+                    .children(validation_message.map(|message| {
+                        div()
+                            .mx_6()
+                            .mt_3()
+                            .text_size(tokens::text(12.))
+                            .text_color(theme.danger)
+                            .child(message)
+                    }))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .px_6()
+                            .py_4()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_size(tokens::text(12.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{} 个对象", state.source_keys.len()))
+                                    .child("遇到同名文件：询问"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .children((!state.target_prefix.is_empty()).then(|| {
+                                        Button::new("copy-move-go-up")
+                                            .label("上一级")
+                                            .with_size(Size::Small)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.go_up_copy_move_prefix(window, cx)
+                                            }))
+                                    }))
+                                    .child(
+                                        Button::new("cancel-copy-move")
+                                            .label("取消")
+                                            .with_size(Size::Small)
+                                            .disabled(self.copy_move_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.close_copy_move_overlay(cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("confirm-copy-move")
+                                            .label(if self.copy_move_busy {
+                                                "执行中…"
+                                            } else {
+                                                action
+                                            })
+                                            .primary()
+                                            .with_size(Size::Small)
+                                            .disabled(!can_confirm)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.commit_copy_move(cx)
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     // ---- Action 处理（与菜单/快捷键共享） ----
 
     fn handle_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -2454,13 +4673,13 @@ impl WorkspaceView {
         let saved = modal.update(cx, |modal, _| modal.take_saved());
         if let Some((settings, changed)) = saved {
             self.settings = settings;
+            crate::theme::apply_settings(&self.settings, Some(window), cx);
+            self.engine
+                .set_max_parallel(self.settings.transfer_concurrency as usize);
             if changed {
                 self.download_message = Some(DownloadMessage {
                     is_error: false,
-                    text: format!(
-                        "设置已保存：签名链接 {} 秒，剪贴板清除 {} 秒（对之后的复制生效）",
-                        self.settings.signed_url_ttl_secs, self.settings.clipboard_clear_secs
-                    ),
+                    text: "设置已保存，已对后续操作生效".into(),
                 });
             }
             cx.notify();
@@ -2470,16 +4689,6 @@ impl WorkspaceView {
         }
         self.settings_modal = None;
         window.focus(&self.focus_handle);
-        cx.notify();
-    }
-
-    fn handle_toggle_inspector(
-        &mut self,
-        _: &ToggleInspector,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.inspector_collapsed = !self.inspector_collapsed;
         cx.notify();
     }
 
@@ -2721,12 +4930,6 @@ impl WorkspaceView {
         } else {
             IconName::PanelLeftClose
         };
-        let inspector_icon = if self.inspector_collapsed {
-            IconName::PanelRightOpen
-        } else {
-            IconName::PanelRightClose
-        };
-
         TitleBar::new().child(
             h_flex()
                 .w_full()
@@ -2741,16 +4944,7 @@ impl WorkspaceView {
                 )
                 // 中：标题
                 .child("CloudStorage")
-                // 右：Inspector 开关
-                .child(
-                    h_flex().gap_1().child(
-                        Button::new("toggle-inspector")
-                            .icon(Icon::new(inspector_icon))
-                            .ghost()
-                            .with_size(Size::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx))),
-                    ),
-                ),
+                .child(div().w(px(32.))),
         )
     }
 
@@ -2759,19 +4953,11 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
-        self.inspector_collapsed = !self.inspector_collapsed;
-        cx.notify();
-    }
-
     fn render_body(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // 每种「折叠组合」使用独立的 resizable group id：
-        // use_keyed_state 按 id 存宽度，展开/折叠切换互不覆盖，各自记住拖拽尺寸。
-        let group_id: &'static str = match (self.sidebar_collapsed, self.inspector_collapsed) {
-            (false, false) => "workspace-layout-full",
-            (true, false) => "workspace-layout-no-sidebar",
-            (false, true) => "workspace-layout-no-inspector",
-            (true, true) => "workspace-layout-content-only",
+        let group_id: &'static str = if self.sidebar_collapsed {
+            "workspace-layout-content-only"
+        } else {
+            "workspace-layout-no-inspector"
         };
 
         let mut body = h_flex().flex_1().min_h_0();
@@ -2789,14 +4975,6 @@ impl WorkspaceView {
             );
         }
         group = group.child(self.render_content(theme, cx).into_any_element());
-        if !self.inspector_collapsed {
-            group = group.child(
-                resizable_panel()
-                    .size(INSPECTOR_DEFAULT)
-                    .size_range(INSPECTOR_MIN..INSPECTOR_MAX)
-                    .child(self.render_inspector(theme, cx).into_any_element()),
-            );
-        }
 
         body.child(
             // ResizablePanelGroup 自身渲染为 size_full 容器，需包一层分配剩余空间。
@@ -2810,7 +4988,7 @@ impl WorkspaceView {
             .px_3()
             .pt_2()
             .pb_1()
-            .text_size(px(11.))
+            .text_size(tokens::text(11.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.muted_foreground)
             .child(label.to_string())
@@ -2841,7 +5019,7 @@ impl WorkspaceView {
                     div()
                         .px_3()
                         .py_1()
-                        .text_size(px(12.))
+                        .text_size(tokens::text(12.))
                         .text_color(theme.muted_foreground)
                         .child("先选择一个账号"),
                 );
@@ -2872,7 +5050,7 @@ impl WorkspaceView {
                         div()
                             .px_3()
                             .py_1()
-                            .text_size(px(12.))
+                            .text_size(tokens::text(12.))
                             .text_color(theme.muted_foreground)
                             .child("还没有账号，点下方添加")
                             .into_any_element(),
@@ -2912,7 +5090,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap_2()
-            .text_size(px(13.))
+            .text_size(tokens::text(13.))
             .text_color(theme.muted_foreground)
             .hover(|row| {
                 row.bg(theme.sidebar_accent)
@@ -2951,7 +5129,7 @@ impl WorkspaceView {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(tokens::text(11.))
                                         .text_color(theme.muted_foreground)
                                         .child("空间名称"),
                                 )
@@ -2999,7 +5177,7 @@ impl WorkspaceView {
                         div()
                             .px_3()
                             .py_1()
-                            .text_size(px(12.))
+                            .text_size(tokens::text(12.))
                             .text_color(theme.muted_foreground)
                             .child("（此账号没有空间）")
                             .into_any_element(),
@@ -3033,7 +5211,7 @@ impl WorkspaceView {
             .px_2()
             .py(px(5.))
             .gap_2()
-            .text_size(px(12.))
+            .text_size(tokens::text(12.))
             .text_color(theme.muted_foreground)
             .child(Spinner::new().with_size(Size::Small))
             .child(label)
@@ -3057,7 +5235,7 @@ impl WorkspaceView {
             .py_2()
             .gap_1()
             .rounded(px(6.))
-            .text_size(px(12.))
+            .text_size(tokens::text(12.))
             .text_color(theme.danger)
             .hover(|row| row.bg(theme.sidebar_accent))
             .on_click(on_click)
@@ -3071,7 +5249,7 @@ impl WorkspaceView {
             .child(
                 div()
                     .pl(px(22.))
-                    .text_size(px(11.))
+                    .text_size(tokens::text(11.))
                     .text_color(theme.muted_foreground)
                     .child("点击重试"),
             )
@@ -3099,7 +5277,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap_2()
-            .text_size(px(13.))
+            .text_size(tokens::text(13.))
             .when(active, |row| {
                 row.bg(theme.sidebar_accent)
                     .text_color(theme.sidebar_accent_foreground)
@@ -3162,6 +5340,7 @@ impl WorkspaceView {
 
         let mut content = self.with_file_drop(
             v_flex()
+                .relative()
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -3174,7 +5353,6 @@ impl WorkspaceView {
         if let Some(bar) = self.render_filter_bar(theme, cx) {
             content = content.child(bar);
         }
-
         if self.objects_state == AsyncState::Loading && self.entries.is_empty() {
             content = content.child(
                 div()
@@ -3223,7 +5401,7 @@ impl WorkspaceView {
                     .py_1()
                     .rounded(px(6.))
                     .text_color(theme.danger)
-                    .text_size(px(12.))
+                    .text_size(tokens::text(12.))
                     .child(Icon::new(IconName::TriangleAlert))
                     .child(format!("加载更多失败：{msg}")),
             );
@@ -3231,6 +5409,18 @@ impl WorkspaceView {
 
         content = content.child(self.render_object_list(theme, cx));
         content = content.child(self.render_blank_clear_layer(cx));
+        if self.top_more_open {
+            content = content.child(
+                div()
+                    .absolute()
+                    .top(px(42.))
+                    .left(px(268.))
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.render_top_more_menu(theme, cx)),
+            );
+        }
         content.into_any_element()
     }
 
@@ -3266,6 +5456,9 @@ impl WorkspaceView {
                                 return;
                             };
                             if !content.contains(&event.position) {
+                                return;
+                            }
+                            if event.modifiers.platform || event.modifiers.shift {
                                 return;
                             }
                             let hit_row = this
@@ -3330,7 +5523,7 @@ impl WorkspaceView {
                 .child(div().flex_1().min_w_0().child(Input::new(&editor).small()))
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(tokens::text(12.))
                         .text_color(theme.muted_foreground)
                         .child(stats),
                 )
@@ -3353,53 +5546,216 @@ impl WorkspaceView {
         bucket: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        h_flex()
+        let has_selection = !self.selected_object_keys.is_empty();
+        v_flex()
             .w_full()
-            .px_3()
-            .py_2()
-            .gap_2()
             .border_b_1()
             .border_color(theme.border)
-            .text_size(px(13.))
             .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(bucket.to_string()),
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .text_size(tokens::text(13.))
+                    .child(
+                        Button::new("toolbar-upload-files")
+                            .label(if self.uploading {
+                                "选择文件…"
+                            } else {
+                                "上传"
+                            })
+                            .primary()
+                            .with_size(Size::Small)
+                            .disabled(self.uploading)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
+                    )
+                    .child(
+                        Button::new("toolbar-upload-folder")
+                            .label("上传文件夹")
+                            .with_size(Size::Small)
+                            .disabled(self.uploading)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_folder_upload(cx))),
+                    )
+                    .child(
+                        Button::new("toolbar-create-folder")
+                            .label(if self.creating_folder {
+                                "创建中…"
+                            } else {
+                                "新建目录"
+                            })
+                            .with_size(Size::Small)
+                            .disabled(self.creating_folder)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_create_folder_overlay(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("toolbar-more")
+                            .label("更多")
+                            .with_size(Size::Small)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_top_more_menu(cx))),
+                    )
+                    .child(
+                        Button::new("toolbar-file-fragments")
+                            .label("文件碎片")
+                            .with_size(Size::Small)
+                            .disabled(true),
+                    )
+                    .child(div().flex_1())
+                    .children(has_selection.then(|| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(tokens::text(12.))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("已选择 {} 个对象", self.selected_object_keys.len()))
+                    }))
+                    .child(
+                        Button::new("toolbar-download")
+                            .label("下载")
+                            .with_size(Size::Small)
+                            .disabled(!has_selection || self.downloading)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_object_download(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("toolbar-clear-selection")
+                            .label("取消选择")
+                            .ghost()
+                            .with_size(Size::Small)
+                            .disabled(!has_selection)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clear_object_selection();
+                                cx.notify();
+                            })),
+                    )
+                    .children(self.current_prefix.is_some().then(|| {
+                        Button::new("objects-go-up")
+                            .icon(Icon::new(IconName::ArrowLeft))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
+                    }))
+                    .child(
+                        Button::new("objects-refresh")
+                            .label("刷新")
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.reload_objects(cx))),
+                    ),
             )
-            .children(self.current_prefix.as_ref().map(|prefix| {
-                div()
-                    .truncate()
-                    .text_color(theme.muted_foreground)
-                    .child(prefix.clone())
-            }))
-            .child(div().flex_1())
-            .children(self.current_prefix.is_some().then(|| {
-                Button::new("objects-go-up")
-                    .icon(Icon::new(IconName::ArrowLeft))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
-            }))
-            .child(
-                Button::new("objects-refresh")
-                    .label("刷新")
-                    .ghost()
-                    .with_size(Size::Small)
-                    .on_click(cx.listener(|this, _, _, cx| this.reload_objects(cx))),
-            )
+            .child({
+                let mut path = h_flex()
+                    .w_full()
+                    .px_3()
+                    .pb_2()
+                    .gap_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(tokens::text(12.))
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded(px(4.))
+                            .flex_shrink_0()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .hover(|el| el.bg(theme.accent))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.open_bucket_root(cx)),
+                            )
+                            .child(bucket.to_string()),
+                    );
+                let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
+                // 长路径折叠：首段后插入 `…`（点击直达被收起的最后一层），
+                // 只保留首段 + 最后两段。空路径（仅省略号）不可能出现：
+                // 折叠要求段数 > BREADCRUMB_MAX_VISIBLE（≥ 5）。
+                let (collapsed, segments) = match collapse_breadcrumb(&segments) {
+                    Some((collapsed_prefix, tail)) => {
+                        let first = segments[0].clone();
+                        let first_target = first.1.clone();
+                        path = path
+                            .child(div().text_color(theme.muted_foreground).child("/"))
+                            .child(
+                                div()
+                                    .px_1()
+                                    .rounded(px(4.))
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.muted_foreground)
+                                    .hover(|el| el.bg(theme.accent).text_color(theme.foreground))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.open_prefix(first_target.clone(), cx)
+                                        }),
+                                    )
+                                    .child(first.0),
+                            )
+                            .child(div().text_color(theme.muted_foreground).child("/"))
+                            .child(
+                                div()
+                                    .px_1()
+                                    .rounded(px(4.))
+                                    .text_color(theme.muted_foreground)
+                                    .hover(|el| el.bg(theme.accent).text_color(theme.foreground))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.open_prefix(collapsed_prefix.clone(), cx)
+                                        }),
+                                    )
+                                    .child("…"),
+                            );
+                        (true, tail)
+                    }
+                    None => (false, segments),
+                };
+                let _ = collapsed;
+                for (label, prefix) in segments {
+                    let target_prefix = prefix.clone();
+                    path = path
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .flex_shrink_0()
+                                .child("/"),
+                        )
+                        .child(
+                            div()
+                                .px_1()
+                                .rounded(px(4.))
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .hover(|el| el.bg(theme.accent).text_color(theme.foreground))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.open_prefix(target_prefix.clone(), cx)
+                                    }),
+                                )
+                                .child(label),
+                        );
+                }
+                path
+            })
     }
 
-    /// 对象列表本体：目录行（下钻）与对象行（选中进检查器）+ 底部统计与翻页。
+    /// 对象列表本体：表格列布局 + 行级操作列。
     /// 行 bounds 记入 row_bounds（paint 阶段），供空白点击命中检测。
     fn render_object_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         // 每帧重建（paint 阶段逐行写入）
         self.row_bounds.borrow_mut().clear();
         let mut list = v_flex()
             .id("object-list")
+            .relative()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .py_1();
+            .bg(theme.background);
 
         if self.entries.is_empty() && self.objects_state == AsyncState::Idle {
             list = list.child(
@@ -3425,6 +5781,12 @@ impl WorkspaceView {
                 .collect(),
             None => self.entries.iter().enumerate().collect(),
         };
+        let open_menu_top = self.object_menu_open.as_deref().and_then(|open_key| {
+            visible
+                .iter()
+                .position(|(_, entry)| matches!(entry, ListingEntry::Object(object) if object.key == open_key))
+                .map(|row| px(34. + row as f32 * 40. + 28.))
+        });
         if self.filtered_ix.is_some() && visible.is_empty() {
             list = list.child(
                 div()
@@ -3441,83 +5803,137 @@ impl WorkspaceView {
             return list.into_any_element();
         }
 
+        if !visible.is_empty() {
+            list = list.child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .bg(theme.sidebar)
+                    .text_size(tokens::text(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().child("名称"))
+                            .child(div().w(px(96.)).flex_shrink_0().child("大小"))
+                            .child(div().w(px(104.)).flex_shrink_0().child("存储类型"))
+                            .child(div().w(px(148.)).flex_shrink_0().child("最新修改时间")),
+                    )
+                    .child(div().w(px(64.)).flex_shrink_0().child("操作")),
+            );
+        }
+
         for (ix, entry) in visible {
             match entry {
                 ListingEntry::CommonPrefix(prefix) => {
                     let label = display_name(prefix).to_string();
                     let prefix_sel = prefix.clone();
                     let prefix_nav = prefix.clone();
+                    let prefix_action = prefix.clone();
                     list = list.child(
                         h_flex()
                             .id(("object-row", ix))
                             .relative()
-                            .mx_3()
-                            .px_2()
-                            .py(px(4.))
-                            .rounded(px(6.))
+                            .w_full()
+                            .px_3()
+                            .py(px(6.))
                             .gap_2()
-                            .text_size(px(13.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .text_size(tokens::text(13.))
                             .hover(|row| row.bg(theme.accent))
                             .child(self.row_bounds_recorder().absolute().inset_0())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                    // 目录选择在下钻前应用（capture 清空之后）
-                                    this.handle_object_row_click(
-                                        ix,
-                                        ClickedEntry::CommonPrefix(prefix_sel.clone()),
-                                        event.modifiers,
-                                        cx,
-                                    );
-                                }),
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            move |this, event: &MouseDownEvent, _window, cx| {
+                                                // 目录选择在下钻前应用（capture 清空之后）
+                                                this.handle_object_row_click(
+                                                    ix,
+                                                    ClickedEntry::CommonPrefix(prefix_sel.clone()),
+                                                    event.modifiers,
+                                                    cx,
+                                                );
+                                                this.open_prefix(prefix_nav.clone(), cx);
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(IconName::Folder)
+                                                    .text_color(theme.accent_foreground),
+                                            )
+                                            .child(div().min_w_0().truncate().child(label)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(96.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted_foreground)
+                                            .child("-"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(104.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted_foreground)
+                                            .child("-"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(148.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted_foreground)
+                                            .child("-"),
+                                    ),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                // 目录点击 = 下钻（mouse up 时）
-                                this.open_prefix(prefix_nav.clone(), cx);
-                            }))
-                            .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
-                            .child(div().truncate().child(label)),
+                            .child(
+                                h_flex().w(px(64.)).flex_shrink_0().gap_1().child(
+                                    Button::new(("open-prefix", ix))
+                                        .label("进入")
+                                        .ghost()
+                                        .with_size(Size::Small)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_prefix(prefix_action.clone(), cx)
+                                        })),
+                                ),
+                            ),
                     );
                 }
                 ListingEntry::Object(object) => {
-                    // 行内重命名进行中：该行渲染为输入框（Finder 式）
-                    if self
-                        .renaming
-                        .as_ref()
-                        .is_some_and(|(key, _)| *key == object.key)
-                    {
-                        let editor = self.renaming.as_ref().expect("刚检查过").1.clone();
-                        list = list.child(
-                            h_flex()
-                                .id(("object-row-rename", ix))
-                                // Esc 取消绑定在此 context（Input propagate 后命中）
-                                .key_context("Renaming")
-                                .mx_3()
-                                .px_2()
-                                .py(px(2.))
-                                .rounded(px(6.))
-                                .gap_2()
-                                .text_size(px(13.))
-                                .bg(theme.list_active)
-                                .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
-                                .child(div().flex_1().min_w_0().child(Input::new(&editor).small())),
-                        );
-                        continue;
-                    }
                     let selected = self.selected_object_keys.contains(&object.key);
                     let key = object.key.clone();
+                    let name_key = object.key.clone();
+                    let menu_key = object.key.clone();
                     let size = format_size(object.size);
                     let time = format_time(object.put_time_millis);
                     list = list.child(
                         h_flex()
                             .id(("object-row", ix))
                             .relative()
-                            .mx_3()
-                            .px_2()
-                            .py(px(4.))
-                            .rounded(px(6.))
+                            .w_full()
+                            .px_3()
+                            .py(px(6.))
                             .gap_2()
-                            .text_size(px(13.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .text_size(tokens::text(13.))
                             // selection ≠ primary（agents.md §7）：选中用 list_active，
                             // hover 是可交互反馈用 accent
                             .when(selected, |row| row.bg(theme.list_active))
@@ -3526,7 +5942,6 @@ impl WorkspaceView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    eprintln!("[preview] selected key={key}");
                                     this.handle_object_row_click(
                                         ix,
                                         ClickedEntry::Object(key.clone()),
@@ -3535,25 +5950,76 @@ impl WorkspaceView {
                                     );
                                 }),
                             )
-                            .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
                             .child(
-                                div()
+                                h_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .truncate()
-                                    .child(display_name(&object.key).to_string()),
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(IconName::File)
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .hover(|name| name.text_color(theme.foreground))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.select_object_for_row_action(
+                                                                &name_key,
+                                                            );
+                                                            this.open_preview_overlay(cx);
+                                                        }),
+                                                    )
+                                                    .child(display_name(&object.key).to_string()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(96.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted_foreground)
+                                            .text_size(tokens::text(12.))
+                                            .child(size),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(104.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted_foreground)
+                                            .text_size(tokens::text(12.))
+                                            .child("标准存储"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(148.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.muted_foreground)
+                                            .text_size(tokens::text(12.))
+                                            .child(time),
+                                    ),
                             )
                             .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .text_size(px(12.))
-                                    .child(size),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .text_size(px(12.))
-                                    .child(time),
+                                div().w(px(64.)).flex_shrink_0().child(
+                                    Button::new(("object-menu-row", ix))
+                                        .icon(Icon::new(IconName::EllipsisVertical))
+                                        .ghost()
+                                        .with_size(Size::Small)
+                                        .tooltip("更多操作")
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_object_menu(&menu_key, cx);
+                                        })),
+                                ),
                             ),
                     );
                 }
@@ -3571,7 +6037,7 @@ impl WorkspaceView {
             .gap_3()
             .border_t_1()
             .border_color(theme.border)
-            .text_size(px(12.))
+            .text_size(tokens::text(12.))
             .text_color(theme.muted_foreground)
             .child(format!("共 {} 项", self.entries.len()));
         if self.next_marker.is_some() {
@@ -3590,10 +6056,23 @@ impl WorkspaceView {
             );
         }
         list = list.child(footer);
+        if let Some(top) = open_menu_top {
+            list = list.child(
+                div()
+                    .absolute()
+                    .top(top)
+                    .right(px(12.))
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.render_object_menu(theme, cx)),
+            );
+        }
         list.into_any_element()
     }
 
     /// 右侧 Inspector：选中对象的元数据；未选中时显示占位破折号。
+    #[allow(dead_code)]
     fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let rows: Vec<(&'static str, String)> = match self.selected_cloud_object() {
             Some(object) => vec![
@@ -3628,7 +6107,7 @@ impl WorkspaceView {
                 div()
                     .px_3()
                     .py_2()
-                    .text_size(px(13.))
+                    .text_size(tokens::text(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .border_b_1()
                     .border_color(theme.border)
@@ -3649,7 +6128,7 @@ impl WorkspaceView {
                             .flex_1()
                             .px_2()
                             .py_2()
-                            .text_size(px(12.))
+                            .text_size(tokens::text(12.))
                             .text_color(if self.inspector_tab == InspectorTab::Preview {
                                 theme.foreground
                             } else {
@@ -3668,7 +6147,7 @@ impl WorkspaceView {
                             .flex_1()
                             .px_2()
                             .py_2()
-                            .text_size(px(12.))
+                            .text_size(tokens::text(12.))
                             .text_color(if self.inspector_tab == InspectorTab::Details {
                                 theme.foreground
                             } else {
@@ -3687,7 +6166,7 @@ impl WorkspaceView {
                             .flex_1()
                             .px_2()
                             .py_2()
-                            .text_size(px(12.))
+                            .text_size(tokens::text(12.))
                             .text_color(if self.inspector_tab == InspectorTab::Metadata {
                                 theme.foreground
                             } else {
@@ -3706,14 +6185,19 @@ impl WorkspaceView {
             if let Some(object) = selected {
                 let kind = preview_kind(&object.key);
                 let preview_content = if let Some(editor) = self.text_editor.clone() {
-                    Input::new(&editor).h(px(220.)).into_any_element()
+                    Input::new(&editor)
+                        .h(px(220.))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size)
+                        .into_any_element()
                 } else if let Some(text) = self.preview_text.clone() {
                     div()
                         .w_full()
                         .h(px(220.))
                         .overflow_hidden()
                         .p_2()
-                        .text_size(px(11.))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size)
                         .child(text)
                         .into_any_element()
                 } else if kind == PreviewKind::Image {
@@ -3733,7 +6217,7 @@ impl WorkspaceView {
                             .child(
                                 Icon::new(IconName::File)
                                     .text_color(theme.muted_foreground)
-                                    .text_size(px(42.)),
+                                    .text_size(tokens::text(42.)),
                             )
                             .into_any_element()
                     }
@@ -3749,11 +6233,11 @@ impl WorkspaceView {
                         .child(
                             Icon::new(IconName::Eye)
                                 .text_color(theme.muted_foreground)
-                                .text_size(px(32.)),
+                                .text_size(tokens::text(32.)),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(tokens::text(12.))
                                 .text_color(theme.muted_foreground)
                                 .child("此格式使用系统 Quick Look 预览"),
                         )
@@ -3768,7 +6252,7 @@ impl WorkspaceView {
                         .child(
                             Icon::new(IconName::File)
                                 .text_color(theme.muted_foreground)
-                                .text_size(px(42.)),
+                                .text_size(tokens::text(42.)),
                         )
                         .into_any_element()
                 };
@@ -3786,12 +6270,12 @@ impl WorkspaceView {
                         .child(preview_content)
                         .child(
                             div()
-                                .text_size(px(13.))
+                                .text_size(tokens::text(13.))
                                 .child(display_name(&object.key).to_string()),
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(tokens::text(11.))
                                 .text_color(theme.muted_foreground)
                                 .child(
                                     object
@@ -3864,7 +6348,7 @@ impl WorkspaceView {
                         .py_1()
                         .justify_between()
                         .gap_2()
-                        .text_size(px(12.))
+                        .text_size(tokens::text(12.))
                         .child(div().text_color(theme.muted_foreground).child(label))
                         .child(div().min_w_0().truncate().child(value)),
                 );
@@ -3887,7 +6371,7 @@ impl WorkspaceView {
                             .py_1()
                             .justify_between()
                             .gap_2()
-                            .text_size(px(12.))
+                            .text_size(tokens::text(12.))
                             .child(div().text_color(theme.muted_foreground).child(label))
                             .child(div().min_w_0().truncate().child(value)),
                     );
@@ -3951,8 +6435,8 @@ impl WorkspaceView {
                                         })
                                         .disabled(self.downloading)
                                         .with_size(Size::Small)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.start_object_download(cx)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.start_object_download(window, cx)
                                         })),
                                 )
                                 .child(
@@ -4007,7 +6491,7 @@ impl WorkspaceView {
                 div()
                     .px_3()
                     .py_1()
-                    .text_size(px(12.))
+                    .text_size(tokens::text(12.))
                     .text_color(color)
                     .child(message.text.clone()),
             );
@@ -4031,7 +6515,7 @@ impl WorkspaceView {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_size(tokens::text(13.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(format!("传输（{}）", self.transfers.len())),
                             )
@@ -4054,7 +6538,7 @@ impl WorkspaceView {
                     TransferState::Waiting => theme.accent,
                     _ => theme.muted_foreground,
                 };
-                let mut row = v_flex().px_3().py_1().text_size(px(12.)).child(
+                let mut row = v_flex().px_3().py_1().text_size(tokens::text(12.)).child(
                     h_flex()
                         .justify_between()
                         .gap_2()
@@ -4085,14 +6569,14 @@ impl WorkspaceView {
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_size(px(11.))
+                                            .text_size(tokens::text(11.))
                                             .text_color(theme.muted_foreground)
                                             .child(label),
                                     )
                                     // 百分比只在已知总量时展示（未知总量算不出）
                                     .children(transfer_percent(task).map(|p| {
                                         div()
-                                            .text_size(px(11.))
+                                            .text_size(tokens::text(11.))
                                             .text_color(theme.muted_foreground)
                                             .child(format!("{p:.1}%"))
                                     })),
@@ -4105,7 +6589,7 @@ impl WorkspaceView {
                     row = row.child(
                         div()
                             .text_color(theme.danger)
-                            .text_size(px(11.))
+                            .text_size(tokens::text(11.))
                             .line_height(gpui::DefiniteLength::Fraction(1.4))
                             .child(error.clone()),
                     );
@@ -4168,6 +6652,18 @@ pub fn format_size(bytes: u64) -> String {
         unit += 1;
     }
     format!("{value:.1} {}", UNITS[unit])
+}
+
+fn format_integer_grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// 活动任务 → 持久化行。Running/Waiting/Queued 落成 queued（下次自动继续），
@@ -4387,7 +6883,8 @@ impl gpui::Focusable for WorkspaceView {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_preview_text_editor(window, cx);
         let theme = cx.theme().clone();
         let mut root = v_flex()
             .id("workspace")
@@ -4395,8 +6892,16 @@ impl Render for WorkspaceView {
             .size_full()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    if this.top_more_open {
+                        this.top_more_open = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(Self::handle_toggle_sidebar))
-            .on_action(cx.listener(Self::handle_toggle_inspector))
             .on_action(cx.listener(Self::handle_quit))
             .on_action(cx.listener(Self::handle_close_window))
             .on_action(cx.listener(Self::handle_open_command_palette))
@@ -4430,6 +6935,21 @@ impl Render for WorkspaceView {
         if let Some(modal) = self.settings_modal.clone() {
             root = root.child(self.render_settings_modal_overlay(&modal, &theme, cx));
         }
+        if self.details_overlay_open {
+            root = root.child(self.render_details_overlay(&theme, cx));
+        }
+        if self.preview_overlay_open {
+            root = root.child(self.render_preview_overlay(&theme, cx));
+        }
+        if self.renaming.is_some() {
+            root = root.child(self.render_rename_overlay(&theme, cx));
+        }
+        if self.create_folder_input.is_some() {
+            root = root.child(self.render_create_folder_overlay(&theme, cx));
+        }
+        if self.copy_move.is_some() {
+            root = root.child(self.render_copy_move_overlay(&theme, cx));
+        }
         if let Some(palette) = self.palette.clone() {
             root = root.child(self.render_palette_overlay(&palette, &theme, cx));
         }
@@ -4438,6 +6958,7 @@ impl Render for WorkspaceView {
 }
 
 /// 传输进度条文本：已知总量 → "已完成 / 总量"；未知但有字节 → 字节数。
+#[allow(dead_code)]
 fn transfer_progress_text(task: &TransferTask) -> (f32, String) {
     let pct = transfer_percent(task).unwrap_or(0.0);
     let label = match task.bytes_total {
@@ -4449,6 +6970,7 @@ fn transfer_progress_text(task: &TransferTask) -> (f32, String) {
 }
 
 /// 传输完成百分比（0..100）；总量未知或为 0 时返回 None（不算百分比）。
+#[allow(dead_code)]
 fn transfer_percent(task: &TransferTask) -> Option<f32> {
     let total = task.bytes_total?;
     if total == 0 {
@@ -4473,6 +6995,31 @@ fn delete_summary(keys: &[String]) -> String {
         format!("（{} 等 {} 个）", names.join("、"), keys.len())
     } else {
         format!("（{}）", names.join("、"))
+    }
+}
+
+fn preview_download_error_message(bucket: &str, key: &str, error: &str) -> String {
+    let sanitized = sanitize_remote_error(error);
+    format!(
+        "无法预览：{}\n\n请检查：\n1. 当前账号能否读取 `{}`；\n2. 七牛：Bucket `{bucket}` 的下载域名是否可用；\n3. 阿里云 OSS：Endpoint/区域和 RAM 权限是否正确。",
+        sanitized,
+        display_name(key)
+    )
+}
+
+fn sanitize_remote_error(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("<html") || lower.contains("<!doctype") || lower.contains("403 forbidden") {
+        if lower.contains("403") || lower.contains("forbidden") {
+            return "远端拒绝访问，通常是权限或下载域名配置问题".into();
+        }
+        return "远端返回错误页面，无法下载对象内容".into();
+    }
+    if error.chars().count() > 300 {
+        let cut: String = error.chars().take(300).collect();
+        format!("{cut}…")
+    } else {
+        error.to_string()
     }
 }
 
@@ -4517,6 +7064,14 @@ mod tests {
         // 超出 TB 封顶：不再升单位
         let tb = 1024.0_f64.powi(4);
         assert_eq!(format_size((tb * 2048.0) as u64), "2048.0 TB");
+    }
+
+    #[test]
+    fn format_integer_grouped_adds_commas() {
+        assert_eq!(format_integer_grouped(0), "0");
+        assert_eq!(format_integer_grouped(999), "999");
+        assert_eq!(format_integer_grouped(36_648), "36,648");
+        assert_eq!(format_integer_grouped(1_234_567), "1,234,567");
     }
 
     #[test]
@@ -4591,6 +7146,239 @@ mod tests {
         assert_eq!(preview_kind("config.json"), PreviewKind::Text);
         assert_eq!(preview_kind("specs.pdf"), PreviewKind::System);
         assert_eq!(preview_kind("movie.mp4"), PreviewKind::System);
+    }
+
+    #[test]
+    fn object_menu_items_keep_product_order() {
+        assert_eq!(
+            object_menu_items(),
+            vec![
+                ObjectMenuItem::Details,
+                ObjectMenuItem::CopyUrl,
+                ObjectMenuItem::Download,
+                ObjectMenuItem::Rename,
+                ObjectMenuItem::CopyTo,
+                ObjectMenuItem::MoveTo,
+                ObjectMenuItem::Delete,
+            ]
+        );
+    }
+
+    #[test]
+    fn top_more_menu_items_keep_product_order() {
+        assert_eq!(
+            top_more_menu_items(),
+            vec![
+                TopMoreMenuItem::CopyTo,
+                TopMoreMenuItem::MoveTo,
+                TopMoreMenuItem::Delete,
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_move_target_prefix_normalizes_and_rejects_invalid_paths() {
+        assert_eq!(normalize_copy_move_target_prefix("").unwrap(), "");
+        assert_eq!(
+            normalize_copy_move_target_prefix("backup").unwrap(),
+            "backup/"
+        );
+        assert_eq!(
+            normalize_copy_move_target_prefix(" backup/2026/ ").unwrap(),
+            "backup/2026/"
+        );
+        assert_eq!(
+            normalize_copy_move_target_prefix("/absolute").unwrap_err(),
+            "目标目录不能以 / 开头"
+        );
+        assert_eq!(
+            normalize_copy_move_target_prefix("a/../b").unwrap_err(),
+            "目标目录不能包含 .."
+        );
+    }
+
+    #[test]
+    fn copy_move_target_keys_keep_file_names_and_reject_same_target() {
+        let keys = vec!["a/avatar.jpg".to_string(), "b/config.json".to_string()];
+        assert_eq!(
+            copy_move_target_keys(&keys, "backup").unwrap(),
+            vec![
+                ("a/avatar.jpg".to_string(), "backup/avatar.jpg".to_string()),
+                (
+                    "b/config.json".to_string(),
+                    "backup/config.json".to_string()
+                ),
+            ]
+        );
+        assert!(copy_move_target_keys(&["avatar.jpg".to_string()], "").is_err());
+        assert!(
+            copy_move_target_keys(&keys, "backup/flat/")
+                .expect("different display names are safe")
+                .iter()
+                .all(|(_, target)| target.starts_with("backup/flat/"))
+        );
+        assert!(
+            copy_move_target_keys(
+                &["a/avatar.jpg".to_string(), "b/avatar.jpg".to_string()],
+                "backup/"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn copy_move_overlay_navigation_keeps_workspace_prefix_and_enter_blocks_while_loading() {
+        let workspace_prefix = Some("main/current/".to_string());
+        let mut overlay_prefix = "main/current/".to_string();
+        let mut overlay_entries = vec![
+            ListingEntry::CommonPrefix("main/current/photos/".into()),
+            entry_object("main/current/readme.txt"),
+        ];
+        let mut overlay_state = AsyncState::Idle;
+
+        prepare_copy_move_directory_load(
+            &mut overlay_prefix,
+            &mut overlay_entries,
+            &mut overlay_state,
+            "main/current/photos/".into(),
+        );
+
+        assert_eq!(workspace_prefix.as_deref(), Some("main/current/"));
+        assert_eq!(overlay_prefix, "main/current/photos/");
+        assert!(overlay_entries.is_empty(), "目录切换必须丢弃旧目录项");
+        assert_eq!(overlay_state, AsyncState::Loading);
+        assert!(
+            !can_commit_copy_move(false, &overlay_state, None),
+            "Input PressEnter 走 commit_copy_move；目录加载中必须和按钮一样禁止提交"
+        );
+
+        overlay_state = AsyncState::Idle;
+        overlay_entries = vec![ListingEntry::CommonPrefix(
+            "main/current/photos/raw/".into(),
+        )];
+        let parent = parent_prefix(&overlay_prefix)
+            .map(str::to_string)
+            .unwrap_or_default();
+        prepare_copy_move_directory_load(
+            &mut overlay_prefix,
+            &mut overlay_entries,
+            &mut overlay_state,
+            parent,
+        );
+
+        assert_eq!(workspace_prefix.as_deref(), Some("main/current/"));
+        assert_eq!(overlay_prefix, "main/current/");
+        assert!(overlay_entries.is_empty(), "上一级也必须触发重新加载");
+        assert_eq!(overlay_state, AsyncState::Loading);
+
+        overlay_state = AsyncState::Idle;
+        assert!(can_commit_copy_move(false, &overlay_state, None));
+        assert!(!can_commit_copy_move(true, &overlay_state, None));
+        assert!(!can_commit_copy_move(
+            false,
+            &overlay_state,
+            Some("目标对象已存在")
+        ));
+    }
+
+    #[test]
+    fn provider_url_scheme_matches_cloud_provider() {
+        assert_eq!(provider_url_scheme(ProviderKind::Aliyun), "oss");
+        assert_eq!(provider_url_scheme(ProviderKind::Qiniu), "kodo");
+    }
+
+    #[test]
+    fn effective_default_download_dir_requires_existing_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-dl-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // 未设置：None
+        assert_eq!(effective_default_download_dir(None), None);
+        // 目录不存在：None（面板退回 HOME）
+        assert_eq!(effective_default_download_dir(Some(dir.as_path())), None);
+        // 目录存在：原样返回
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            effective_default_download_dir(Some(dir.as_path())),
+            Some(dir.clone())
+        );
+        // 指向文件：None
+        let file = dir.join("not-a-dir.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(effective_default_download_dir(Some(file.as_path())), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn download_dest_path_takes_last_segment() {
+        let dest_dir = PathBuf::from("/tmp/cloudstorage-test-dest");
+        assert_eq!(
+            download_dest_path(&dest_dir, "a/b/c/report.pdf"),
+            dest_dir.join("report.pdf")
+        );
+        // 嵌套同名文件不互相覆盖路径的前缀部分：目录名作为整体拼接
+        assert_eq!(
+            download_dest_path(&dest_dir, "x/avatar.jpg"),
+            PathBuf::from("/tmp/cloudstorage-test-dest/avatar.jpg")
+        );
+        // 扁平化语义：不同目录下同名文件落在同一目标路径。
+        // 这是既有行为（传输引擎 File::create 覆盖写），测试锁死以免无意变更。
+        assert_eq!(
+            download_dest_path(&dest_dir, "a/avatar.jpg"),
+            download_dest_path(&dest_dir, "b/avatar.jpg"),
+            "同名展平 = 同目标路径（引擎覆盖写语义）"
+        );
+    }
+
+    #[test]
+    fn single_download_confirm_texts_match_batch_structure() {
+        let dir = PathBuf::from("/Users/demo/Downloads");
+        let (title, detail) = single_download_confirm_texts("a/b/report.pdf", &dir);
+        assert_eq!(title, "将「report.pdf」下载到默认目录。");
+        assert!(detail.contains("/Users/demo/Downloads"));
+        assert!(detail.contains("另存为"));
+
+        let (batch_title, batch_detail) = batch_download_confirm_texts(3, &dir);
+        assert_eq!(batch_title, "将 3 个对象下载到默认目录。");
+        assert!(batch_detail.contains("/Users/demo/Downloads"));
+        assert!(batch_detail.contains("不支持设置初始目录"));
+    }
+
+    #[test]
+    fn overlay_scroll_dismisses_modal_requires_up_and_down_block() {
+        // 预览/复制移动等含滚动列表的弹层：必须同时阻断 down+up（不误关）
+        assert!(!overlay_scroll_dismisses_modal(false, true, true, true));
+        // 无滚动列表的简单弹层（重命名/新建目录）：阻断 down 即可
+        assert!(!overlay_scroll_dismisses_modal(false, true, false, false));
+        // 缺少 down 阻断 → 点卡片会误关（不合规）
+        assert!(overlay_scroll_dismisses_modal(false, false, true, true));
+        assert!(overlay_scroll_dismisses_modal(false, false, false, false));
+        // 有滚动列表但缺 up 阻断 → 误关（不合规）
+        assert!(overlay_scroll_dismisses_modal(false, true, false, true));
+        // busy 不改变阻断要求（busy 只由各 close handler 自行拒绝）
+        assert!(!overlay_scroll_dismisses_modal(true, true, true, true));
+        assert!(overlay_scroll_dismisses_modal(true, false, true, true));
+    }
+
+    #[test]
+    fn copy_move_summary_lists_partial_failures() {
+        assert_eq!(
+            copy_move_summary(CopyMoveMode::Copy, 2, &[]),
+            "已复制 2 个对象"
+        );
+        assert_eq!(
+            copy_move_summary(
+                CopyMoveMode::Move,
+                1,
+                &[("a/b.txt".to_string(), "无权限".to_string())]
+            ),
+            "移动完成 1 个，失败 1 个：b.txt：无权限"
+        );
     }
 
     #[test]
@@ -4779,6 +7567,35 @@ mod tests {
     }
 
     #[test]
+    fn preview_download_error_message_hides_html_and_lists_checks() {
+        let html = r#"API 错误 (HTTP 403): download_object: <html>
+<head><title>403 Forbidden</title></head>
+<body><center><h1>403 Forbidden</h1></center></body>
+</html>"#;
+        let message = preview_download_error_message("private-bucket", "report/a.pdf", html);
+
+        assert!(message.contains("无法预览"));
+        assert!(message.contains("远端拒绝访问"));
+        assert!(message.contains("Bucket `private-bucket`"));
+        assert!(message.contains("a.pdf"));
+        assert!(message.contains("七牛"));
+        assert!(message.contains("下载域名"));
+        assert!(message.contains("阿里云 OSS"));
+        assert!(message.contains("Endpoint/区域"));
+        assert!(message.contains("RAM 权限"));
+        assert!(!message.contains("<html>"), "不应暴露原始 HTML");
+        assert!(!message.contains("<title>"), "不应暴露原始 HTML");
+    }
+
+    #[test]
+    fn sanitize_remote_error_truncates_long_plain_text() {
+        let error = "x".repeat(400);
+        let sanitized = sanitize_remote_error(&error);
+        assert!(sanitized.ends_with('…'));
+        assert!(sanitized.chars().count() <= 301);
+    }
+
+    #[test]
     fn rename_target_key_replaces_last_segment_only() {
         assert_eq!(
             rename_target_key("a/b/c.txt", "d.txt").unwrap(),
@@ -4816,6 +7633,117 @@ mod tests {
         assert_eq!(rename_target_key("a/b.tar.gz", "c.zip").unwrap(), "a/c.zip");
     }
 
+    #[test]
+    fn rename_validation_message_reports_modal_errors() {
+        let entries = vec![entry_object("dir/existing.jpg")];
+        assert_eq!(
+            rename_validation_message("dir/avatar.jpg", "avatar.jpg", &entries).as_deref(),
+            Some("请输入一个不同的新名称")
+        );
+        assert_eq!(
+            rename_validation_message("dir/avatar.jpg", "bad/name.jpg", &entries).as_deref(),
+            Some("名称不能包含 /")
+        );
+        assert_eq!(
+            rename_validation_message("dir/avatar.jpg", "existing.jpg", &entries).as_deref(),
+            Some("目标名称已存在：existing.jpg，请换一个名字")
+        );
+        assert!(rename_validation_message("dir/avatar.jpg", "next.jpg", &entries).is_none());
+    }
+
+    #[test]
+    fn create_folder_target_key_keeps_current_prefix() {
+        assert_eq!(create_folder_target_key(None, "photos").unwrap(), "photos/");
+        assert_eq!(
+            create_folder_target_key(Some("reports/2026/"), "q1").unwrap(),
+            "reports/2026/q1/"
+        );
+        assert_eq!(
+            create_folder_target_key(None, "  photos  ").unwrap(),
+            "photos/"
+        );
+    }
+
+    #[test]
+    fn breadcrumb_prefixes_build_click_targets() {
+        assert!(breadcrumb_prefixes(None).is_empty());
+        assert_eq!(
+            breadcrumb_prefixes(Some("firmware/cp-es-c101/")),
+            vec![
+                ("firmware".to_string(), "firmware/".to_string()),
+                ("cp-es-c101".to_string(), "firmware/cp-es-c101/".to_string()),
+            ]
+        );
+        // 多余的 `/` 与重复段照实保留（服务端返回什么就展示什么）
+        assert_eq!(
+            breadcrumb_prefixes(Some("a//b/")),
+            vec![
+                ("a".to_string(), "a/".to_string()),
+                ("b".to_string(), "a/b/".to_string()),
+            ]
+        );
+        // 无尾斜杠（异常数据防御）：仍能生成段
+        assert_eq!(
+            breadcrumb_prefixes(Some("orphan")),
+            vec![("orphan".to_string(), "orphan/".to_string())]
+        );
+        // Unicode 目录名按 `/` 正确切分
+        assert_eq!(
+            breadcrumb_prefixes(Some("报告/2026/")),
+            vec![
+                ("报告".to_string(), "报告/".to_string()),
+                ("2026".to_string(), "报告/2026/".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn collapse_breadcrumb_short_paths_keep_all_segments() {
+        let segments = breadcrumb_prefixes(Some("a/b/c/"));
+        assert!(collapse_breadcrumb(&segments).is_none());
+    }
+
+    #[test]
+    fn collapse_breadcrumb_long_paths_hide_middle_keep_head_and_tail() {
+        let segments = breadcrumb_prefixes(Some("l1/l2/l3/l4/l5/l6/"));
+        let (collapsed_prefix, tail) = collapse_breadcrumb(&segments).expect("6 段应触发折叠");
+        // 点击 `…` 直达被收起的最深一层（l2/l3/l4 被收起，l4 最深）
+        assert_eq!(collapsed_prefix, "l1/l2/l3/l4/");
+        // 首段 + 最后两段保留
+        assert_eq!(
+            tail,
+            vec![
+                ("l5".to_string(), "l1/l2/l3/l4/l5/".to_string()),
+                ("l6".to_string(), "l1/l2/l3/l4/l5/l6/".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn create_folder_validation_message_reports_errors() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("photos/".into()),
+            entry_object("reports/"),
+        ];
+        assert_eq!(
+            create_folder_validation_message(None, "", &entries).as_deref(),
+            Some("目录名不能为空")
+        );
+        assert_eq!(
+            create_folder_validation_message(None, "a/b", &entries).as_deref(),
+            Some("目录名不能包含 /")
+        );
+        assert_eq!(
+            create_folder_validation_message(None, "photos", &entries).as_deref(),
+            Some("目录已存在：photos")
+        );
+        assert_eq!(
+            create_folder_validation_message(None, "reports", &entries).as_deref(),
+            Some("目录已存在：reports")
+        );
+        assert!(create_folder_validation_message(None, "next", &entries).is_none());
+    }
+
     fn entry_object(key: &str) -> ListingEntry {
         ListingEntry::Object(CloudObject {
             key: key.into(),
@@ -4824,6 +7752,239 @@ mod tests {
             etag: None,
             put_time_millis: 0,
         })
+    }
+
+    #[test]
+    fn object_selection_ix_ignores_directory_prefixes() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("photos/".into()),
+            entry_object("a.txt"),
+            ListingEntry::CommonPrefix("reports/".into()),
+            entry_object("b.txt"),
+        ];
+        assert_eq!(object_selection_ix(&entries, "a.txt"), Some(0));
+        assert_eq!(object_selection_ix(&entries, "b.txt"), Some(1));
+        assert_eq!(object_selection_ix(&entries, "missing.txt"), None);
+    }
+
+    #[test]
+    fn directory_mixed_keyboard_multi_select_blocks_rename_then_single_rename_keeps_prefix() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("photos/".into()),
+            entry_object("photos/a.jpg"),
+            ListingEntry::CommonPrefix("reports/".into()),
+            entry_object("reports/b.pdf"),
+            entry_object("reports/c.pdf"),
+        ];
+        let keys = object_keys(&entries);
+        assert_eq!(keys, ["photos/a.jpg", "reports/b.pdf", "reports/c.pdf"]);
+
+        // Keyboard path: ⌘A selects objects only; directory prefixes are ignored.
+        let select_all = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: true,
+            clicked_empty: false,
+            clicked_index: None,
+        };
+        let empty = indexmap::IndexSet::new();
+        let (multi, anchor, preview) =
+            apply_object_selection(select_all, &keys, &empty, None, ClickedEntry::None);
+        assert_eq!(multi.len(), 3);
+        assert!(multi.contains("photos/a.jpg"));
+        assert!(multi.contains("reports/b.pdf"));
+        assert!(multi.contains("reports/c.pdf"));
+        assert_eq!(anchor, None);
+        assert!(!preview);
+        assert!(
+            multi.len() > 1,
+            "Return rename must be blocked for multi-select"
+        );
+
+        // Pointer/keyboard recovery path: select one object from the mixed table.
+        let b_ix = object_selection_ix(&entries, "reports/b.pdf").expect("b.pdf object index");
+        let single_click = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(b_ix),
+        };
+        let (single, anchor, preview) = apply_object_selection(
+            single_click,
+            &keys,
+            &multi,
+            anchor,
+            ClickedEntry::Object("reports/b.pdf".into()),
+        );
+        assert_eq!(single.len(), 1);
+        assert!(single.contains("reports/b.pdf"));
+        assert_eq!(anchor, Some(1));
+        assert!(preview);
+
+        // Rename changes only the last segment and detects visible conflicts.
+        let renamed = rename_target_key("reports/b.pdf", "renamed.pdf").unwrap();
+        assert_eq!(renamed, "reports/renamed.pdf");
+        assert!(!object_key_exists(&entries, &renamed));
+        let conflict = rename_target_key("reports/b.pdf", "c.pdf").unwrap();
+        assert_eq!(conflict, "reports/c.pdf");
+        assert!(object_key_exists(&entries, &conflict));
+    }
+
+    #[test]
+    fn directory_mixed_shift_range_and_command_toggle_use_object_indexes() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("photos/".into()),
+            entry_object("photos/a.jpg"),
+            ListingEntry::CommonPrefix("reports/".into()),
+            entry_object("reports/b.pdf"),
+            ListingEntry::CommonPrefix("archive/".into()),
+            entry_object("archive/c.txt"),
+            entry_object("archive/d.txt"),
+        ];
+        let keys = object_keys(&entries);
+        assert_eq!(
+            keys,
+            [
+                "photos/a.jpg",
+                "reports/b.pdf",
+                "archive/c.txt",
+                "archive/d.txt"
+            ]
+        );
+
+        // 普通点击第二个对象建立锚点：entries 下标是 3，对象序号必须是 1。
+        let b_ix = object_selection_ix(&entries, "reports/b.pdf").expect("b.pdf object index");
+        let single_click = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(b_ix),
+        };
+        let empty = indexmap::IndexSet::new();
+        let (selected, anchor, preview) = apply_object_selection(
+            single_click,
+            &keys,
+            &empty,
+            None,
+            ClickedEntry::Object("reports/b.pdf".into()),
+        );
+        assert_eq!(
+            selected.iter().collect::<Vec<_>>(),
+            [&"reports/b.pdf".to_string()]
+        );
+        assert_eq!(anchor, Some(1));
+        assert!(preview);
+
+        // ⇧Click 第四个对象：跨过目录前缀，只选对象序号 1..=3。
+        let d_ix = object_selection_ix(&entries, "archive/d.txt").expect("d.txt object index");
+        let shift_click = ObjectSelectionIntent {
+            command: false,
+            shift: true,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(d_ix),
+        };
+        let (range, anchor, preview) = apply_object_selection(
+            shift_click,
+            &keys,
+            &selected,
+            anchor,
+            ClickedEntry::Object("archive/d.txt".into()),
+        );
+        assert_eq!(range.len(), 3);
+        assert!(!range.contains("photos/a.jpg"));
+        assert!(range.contains("reports/b.pdf"));
+        assert!(range.contains("archive/c.txt"));
+        assert!(range.contains("archive/d.txt"));
+        assert_eq!(anchor, Some(1), "⇧Click 不改变锚点");
+        assert!(!preview);
+
+        // ⌘Click 取消中间对象：集合移除该对象，锚点更新为它的对象序号 2。
+        let c_ix = object_selection_ix(&entries, "archive/c.txt").expect("c.txt object index");
+        let command_click = ObjectSelectionIntent {
+            command: true,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(c_ix),
+        };
+        let (toggled, anchor, preview) = apply_object_selection(
+            command_click,
+            &keys,
+            &range,
+            anchor,
+            ClickedEntry::Object("archive/c.txt".into()),
+        );
+        assert_eq!(toggled.len(), 2);
+        assert!(toggled.contains("reports/b.pdf"));
+        assert!(!toggled.contains("archive/c.txt"));
+        assert!(toggled.contains("archive/d.txt"));
+        assert_eq!(anchor, Some(2));
+        assert!(!preview);
+    }
+
+    #[test]
+    fn directory_mixed_reverse_shift_range_uses_object_indexes() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("photos/".into()),
+            entry_object("photos/a.jpg"),
+            ListingEntry::CommonPrefix("reports/".into()),
+            entry_object("reports/b.pdf"),
+            ListingEntry::CommonPrefix("archive/".into()),
+            entry_object("archive/c.txt"),
+            entry_object("archive/d.txt"),
+        ];
+        let keys = object_keys(&entries);
+
+        // 普通点击最后一个对象建立锚点：entries 下标是 6，对象序号必须是 3。
+        let d_ix = object_selection_ix(&entries, "archive/d.txt").expect("d.txt object index");
+        let single_click = ObjectSelectionIntent {
+            command: false,
+            shift: false,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(d_ix),
+        };
+        let empty = indexmap::IndexSet::new();
+        let (selected, anchor, preview) = apply_object_selection(
+            single_click,
+            &keys,
+            &empty,
+            None,
+            ClickedEntry::Object("archive/d.txt".into()),
+        );
+        assert_eq!(
+            selected.iter().collect::<Vec<_>>(),
+            [&"archive/d.txt".to_string()]
+        );
+        assert_eq!(anchor, Some(3));
+        assert!(preview);
+
+        // ⇧Click 靠前对象：从锚点 3 反向选到对象序号 1，目录前缀不参与范围。
+        let b_ix = object_selection_ix(&entries, "reports/b.pdf").expect("b.pdf object index");
+        let reverse_shift = ObjectSelectionIntent {
+            command: false,
+            shift: true,
+            select_all: false,
+            clicked_empty: false,
+            clicked_index: Some(b_ix),
+        };
+        let (range, anchor, preview) = apply_object_selection(
+            reverse_shift,
+            &keys,
+            &selected,
+            anchor,
+            ClickedEntry::Object("reports/b.pdf".into()),
+        );
+        assert_eq!(range.len(), 3);
+        assert!(!range.contains("photos/a.jpg"));
+        assert!(range.contains("reports/b.pdf"));
+        assert!(range.contains("archive/c.txt"));
+        assert!(range.contains("archive/d.txt"));
+        assert_eq!(anchor, Some(3), "反向 ⇧Click 也不改变锚点");
+        assert!(!preview);
     }
 
     #[test]

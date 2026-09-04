@@ -23,9 +23,9 @@ use gpui_component::{
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenObject, OpenSettings,
     PaletteClose, PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject,
-    RevealInFinder, SaveTextObject, SelectObjectAll, ToggleInspector, ToggleSidebar, UploadFiles,
-    UploadFolder,
+    RevealInFinder, SaveTextObject, SelectObjectAll, ToggleSidebar, UploadFiles, UploadFolder,
 };
+use crate::tokens;
 
 /// 自定义命令处理器（无键位提示）。
 pub type PaletteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -115,8 +115,6 @@ impl CommandPaletteView {
         vec![
             PaletteCommand::action("切换边栏", Box::new(ToggleSidebar))
                 .keywords(&["sidebar", "panel"]),
-            PaletteCommand::action("切换检查器", Box::new(ToggleInspector))
-                .keywords(&["inspector", "panel"]),
             PaletteCommand::action("关闭窗口", Box::new(CloseWindow))
                 .keywords(&["close", "window"]),
             PaletteCommand::action("退出 CloudStorage", Box::new(Quit)).keywords(&["quit", "exit"]),
@@ -285,7 +283,7 @@ impl CommandPaletteView {
                 div()
                     .px_3()
                     .py_4()
-                    .text_size(px(13.))
+                    .text_size(tokens::text(13.))
                     .text_color(theme.muted_foreground)
                     .child("无匹配命令"),
             );
@@ -313,7 +311,7 @@ impl CommandPaletteView {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .text_size(px(13.))
+                    .text_size(tokens::text(13.))
                     .when(selected, |row| row.bg(theme.accent))
                     .hover(|row| row.bg(theme.accent))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -371,7 +369,7 @@ impl Render for CommandPaletteView {
                     .py_1()
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(px(11.))
+                    .text_size(tokens::text(11.))
                     .text_color(theme.muted_foreground)
                     .child("↑↓ 选择 · ↵ 执行 · Esc 关闭"),
             )

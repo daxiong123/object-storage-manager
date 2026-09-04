@@ -24,6 +24,7 @@ use object_storage_app::AppServices;
 use object_storage_domain::ProviderKind;
 
 use crate::actions::DismissModal;
+use crate::tokens;
 
 pub struct AddAccountModal {
     services: Arc<AppServices>,
@@ -164,7 +165,7 @@ impl AddAccountModal {
             .gap_1()
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(tokens::text(12.))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.muted_foreground)
                     .child(label),
@@ -172,7 +173,7 @@ impl AddAccountModal {
             .child(Input::new(input))
             .children(hint.map(|h| {
                 div()
-                    .text_size(px(11.))
+                    .text_size(tokens::text(11.))
                     .text_color(theme.muted_foreground)
                     .child(h)
             }))
@@ -188,7 +189,7 @@ impl AddAccountModal {
             .py_1()
             .rounded(px(6.))
             .text_color(theme.danger)
-            .text_size(px(12.))
+            .text_size(tokens::text(12.))
             .child(Icon::new(IconName::TriangleAlert))
             .child(div().truncate().child(error.clone()))
             .into_any_element()
@@ -245,7 +246,7 @@ impl Render for AddAccountModal {
             .gap_3()
             .child(
                 div()
-                    .text_size(px(15.))
+                    .text_size(tokens::text(15.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("添加账号"),
             )

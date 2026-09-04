@@ -24,11 +24,54 @@
 //! `Theme` 的 `light_theme` / `dark_theme`（pub 字段），再以
 //! `Theme::change` 按系统外观应用。
 
+use std::sync::{OnceLock, RwLock};
+
 use gpui::{App, SharedString};
 use gpui_component::{Theme, ThemeConfig, ThemeMode};
+use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings};
+
+use crate::tokens;
 
 /// 主色 hue：青蓝（低饱和 Accent 的基底）。
 const HUE_DEG: f32 = 210.0;
+
+#[derive(Debug, Clone)]
+struct ThemePreferences {
+    appearance_mode: AppearanceMode,
+    ui_font_family: Option<String>,
+    ui_font_scale: f32,
+    code_font_family: Option<String>,
+    code_font_size: u32,
+}
+
+impl Default for ThemePreferences {
+    fn default() -> Self {
+        Self {
+            appearance_mode: AppearanceMode::System,
+            ui_font_family: None,
+            ui_font_scale: 1.0,
+            code_font_family: None,
+            code_font_size: CODE_FONT_SIZE_DEFAULT,
+        }
+    }
+}
+
+impl ThemePreferences {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            appearance_mode: settings.appearance_mode,
+            ui_font_family: settings.ui_font_family.clone(),
+            ui_font_scale: settings.ui_font_scale,
+            code_font_family: settings.code_font_family.clone(),
+            code_font_size: settings.code_font_size,
+        }
+    }
+}
+
+fn preferences() -> &'static RwLock<ThemePreferences> {
+    static PREFERENCES: OnceLock<RwLock<ThemePreferences>> = OnceLock::new();
+    PREFERENCES.get_or_init(|| RwLock::new(ThemePreferences::default()))
+}
 
 /// 亮色套定制项。
 fn light_overrides() -> ThemeColorOverrides {
@@ -123,22 +166,50 @@ fn hsla_to_hex([h, s, l, a]: [f32; 4]) -> String {
 
 /// 亮/暗两套主题配置（未列出的字段保持 None，apply 时以库默认色兜底）。
 pub fn theme_configs() -> Vec<ThemeConfig> {
+    theme_configs_for_preferences(&ThemePreferences::default())
+}
+
+fn theme_configs_for_preferences(prefs: &ThemePreferences) -> Vec<ThemeConfig> {
     vec![
-        config(ThemeMode::Light, "CloudStorage Light", light_overrides()),
-        config(ThemeMode::Dark, "CloudStorage Dark", dark_overrides()),
+        config(
+            ThemeMode::Light,
+            "CloudStorage Light",
+            light_overrides(),
+            prefs,
+        ),
+        config(
+            ThemeMode::Dark,
+            "CloudStorage Dark",
+            dark_overrides(),
+            prefs,
+        ),
     ]
 }
 
-fn config(mode: ThemeMode, name: &'static str, o: ThemeColorOverrides) -> ThemeConfig {
+fn config(
+    mode: ThemeMode,
+    name: &'static str,
+    o: ThemeColorOverrides,
+    prefs: &ThemePreferences,
+) -> ThemeConfig {
     // ThemeConfigColors 的 base.* 字段（red/blue/...）为私有且无 pub 构造器，
     // 只能 Default 后逐字段赋值；clippy field_reassign_with_default 在此误报
     // （我们只覆盖定制字段，其余保持默认），就地压掉。
     #[allow(clippy::field_reassign_with_default)]
-    fn build(mode: ThemeMode, name: &'static str, o: ThemeColorOverrides) -> ThemeConfig {
+    fn build(
+        mode: ThemeMode,
+        name: &'static str,
+        o: ThemeColorOverrides,
+        prefs: &ThemePreferences,
+    ) -> ThemeConfig {
         let mut cfg = ThemeConfig::default();
         cfg.is_default = true;
         cfg.name = SharedString::from(name);
         cfg.mode = mode;
+        cfg.font_size = Some(16.0 * prefs.ui_font_scale);
+        cfg.font_family = prefs.ui_font_family.clone().map(SharedString::from);
+        cfg.mono_font_size = Some(prefs.code_font_size as f32);
+        cfg.mono_font_family = prefs.code_font_family.clone().map(SharedString::from);
         let hex = |v: [f32; 4]| SharedString::from(hsla_to_hex(v));
         let c = &mut cfg.colors;
         c.primary = o.primary.map(hex);
@@ -154,7 +225,7 @@ fn config(mode: ThemeMode, name: &'static str, o: ThemeColorOverrides) -> ThemeC
         c.table_active = o.table_active.map(hex);
         cfg
     }
-    build(mode, name, o)
+    build(mode, name, o, prefs)
 }
 
 /// 把应用主题写入全局 Theme：亮/暗两套 `ThemeConfig` 挂到 pub 字段
@@ -163,9 +234,13 @@ fn config(mode: ThemeMode, name: &'static str, o: ThemeColorOverrides) -> ThemeC
 pub fn init(cx: &mut App) {
     use std::rc::Rc;
 
-    let configs = theme_configs();
+    let prefs = preferences()
+        .read()
+        .unwrap_or_else(|poisoned| panic!("主题偏好锁已毒化: {poisoned}"))
+        .clone();
+    let configs = theme_configs_for_preferences(&prefs);
     let appearance = cx.window_appearance();
-    let mode = ThemeMode::from(appearance);
+    let mode = effective_theme_mode(prefs.appearance_mode, ThemeMode::from(appearance));
     {
         let theme = Theme::global_mut(cx);
         for config in configs {
@@ -183,12 +258,59 @@ pub fn init(cx: &mut App) {
 }
 
 /// 窗口外观变化时同步主题（WorkspaceView 创建窗口后调用一次）。
-/// 规范 §7：外观跟随 System。
+/// 外观默认跟随 System；设置为 Light/Dark 时忽略系统外观事件。
 pub fn observe_appearance(window: &mut gpui::Window, cx: &mut App) {
+    if preferences()
+        .read()
+        .unwrap_or_else(|poisoned| panic!("主题偏好锁已毒化: {poisoned}"))
+        .appearance_mode
+        != AppearanceMode::System
+    {
+        return;
+    }
     let appearance = window.appearance();
     let mode = ThemeMode::from(appearance);
     if Theme::global(cx).mode != mode {
         Theme::change(mode, Some(window), cx);
+    }
+}
+
+pub fn apply_settings(settings: &Settings, window: Option<&mut gpui::Window>, cx: &mut App) {
+    let prefs = ThemePreferences::from_settings(settings);
+    tokens::set_ui_font_scale(prefs.ui_font_scale);
+    {
+        let mut guard = preferences()
+            .write()
+            .unwrap_or_else(|poisoned| panic!("主题偏好锁已毒化: {poisoned}"));
+        *guard = prefs.clone();
+    }
+
+    let system_mode = window
+        .as_ref()
+        .map(|window| ThemeMode::from(window.appearance()))
+        .unwrap_or_else(|| ThemeMode::from(cx.window_appearance()));
+    let mode = effective_theme_mode(prefs.appearance_mode, system_mode);
+    let configs = theme_configs_for_preferences(&prefs);
+    {
+        use std::rc::Rc;
+
+        let theme = Theme::global_mut(cx);
+        for config in configs {
+            if config.mode.is_dark() {
+                theme.dark_theme = Rc::new(config);
+            } else {
+                theme.light_theme = Rc::new(config);
+            }
+        }
+    }
+    Theme::change(mode, window, cx);
+}
+
+fn effective_theme_mode(preference: AppearanceMode, system_mode: ThemeMode) -> ThemeMode {
+    match preference {
+        AppearanceMode::System => system_mode,
+        AppearanceMode::Light => ThemeMode::Light,
+        AppearanceMode::Dark => ThemeMode::Dark,
     }
 }
 
@@ -276,5 +398,45 @@ mod tests {
             ThemeMode::Dark
         );
         assert_eq!(ThemeMode::from(WindowAppearance::Dark), ThemeMode::Dark);
+    }
+
+    #[test]
+    fn appearance_preference_overrides_system_mode() {
+        assert_eq!(
+            effective_theme_mode(AppearanceMode::System, ThemeMode::Dark),
+            ThemeMode::Dark
+        );
+        assert_eq!(
+            effective_theme_mode(AppearanceMode::Light, ThemeMode::Dark),
+            ThemeMode::Light
+        );
+        assert_eq!(
+            effective_theme_mode(AppearanceMode::Dark, ThemeMode::Light),
+            ThemeMode::Dark
+        );
+    }
+
+    #[test]
+    fn theme_config_applies_font_preferences() {
+        let prefs = ThemePreferences {
+            appearance_mode: AppearanceMode::System,
+            ui_font_family: Some("PingFang SC".into()),
+            ui_font_scale: 1.15,
+            code_font_family: Some("SF Mono".into()),
+            code_font_size: 15,
+        };
+        let configs = theme_configs_for_preferences(&prefs);
+        for config in configs {
+            assert_eq!(
+                config.font_family.as_ref().map(|s| s.as_ref()),
+                Some("PingFang SC")
+            );
+            assert_eq!(config.font_size, Some(18.4));
+            assert_eq!(
+                config.mono_font_family.as_ref().map(|s| s.as_ref()),
+                Some("SF Mono")
+            );
+            assert_eq!(config.mono_font_size, Some(15.0));
+        }
     }
 }

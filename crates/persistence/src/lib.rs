@@ -10,5 +10,8 @@ mod settings;
 mod transfers;
 
 pub use accounts::{AccountRepository, PersistenceError, default_data_dir, default_db_path};
-pub use settings::{CLIPBOARD_CLEAR_DEFAULT, SIGNED_URL_TTL_DEFAULT, Settings, settings_path};
+pub use settings::{
+    AppearanceMode, CLIPBOARD_CLEAR_DEFAULT, CODE_FONT_SIZE_DEFAULT, SIGNED_URL_TTL_DEFAULT,
+    Settings, TRANSFER_CONCURRENCY_DEFAULT, UI_FONT_SCALE_DEFAULT, settings_path,
+};
 pub use transfers::PersistedTransfer;

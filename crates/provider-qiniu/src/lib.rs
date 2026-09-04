@@ -48,13 +48,16 @@ struct RegionQueryBody {
 struct RegionQueryHost {
     /// 上传服务域名组（preferred 在前）
     up: RegionQueryDomains,
+    /// 下载源站/区域 IO 域名组（可作为绑定下载域名失败时的回退）。
+    #[serde(default)]
+    io: RegionQueryDomains,
     /// 该 host 的缓存有效期（秒）；缺省 86400（官方 default_ttl）。
     /// ttl 在 host 级别而非响应顶层（官方 RegionResponseBody 同构）。
     #[serde(default = "default_region_ttl")]
     ttl: u64,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 struct RegionQueryDomains {
     #[serde(default)]
     domains: Vec<String>,
@@ -219,6 +222,38 @@ impl QiniuProvider {
         Ok(domains)
     }
 
+    async fn bucket_download_domains(&self, bucket: &str) -> Result<Vec<String>, StorageError> {
+        let mut domains: Vec<String> = self
+            .bucket_domains(bucket)
+            .await?
+            .into_iter()
+            .filter(|d| !d.is_empty())
+            .collect();
+        match self.bucket_io_domains(bucket).await {
+            Ok(io_domains) => {
+                for domain in io_domains.into_iter().filter(|d| !d.is_empty()) {
+                    if !domains.iter().any(|existing| existing == &domain) {
+                        domains.push(domain);
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("[qiniu] io domain query failed (bucket={bucket}): {error}");
+            }
+        }
+        Ok(domains)
+    }
+
+    async fn bucket_io_domains(&self, bucket: &str) -> Result<Vec<String>, StorageError> {
+        let body = self.query_region_body(bucket).await?;
+        let Some(first) = body.hosts.first() else {
+            return Err(StorageError::InvalidResponse(format!(
+                "bucket_io_domains: 空间 {bucket} 区域查询返回空 hosts"
+            )));
+        };
+        Ok(first.io.domains.clone())
+    }
+
     /// 查询空间所在区域的上传域名。UC `GET /v4/query?ak=&bucket=`
     /// （公开接口，无需签名——官方 Rust SDK `BucketRegionsQueryer::do_sync_query`
     /// 同样不带 Authorization）。响应含 `hosts[]`（兼容旧字段名 `regions[]`），
@@ -275,6 +310,21 @@ impl QiniuProvider {
     }
 
     async fn query_up_host(&self, bucket: &str) -> Result<(String, u64), StorageError> {
+        let body = self.query_region_body(bucket).await?;
+        let Some(first) = body.hosts.first() else {
+            return Err(StorageError::InvalidResponse(format!(
+                "bucket_region: 空间 {bucket} 区域查询返回空 hosts"
+            )));
+        };
+        if first.up.domains.is_empty() {
+            return Err(StorageError::InvalidResponse(format!(
+                "bucket_region: 空间 {bucket} 区域查询无 up 域名"
+            )));
+        }
+        Ok((first.up.domains[0].clone(), first.ttl))
+    }
+
+    async fn query_region_body(&self, bucket: &str) -> Result<RegionQueryBody, StorageError> {
         let mut url = self.uc_url("v4/query")?;
         url.set_query(Some(&format!(
             "ak={}&bucket={}",
@@ -295,17 +345,7 @@ impl QiniuProvider {
                 truncate(&text, 500)
             ))
         })?;
-        let Some(first) = body.hosts.first() else {
-            return Err(StorageError::InvalidResponse(format!(
-                "bucket_region: 空间 {bucket} 区域查询返回空 hosts"
-            )));
-        };
-        if first.up.domains.is_empty() {
-            return Err(StorageError::InvalidResponse(format!(
-                "bucket_region: 空间 {bucket} 区域查询无 up 域名"
-            )));
-        }
-        Ok((first.up.domains[0].clone(), first.ttl))
+        Ok(body)
     }
 
     /// 生成带签名的下载 URL。token 含 SK 派生签名，调用方不得写入日志。
@@ -324,12 +364,21 @@ impl QiniuProvider {
         if ttl_secs == 0 {
             return Err(StorageError::InvalidInput("ttl_secs 必须大于 0".into()));
         }
-        let domains = self.bucket_domains(bucket).await?;
+        let domains = self.bucket_download_domains(bucket).await?;
         let Some(domain) = domains.first().filter(|d| !d.is_empty()) else {
             return Err(StorageError::InvalidResponse(format!(
                 "signed_get_url: 空间 {bucket} 未绑定可用下载域名（请在七牛控制台绑定 CDN/测试域名）"
             )));
         };
+        self.signed_download_url_for_domain(domain, key, ttl_secs)
+    }
+
+    fn signed_download_url_for_domain(
+        &self,
+        domain: &str,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<reqwest::Url, StorageError> {
         let deadline = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| StorageError::InvalidInput(format!("signed_get_url: 系统时间异常: {e}")))?
@@ -347,6 +396,16 @@ impl QiniuProvider {
         let mut signed_url = url;
         signed_url.set_query(Some(&format!("e={deadline}&token={token}")));
         Ok(signed_url)
+    }
+
+    fn should_try_next_download_domain(error: &StorageError) -> bool {
+        match error {
+            StorageError::Network(_) | StorageError::Auth(_) | StorageError::RateLimited(_) => true,
+            StorageError::Api { status, .. } => matches!(*status, 401 | 403 | 429 | 573 | 579),
+            StorageError::InvalidResponse(_)
+            | StorageError::InvalidInput(_)
+            | StorageError::Io(_) => false,
+        }
     }
 
     /// 下载失败时删除半成品文件；删除也失败则并入错误信息（不静默吞掉）
@@ -372,6 +431,11 @@ impl QiniuProvider {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
+        eprintln!(
+            "[qiniu] {context} HTTP {} body={}",
+            status.as_u16(),
+            truncate(&body, 800)
+        );
         #[derive(Deserialize)]
         struct ErrorBody {
             #[serde(default)]
@@ -380,7 +444,13 @@ impl QiniuProvider {
         let message = serde_json::from_str::<ErrorBody>(&body)
             .ok()
             .and_then(|e| e.error)
-            .unwrap_or_else(|| truncate(&body, 500));
+            .unwrap_or_else(|| {
+                if status.as_u16() == 403 && body.contains("403 Forbidden") {
+                    "下载域名拒绝访问，通常是私有空间签名下载或域名配置不匹配".into()
+                } else {
+                    truncate(&body, 500)
+                }
+            });
         match status.as_u16() {
             401 => Err(StorageError::Auth(format!("{context}: {message}"))),
             429 | 573 | 579 => Err(StorageError::RateLimited(format!(
@@ -398,6 +468,39 @@ async fn text_or_invalid(resp: reqwest::Response, context: &str) -> Result<Strin
     resp.text()
         .await
         .map_err(|e| StorageError::Network(format!("{context}: 读取响应体失败: {e}")))
+}
+
+fn with_attempted_download_hosts(error: StorageError, hosts: &[String]) -> StorageError {
+    if hosts.is_empty() {
+        return error;
+    }
+    let suffix = format!("；已尝试下载域名：{}", hosts.join(", "));
+    match error {
+        StorageError::Network(message) => StorageError::Network(format!("{message}{suffix}")),
+        StorageError::Auth(message) => StorageError::Auth(format!("{message}{suffix}")),
+        StorageError::RateLimited(message) => {
+            StorageError::RateLimited(format!("{message}{suffix}"))
+        }
+        StorageError::Api { status, message } => StorageError::Api {
+            status,
+            message: format!("{message}{suffix}"),
+        },
+        StorageError::InvalidResponse(message) => {
+            StorageError::InvalidResponse(format!("{message}{suffix}"))
+        }
+        StorageError::InvalidInput(message) => {
+            StorageError::InvalidInput(format!("{message}{suffix}"))
+        }
+        StorageError::Io(message) => StorageError::Io(format!("{message}{suffix}")),
+    }
+}
+
+fn download_url_host(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
 }
 
 impl std::fmt::Debug for QiniuProvider {
@@ -565,16 +668,60 @@ impl StorageProvider for QiniuProvider {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
 
-        let signed_url = self.signed_download_url(bucket, key, 3600).await?;
+        let domains = self.bucket_download_domains(bucket).await?;
+        if domains.is_empty() {
+            return Err(StorageError::InvalidResponse(format!(
+                "download_object: 空间 {bucket} 未绑定可用下载域名（请在七牛控制台绑定 CDN/测试域名）"
+            )));
+        }
 
-        // 下载专用客户端不带总超时（大文件）
-        let resp = self
-            .download_http
-            .get(signed_url)
-            .send()
-            .await
-            .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
-        let resp = self.check_status(resp, "download_object").await?;
+        let mut attempted_hosts = Vec::new();
+        let mut last_error = None;
+        let mut resp = None;
+        for (domain_ix, domain) in domains.iter().enumerate() {
+            let signed_url = self.signed_download_url_for_domain(domain, key, 3600)?;
+            let host = download_url_host(&signed_url).unwrap_or_else(|| domain.to_string());
+            attempted_hosts.push(host.clone());
+            let result = async {
+                // 下载专用客户端不带总超时（大文件）
+                let resp = self
+                    .download_http
+                    .get(signed_url)
+                    .send()
+                    .await
+                    .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
+                self.check_status(resp, &format!("download_object[{host}]"))
+                    .await
+            }
+            .await;
+            match result {
+                Ok(ok) => {
+                    resp = Some(ok);
+                    break;
+                }
+                Err(error) => {
+                    let can_try_next = domain_ix + 1 < domains.len()
+                        && Self::should_try_next_download_domain(&error);
+                    if can_try_next {
+                        eprintln!(
+                            "[qiniu] download via host {host} failed, trying next domain: {error}"
+                        );
+                        last_error = Some(error);
+                        continue;
+                    }
+                    return Err(with_attempted_download_hosts(error, &attempted_hosts));
+                }
+            }
+        }
+        let resp = resp.ok_or_else(|| {
+            last_error
+                .map(|error| with_attempted_download_hosts(error, &attempted_hosts))
+                .unwrap_or_else(|| {
+                    StorageError::InvalidResponse(format!(
+                    "download_object: 空间 {bucket} 未绑定可用下载域名（请在七牛控制台绑定 CDN/测试域名）"
+                ))
+                })
+        })?;
         let content_len = resp.content_length();
 
         // 流式落盘：分块写，不驻留整文件（内存红线，agents.md §2）。
@@ -1133,6 +1280,84 @@ mod tests {
         }
         assert!(!dest.exists(), "612 时不应创建本地文件");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn download_retries_next_domain_after_forbidden() {
+        let forbidden =
+            "<html><head><title>403 Forbidden</title></head><body>403 Forbidden</body></html>";
+        let (bad_addr, bad_captured) = spawn_mock(403, forbidden);
+        let (good_addr, good_captured) = spawn_mock(200, "ok");
+        let domains_body: &str = Box::leak(
+            format!(
+                "[\"127.0.0.1:{}\",\"127.0.0.1:{}\"]",
+                bad_addr.port(),
+                good_addr.port()
+            )
+            .into_boxed_str(),
+        );
+        let (uc_addr, _captured_uc) = spawn_mock(200, domains_body);
+
+        let uc = format!("http://{uc_addr}");
+        let rsf = format!("http://{good_addr}");
+        let cred = QiniuCredential::new("test-ak", "test-sk").unwrap();
+        let mut provider = QiniuProvider::with_endpoints(cred, &uc, &rsf).unwrap();
+        provider.set_download_use_https(false);
+
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-dl-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.txt");
+
+        let total = tokio()
+            .block_on(provider.download_object_to_file("b1", "a.txt", &dest, None))
+            .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "ok");
+        assert!(bad_captured.lock().unwrap().is_some(), "第一个域名应被尝试");
+        assert!(
+            good_captured.lock().unwrap().is_some(),
+            "第二个域名应被尝试"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn download_forbidden_html_reports_actionable_message() {
+        let forbidden =
+            "<html><head><title>403 Forbidden</title></head><body>403 Forbidden</body></html>";
+        let (addr_b, _captured_b) = spawn_mock(403, forbidden);
+        let domains_body: &str =
+            Box::leak(format!("[\"127.0.0.1:{}\"]", addr_b.port()).into_boxed_str());
+        let (addr_a, _captured_a) = spawn_mock(200, domains_body);
+
+        let uc = format!("http://{addr_a}");
+        let rsf = format!("http://{addr_b}");
+        let cred = QiniuCredential::new("test-ak", "test-sk").unwrap();
+        let mut provider = QiniuProvider::with_endpoints(cred, &uc, &rsf).unwrap();
+        provider.set_download_use_https(false);
+        let dest =
+            std::env::temp_dir().join(format!("cloudstorage-forbidden-{}", std::process::id()));
+
+        let err = tokio()
+            .block_on(provider.download_object_to_file("b1", "k", &dest, None))
+            .unwrap_err();
+        match err {
+            StorageError::Api { status, message } => {
+                assert_eq!(status, 403);
+                assert!(message.contains("下载域名拒绝访问"), "实际: {message}");
+                assert!(message.contains("已尝试下载域名"), "实际: {message}");
+                assert!(message.contains(&addr_b.to_string()), "实际: {message}");
+                assert!(!message.contains("<html>"), "不应把 HTML 原样展示给用户");
+            }
+            other => panic!("应报 Api 错误，实际 {other:?}"),
+        }
     }
 
     #[test]

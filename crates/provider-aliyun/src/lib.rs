@@ -171,6 +171,10 @@ impl AliyunProvider {
         let message = xml_first(&body, "Message")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
+                if code == 403 && body.contains("403 Forbidden") {
+                    return "OSS 拒绝访问，通常是 Bucket 权限、Endpoint 区域或账号授权不匹配"
+                        .into();
+                }
                 if oss_code.is_empty() {
                     truncate(&body, 300)
                 } else {
@@ -869,6 +873,30 @@ mod tests {
             .block_on(provider.signed_get_url("b1", "a", 0))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
+    }
+
+    #[test]
+    fn download_forbidden_html_reports_actionable_message() {
+        let body =
+            "<html><head><title>403 Forbidden</title></head><body>403 Forbidden</body></html>";
+        let (addr, _captured) = spawn_mock(403, body);
+        let provider = test_provider(addr);
+        let dest = std::env::temp_dir().join(format!(
+            "cloudstorage-aliyun-forbidden-{}",
+            std::process::id()
+        ));
+
+        let err = tokio()
+            .block_on(provider.download_object_to_file("b1", "k", &dest, None))
+            .unwrap_err();
+        match err {
+            StorageError::Api { status, message } => {
+                assert_eq!(status, 403);
+                assert!(message.contains("OSS 拒绝访问"), "实际: {message}");
+                assert!(!message.contains("<html>"), "不应把 HTML 原样展示给用户");
+            }
+            other => panic!("应报 Api 错误，实际 {other:?}"),
+        }
     }
 
     #[test]

@@ -89,18 +89,19 @@ crates/
 | ⌘Q vs ⌘W | ⌘W 只关窗口（**必须先禁用 close 动画再 remove_window**，见下行）；⌘Q 有 Transfer 时弹确认，默认 `Pause + Persist` |
 | 关窗口实现 | macOS 15 close 动画会被 gpui 立即 teardown 杀死 → 窗口卡死可见。`handle_close_window`：`setAnimationBehavior: None` + `remove_window()`；失败方案与机制详见 `docs/notes/gpui-api-notes.md`「关闭窗口」章节，勿重复试错 |
 | 通知 | `UserNotifications.framework`，仅长时间 Transfer 完成/失败、Migration 完成 |
-| 字体 | 系统 SF Pro / SF Mono，不捆绑 Inter |
+| 字体 | 默认系统 UI 字体 / Menlo（代码），不捆绑 Inter；用户可在设置里配置界面字体族、界面字号缩放、代码字体族与代码字号。字号缩放统一走 `crates/ui/src/tokens.rs`，不要新增裸 `text_size(px(...))` |
 | 自动更新 | 架构预留 Updater 边界；Check→Download→Verify→Install→Restart，必须验证签名+校验和 |
 | Action 注册点 | 所有跨 菜单/快捷键/右键菜单/工具栏 共用的 Action **只**定义在 `crates/ui/src/actions.rs`（`actions!(cloud_storage, …)`），键位在 `bind_keys(cx)` 统一绑定，不得散落各 view |
 | 全局键位边界 | 不绑定 ⌘X/⌘C/⌘V/⌘A 全局快捷键（会吞文本输入的原生响应链）；Edit 菜单走 `MenuItem::os_action` 触发系统行为。⌘A 全选走 **Workspace context 绑定**（`SelectObjectAll`），命令面板/输入框聚焦时由组件原生响应链处理 |
 | 对象多选 | `selected_object_keys: IndexSet<String>`（有序）+ `selection_anchor`（⇧ 范围起点）+ `selected_object_key`（主选=集合最后一项，Inspector/预览兼容）。语义决策在纯函数 `apply_object_selection`（workspace_view.rs，单测锁死）；⇧Click 分支先于 ⌘Click（⌘⇧=增量范围）。批量删除：确认一次（标题报数量，明细列前 3 个名）→ 后台逐项删，失败逐项可见不中断；批量下载（多选≥2）：`prompt_for_paths(directories:true, multiple:false)` 选目标目录 → 逐项入队 |
 | Inline Rename | Return 进（Finder 式，仅单选；多选报错），Esc 取消。编辑态该行渲染 Input（context "Renaming" 接 DismissRename；Input 未设 clean_on_escape 才能 propagate Esc）。提交：`rename_target_key` 只改最后一段（含 `/`、`.`、`..` 拒绝，单测锁死）→ `AppServices::rename_object`（下载临时文件→上传新 key→删旧 key；上传失败旧对象保留，删旧失败报复合错误不静默）。预选主名（不含扩展名）待 gpui-component 暴露 selection API 后补 |
 | ⌘F 过滤 | `filter_entries` 纯函数（大小写不敏感子串，命中 key/前缀名，单测锁死）；只影响展示不动 entries/选择集合（Finder 语义）。过滤条 context "ObjectFilter" 接 DismissFilter（Esc）；切桶即关闭，reload 后按新数据重算。跳转 Bucket：带数据 Action `SelectBucketByName(String)`（`#[action(no_json)]`）保留作菜单/快捷键入口；**命令面板动态命令例外**——不走 Action 派发（`execute_selected` 先 close 面板归还焦点，deferred `dispatch_action` 捕获的旧焦点已失效，Action 静默落空，E2 验收问题），经 `WeakEntity<WorkspaceView>` 直调 `select_bucket` |
-| 设置 ⌘, | `Settings`（crates/persistence/src/settings.rs）存 `settings.json`（Application Support/CloudStorage/，spec §58；永不存 Secret），损坏显式报错不静默重置（Fail Fast）。可配：签名链接 TTL、复制后清剪贴板秒数（0=关闭）。运行时值在 `WorkspaceView.settings`，改动经 `SettingsModal`（自建 overlay，同 AddAccountModal 机制）保存后生效；`copy_object_url_request` 的 TTL 是运行时参数，禁止退回编译期常量。Transfer 列表：进度条 + 百分比 + 字节；失败原因完整换行展示（不 truncate） |
+| 设置 ⌘, | `Settings`（crates/persistence/src/settings.rs）存 `settings.json`（Application Support/CloudStorage/，spec §58；永不存 Secret），损坏显式报错不静默重置（Fail Fast）；新增字段必须 serde default，旧配置缺字段正常补默认。可配：签名链接 TTL、复制后清剪贴板秒数（0=关闭）、外观模式（System/Light/Dark）、界面字体族/字号缩放、代码字体族/字号、传输并发数（1..8）、默认下载目录（单/批量下载交互一致：设置了有效默认目录先弹确认 sheet「使用默认目录/另存为…或另选目录/取消」；单文件另存为面板以默认目录为初始目录；不自动回写）。运行时值在 `WorkspaceView.settings`，改动经 `SettingsModal`（自建 overlay，同 AddAccountModal 机制）保存后即时生效；`copy_object_url_request` 的 TTL 是运行时参数，禁止退回编译期常量。Transfer 列表：进度条 + 百分比 + 字节；失败原因完整换行展示（不 truncate） |
 | Open With / Show in Finder | ⌘O / Inspector「打开」「Finder」按钮：`ensure_local_copy` 复用 `preview_path`（判据 `cached_copy_matches` 纯函数：文件名 = `{nanos}-{display_name}` 后缀匹配且非全等，单测锁死），无副本先下载到临时目录（与预览同缓存位置）→ `object_storage_macos::open_with_default_app`（NSWorkspace）/ gpui `cx.reveal_path`（spec §14/§16） |
 | Quit 处理 | 全局 `cx.on_action` 在 **bubble 末尾**（源码 `app.rs:1696`，不是 capture）：有窗口时 `WorkspaceView::handle_quit` 先处理，窗口全关后仍可 ⌘Q。有活动传输时走 gpui `window.prompt`（NSAlert sheet + oneshot，**禁止 runModal**）三按钮：暂停并退出（默认 Return）/ 取消（Esc）/ 立即退出；暂停并退出把活动任务写入 SQLite `transfers` 表（无 Secret 列）后 `cx.quit()`，下次启动 `take_transfers` 入队恢复（paused 保持暂停，其余自动继续）；立即退出 `clear_transfers` 后退出；落盘失败 Fail Fast 不退出 |
 | Sidebar/Inspector | **自建视图**，不用 gpui-component `Sidebar`（组件固定 255px/48px，与规范 180/220/360 + 44px rail 冲突）；可拖拽宽度用 gpui-component `resizable`，按布局变体用不同 group id 保持各自记忆宽度 |
 | GPUI API 陷阱 | gpui 0.2.2 / gpui-component 0.5.1 已验证的 API 事实与陷阱清单见 `docs/notes/gpui-api-notes.md`；写 UI 前先查，不凭记忆猜签名 |
+| 弹层规范（所有自建 overlay 统一） | **Esc 必关**：有输入框的经专属 context 绑定（`Renaming`→DismissRename、`AccountModal`/`SettingsModal`→DismissModal、`ObjectFilter`→DismissFilter），无输入框的（详情/预览）统一 context `Overlay` + `UnifiedDismiss`，卡片上 `on_action` 注册 handler；**遮罩点击关**：遮罩 `on_mouse_down` 调 close，busy 中由 close handler 自行拒绝（保存/创建/复制移动中不可关）；**卡片必须阻断冒泡**：一律 `on_mouse_down stop_propagation`，含滚动列表的（预览/复制移动）补 `on_mouse_up`（纯函数 `overlay_scroll_dismisses_modal` 锁死判据）；**视觉统一**：卡片圆角 10、标题字号 16 SEMIBOLD、标题栏右侧关闭按钮（busy 时 disabled）、底部按钮「取消在左、主操作在右」（macOS HIG 顺序）。新弹层先按本行自查再实现 |
 | **已知问题：点击空白清空选择（B6）未生效** | 三种方案均失败（capture hit-test 只认 BlockMouseExceptScroll 链、bubble 顺序假设不成立、canvas 几何命中检测行 bounds 未生效——待查 root cause：canvas prepaint 里 `window.root()` 拿到的可能是 Root 而非 WorkspaceView，`downcast` 失败导致 bounds 从未写入，静默 return 违反 Fail Fast）。**遗留**：⌘/⇧/⌘⇧ 行为正常，仅空白清空无效。下一步排查：给 canvas prepaint 的 downcast 失败路径加 eprintln 日志确认 bounds 是否写入；或改用 `cx.on_mouse_event`（App 级）+ 持久 bounds 快照。恢复验收前先跑 `cargo run` 加日志验证 |
 
 ## 6. 目录与数据
@@ -121,7 +122,7 @@ crates/
 - Space 预览（再按 Space/Esc 关闭，方向键切换）；Return 进 Inline Rename（Finder 式，不弹 Dialog）；删除用 `⌘⌫` 且远端删除必须确认（`window.prompt`，无废纸篓）。命令面板/添加账号打开时 ⌘⌫ 不删对象。
 - Selection：Click / ⌘Click / ⇧Click / ⌘A，完整 macOS 语义。
 - Context Menu 顺序参考 Finder，Delete 放最底。Menu Bar：App/File/Edit/View/Object/Transfer/Window/Help；同一 Action 必须在 Menu / Context Menu / Toolbar / 快捷键 / Command Palette 共用。
-- 外观跟随 System（监听变化）；低饱和 Accent，自有视觉身份（图标不得拼接七牛+阿里云 Logo）。
+- 外观默认跟随 System（监听变化），设置中可手动固定 Light/Dark；低饱和 Accent，自有视觉身份（图标不得拼接七牛+阿里云 Logo）。
 - Retina 全适配；Trackpad 滚动平滑（虚拟列表不得丢惯性/跳跃）。
 - **UI 设计基调（参考 [OpenChamber](https://github.com/openchamber/openchamber) theme-system，已落地 `crates/ui/src/theme.rs`）**：语义 token 四族——surface（background/foreground/muted/elevated/border）、interactive（hover/active/selection/focusRing）、status（error/warning/success/info，只用于真实反馈）、primary（主 CTA）。铁律：UI 代码只用 `cx.theme()` 语义字段，禁止硬编码 hex/hsla；hover 只给可交互元素；**selection ≠ primary**（选中态用 selection/sidebar_accent，不用 primary/accent 色）。主色为低饱和青蓝（hue 210），亮/暗两套（`CloudStorage Light/Dark`），经 `Theme::apply_config` 写入全局，`observe_window_appearance` 跟随系统切换。
 

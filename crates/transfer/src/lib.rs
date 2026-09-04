@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -243,7 +244,7 @@ impl EngineState {
 }
 
 struct EngineInner {
-    max_parallel: usize,
+    max_parallel: AtomicUsize,
     runner: TaskRunner,
     handle: tokio::runtime::Handle,
     state: Mutex<EngineState>,
@@ -296,7 +297,8 @@ impl EngineInner {
         if st.suspended {
             return; // 挂起期间不启动任何任务（Queued 原地等待恢复）
         }
-        while st.running_count() < self.max_parallel {
+        let max_parallel = self.max_parallel.load(Ordering::Relaxed);
+        while st.running_count() < max_parallel {
             let Some(id) = st.order.pop_front() else {
                 break;
             };
@@ -387,7 +389,7 @@ impl TransferEngine {
         let (changes, _) = watch::channel(());
         Self {
             inner: Arc::new(EngineInner {
-                max_parallel: max_parallel.max(1),
+                max_parallel: AtomicUsize::new(max_parallel.max(1)),
                 runner,
                 handle,
                 state: Mutex::new(EngineState {
@@ -400,6 +402,14 @@ impl TransferEngine {
                 changes,
             }),
         }
+    }
+
+    /// 调整并发上限。调小不 abort 已运行任务；调大会立即尝试填满空闲槽位。
+    pub fn set_max_parallel(&self, max_parallel: usize) {
+        self.inner
+            .max_parallel
+            .store(max_parallel.max(1), Ordering::Relaxed);
+        self.inner.pump_and_notify();
     }
 
     /// 入队一个下载任务，返回任务 id。立即按并发余量启动。
@@ -660,7 +670,7 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// 等待快照满足条件；超时即 panic（测试兜底，生产无轮询）。
     /// 必须用 await 让出 worker：#[tokio::test] 的用例跑在运行时上，
@@ -772,6 +782,63 @@ mod tests {
         .await;
         assert_eq!(log.lock().unwrap().len(), 2);
         assert_ne!(id1, id2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_max_parallel_starts_more_without_aborting_running_tasks() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let released = Arc::new(AtomicBool::new(false));
+        let released_for_runner = Arc::clone(&released);
+        let log_for_runner = Arc::clone(&log);
+        let runner: TaskRunner = Arc::new(move |req: TransferRequest| {
+            log_for_runner.lock().unwrap().push(req.key);
+            let released = Arc::clone(&released_for_runner);
+            Box::pin(async move {
+                while !released.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Ok(7)
+            })
+        });
+        let engine = TransferEngine::new(tokio::runtime::Handle::current(), runner, 1);
+        engine.enqueue_download("a1", "bkt", "k1", PathBuf::from("/tmp/a"), "k1");
+        engine.enqueue_download("a1", "bkt", "k2", PathBuf::from("/tmp/b"), "k2");
+        wait_for(&engine, 2000, |tasks| {
+            tasks
+                .iter()
+                .filter(|t| t.state == TransferState::Running)
+                .count()
+                == 1
+                && tasks.iter().any(|t| t.state == TransferState::Queued)
+        })
+        .await;
+
+        engine.set_max_parallel(2);
+        wait_for(&engine, 2000, |tasks| {
+            tasks
+                .iter()
+                .filter(|t| t.state == TransferState::Running)
+                .count()
+                == 2
+        })
+        .await;
+        assert_eq!(log.lock().unwrap().len(), 2);
+
+        engine.set_max_parallel(1);
+        assert_eq!(
+            engine
+                .snapshot()
+                .iter()
+                .filter(|t| t.state == TransferState::Running)
+                .count(),
+            2,
+            "调小并发不应 abort 已运行任务"
+        );
+        released.store(true, Ordering::SeqCst);
+        wait_for(&engine, 2000, |tasks| {
+            tasks.iter().all(|t| t.state == TransferState::Completed)
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

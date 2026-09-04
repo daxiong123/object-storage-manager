@@ -17,7 +17,6 @@ actions!(
         Quit,
         CloseWindow,
         ToggleSidebar,
-        ToggleInspector,
         OpenCommandPalette,
         // 添加账号：侧栏「+ 添加账号」入口与命令面板共享（规范 §11/§22）
         AddAccount,
@@ -39,7 +38,7 @@ actions!(
         SaveTextObject,
         // 全选当前对象列表：⌘A（仅 Workspace 上下文，不吞文本输入的原生响应链）
         SelectObjectAll,
-        // 行内重命名：Return（仅 Workspace 上下文，Finder 式，不弹 Dialog）
+        // 重命名：Return（仅 Workspace 上下文）
         RenameObject,
         // 过滤当前对象列表：⌘F（仅 Workspace 上下文；再按 ⌘F / Esc 关闭）
         ToggleObjectFilter,
@@ -63,12 +62,17 @@ actions!(
 // 输入框未处理 Esc 时会 propagate 到这里（与命令面板同一机制）。
 actions!(cloud_storage, [DismissModal]);
 
-// 行内重命名的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
+// 重命名弹窗的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
 // 未设 clean_on_escape，Esc 由 Input escape() propagate 到这里。
 actions!(cloud_storage, [DismissRename]);
 
 // 对象列表过滤的关闭（Esc）：仅通过 context "ObjectFilter" 生效。
 actions!(cloud_storage, [DismissFilter]);
+
+// 无文本输入弹层（对象详情/预览）的统一关闭（Esc）：仅通过 context
+// "Overlay" 生效。这些弹层没有 Input 组件，Esc 不会被输入组件拦截，
+// 直接落到此绑定（弹层卡片上 on_action 注册 handler）。
+actions!(cloud_storage, [UnifiedDismiss]);
 
 // Edit 菜单专用：通过 `MenuItem::os_action` 触发 macOS 原生编辑行为。
 //
@@ -81,9 +85,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
-        // 规范 §7：Sidebar ⌘⌥S、Inspector ⌘⌥I（菜单显示 ⌘ 符号，不是 "Cmd"）
+        // 规范 §7：Sidebar ⌘⌥S（菜单显示 ⌘ 符号，不是 "Cmd"）
         KeyBinding::new("cmd-alt-s", ToggleSidebar, None),
-        KeyBinding::new("cmd-alt-i", ToggleInspector, None),
         // 命令面板：⌘K 全局打开；↑↓/Esc 收窄到 context "Palette"——
         // 无 context 的绑定按 keymap 深度规则会压过组件（如 Input）的同键绑定。
         // 方向键能用的前提：单行 Input 只在 multi_line 下注册 MoveUp/MoveDown，
@@ -97,7 +100,7 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §7：⌘A 全选当前对象列表。绑定在 Workspace context（非全局），
         // 命令面板/输入框聚焦时按键由组件原生响应链处理，不会被吞。
         KeyBinding::new("cmd-a", SelectObjectAll, Some("Workspace")),
-        // 规范 §42：Return 进 Inline Rename（Finder 式）。绑定 Workspace context，
+        // 规范 §42：Return 进重命名。绑定 Workspace context，
         // 命令面板输入框聚焦时 Return 由面板自己的 PressEnter 处理，不受影响。
         KeyBinding::new("enter", RenameObject, Some("Workspace")),
         // 规范 ⌘F：过滤当前对象列表。Workspace context 绑定，输入框聚焦时
@@ -112,7 +115,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
         KeyBinding::new("down", PaletteSelectNext, Some("Palette")),
         KeyBinding::new("escape", DismissModal, Some("AccountModal")),
+        // 设置弹窗与添加账号共用 DismissModal action，context 不同：
+        // 保存进行中由 SettingsModal::close 自身拒绝关闭。
+        KeyBinding::new("escape", DismissModal, Some("SettingsModal")),
         KeyBinding::new("escape", DismissRename, Some("Renaming")),
         KeyBinding::new("escape", DismissFilter, Some("ObjectFilter")),
+        KeyBinding::new("escape", UnifiedDismiss, Some("Overlay")),
     ]);
 }

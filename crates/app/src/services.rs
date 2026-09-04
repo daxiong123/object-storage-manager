@@ -192,6 +192,20 @@ impl AppServices {
             .block_on(provider.download_object_to_file(bucket, key, dest, None))?)
     }
 
+    /// 上传本地文件到远端对象，返回上传字节数。
+    pub fn upload_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        source: &Path,
+    ) -> Result<u64, AppServicesError> {
+        let (_, provider) = self.build_provider(account_id)?;
+        Ok(self
+            .runtime
+            .block_on(provider.upload_object_from_file(bucket, key, source, None))?)
+    }
+
     /// 删除远端对象。对象不存在由 provider 报错，不静默当成功。
     pub fn delete_object(
         &self,
@@ -215,6 +229,73 @@ impl AppServices {
         Ok(self
             .runtime
             .block_on(provider.signed_get_url(bucket, key, ttl_secs))?)
+    }
+
+    /// 复制对象（当前 Bucket 内）：下载到临时文件 → 上传到目标 key。
+    /// 上传失败时源对象保持不变；临时文件清理失败会进入错误信息，避免静默。
+    pub fn copy_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        source_key: &str,
+        target_key: &str,
+    ) -> Result<(), AppServicesError> {
+        if source_key == target_key {
+            return Err(StorageError::InvalidInput("目标路径与源路径相同".into()).into());
+        }
+        let (_, provider) = self.build_provider(account_id)?;
+        let tmp = std::env::temp_dir().join(format!(
+            "cloudstorage-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        self.runtime
+            .block_on(provider.download_object_to_file(bucket, source_key, &tmp, None))?;
+        let upload_result = self
+            .runtime
+            .block_on(provider.upload_object_from_file(bucket, target_key, &tmp, None));
+        let cleanup = std::fs::remove_file(&tmp);
+        if let Err(error) = upload_result {
+            return Err(AppServicesError::Rename(format!(
+                "上传目标对象失败（源对象保留）：{error}；临时文件清理：{}",
+                match cleanup {
+                    Ok(()) => "已完成".to_string(),
+                    Err(e) => format!("失败 {e}（残留：{}）", tmp.display()),
+                }
+            )));
+        }
+        if let Err(e) = cleanup {
+            return Err(AppServicesError::Rename(format!(
+                "复制已完成，但临时文件清理失败：{e}（残留：{}）",
+                tmp.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// 移动对象（当前 Bucket 内）：复制成功后删除源对象。
+    /// 删除源失败时目标对象已生成，必须返回复合错误，不能静默。
+    pub fn move_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        source_key: &str,
+        target_key: &str,
+    ) -> Result<(), AppServicesError> {
+        self.copy_object(account_id, bucket, source_key, target_key)?;
+        let (_, provider) = self.build_provider(account_id)?;
+        if let Err(error) = self
+            .runtime
+            .block_on(provider.delete_object(bucket, source_key))
+        {
+            return Err(AppServicesError::Rename(format!(
+                "目标对象已生成，但删除源对象失败（远端同时存在 {source_key} 与 {target_key}）：{error}"
+            )));
+        }
+        Ok(())
     }
 
     /// 远端重命名（云端无原子 rename）：下载到临时文件 → 上传新 key →
