@@ -52,9 +52,10 @@ use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
-    DownloadObject, OpenAbout, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit,
-    Refresh, RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
-    ToggleObjectFilter, ToggleSidebar, UnifiedDismiss, UploadFiles, UploadFolder,
+    DownloadObject, FocusPath, NavigateBack, NavigateForward, OpenAbout, OpenCommandPalette,
+    OpenObject, OpenSettings, PreviewObject, Quit, Refresh, RenameObject, RevealInFinder,
+    SaveTextObject, SelectBucketByName, SelectObjectAll, ToggleObjectFilter, ToggleSidebar,
+    UnifiedDismiss, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 use crate::settings_modal::SettingsModal;
@@ -229,6 +230,11 @@ pub struct WorkspaceView {
     next_marker: Option<String>,
     /// 当前浏览的目录前缀（None = 根目录），以 `/` 结尾
     current_prefix: Option<String>,
+    /// 导航历史（规范 ⌘[ ⌘]）：`nav_back` 待回退栈，`nav_forward` 回退后可
+    /// 前进栈。条目为历史位置（None = 根目录）。下钻/跳转压 back 清 forward；
+    /// 跳桶清空全部（历史只在桶内有意义）。
+    nav_back: Vec<Option<String>>,
+    nav_forward: Vec<Option<String>>,
     /// 检查器选中的对象 Key（entries 内查找）
     selected_object_key: Option<String>,
     /// 多选集合（规范 §7：Click/⌘Click/⇧Click/⌘A）。有序去重；
@@ -242,8 +248,12 @@ pub struct WorkspaceView {
     renaming_busy: bool,
     /// ⌘F 过滤：Some = 过滤开启（查询词在输入框实体里）。
     object_filter: Option<Entity<InputState>>,
+    /// ⌘L 路径跳转输入框（Some = 打开中；回车跳转，Esc 经 DismissFilter 关闭）。
+    path_input: Option<Entity<InputState>>,
     /// 过滤命中缓存（render 时由 filter_entries 计算；None = 未开启过滤）。
     filtered_ix: Option<Vec<usize>>,
+    /// 对象列表排序方式（工具栏循环切换；Natural = 列举原序）。
+    object_sort: ObjectSort,
     /// 应用设置（settings.json 快照；⌘, 可改）。
     settings: object_storage_persistence::Settings,
     /// settings.json 路径（模态展示与保存用）。
@@ -431,6 +441,86 @@ pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> V
         })
         .map(|(ix, _)| ix)
         .collect()
+}
+
+/// 对象列表排序方式（工具栏循环切换；Finder 式：目录恒在对象前）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ObjectSort {
+    /// 列举原序（provider 返回顺序；字典序）
+    #[default]
+    Natural,
+    /// 名称（A→Z，大小写不敏感）
+    NameAsc,
+    /// 名称（Z→A）
+    NameDesc,
+    /// 大小（大→小）
+    SizeDesc,
+    /// 修改时间（新→旧）
+    TimeDesc,
+}
+
+impl ObjectSort {
+    /// 循环切换顺序（工具栏单按钮）。
+    fn next(self) -> Self {
+        match self {
+            ObjectSort::Natural => ObjectSort::NameAsc,
+            ObjectSort::NameAsc => ObjectSort::NameDesc,
+            ObjectSort::NameDesc => ObjectSort::SizeDesc,
+            ObjectSort::SizeDesc => ObjectSort::TimeDesc,
+            ObjectSort::TimeDesc => ObjectSort::Natural,
+        }
+    }
+
+    /// 工具栏显示标签。
+    fn label(self) -> &'static str {
+        match self {
+            ObjectSort::Natural => "默认",
+            ObjectSort::NameAsc => "名称 A→Z",
+            ObjectSort::NameDesc => "名称 Z→A",
+            ObjectSort::SizeDesc => "最大",
+            ObjectSort::TimeDesc => "最新",
+        }
+    }
+}
+
+/// 排序纯函数：输入 entries 与排序方式，返回展示顺序下标（指向 entries）。
+/// 不改 entries 本身（选择锚点/过滤命中缓存都以原下标为基准）。
+/// 目录恒在对象前（Finder 语义），对象内部按所选键排序。
+pub(crate) fn sort_entries(entries: &[ListingEntry], sort: ObjectSort) -> Vec<usize> {
+    let mut ix: Vec<usize> = (0..entries.len()).collect();
+    if matches!(sort, ObjectSort::Natural) {
+        return ix;
+    }
+    // 排序键：(段类型序 目录=0 对象=1, 降序数值键, 字符串键)。
+    // 数值键包 Reverse 实现大→小/新→旧；NameAsc/Desc 数值键恒 0 不参与。
+    let key = |entry: &ListingEntry| -> (usize, std::cmp::Reverse<u64>, String) {
+        match entry {
+            ListingEntry::CommonPrefix(p) => (0, std::cmp::Reverse(0), p.to_lowercase()),
+            ListingEntry::Object(o) => match sort {
+                ObjectSort::SizeDesc => (1, std::cmp::Reverse(o.size), o.key.to_lowercase()),
+                ObjectSort::TimeDesc => (
+                    1,
+                    std::cmp::Reverse(o.put_time_millis.max(0) as u64),
+                    o.key.to_lowercase(),
+                ),
+                _ => (1, std::cmp::Reverse(0), o.key.to_lowercase()),
+            },
+        }
+    };
+    match sort {
+        ObjectSort::NameAsc => ix.sort_by(|&a, &b| {
+            let (ta, _, na) = key(&entries[a]);
+            let (tb, _, nb) = key(&entries[b]);
+            (ta, na).cmp(&(tb, nb))
+        }),
+        ObjectSort::NameDesc => ix.sort_by(|&a, &b| {
+            let (ta, _, na) = key(&entries[a]);
+            let (tb, _, nb) = key(&entries[b]);
+            (ta, std::cmp::Reverse(na)).cmp(&(tb, std::cmp::Reverse(nb)))
+        }),
+        _ => ix.sort_by_key(|&i| key(&entries[i])),
+    }
+    ix
 }
 
 fn object_selection_ix(entries: &[ListingEntry], key: &str) -> Option<usize> {
@@ -820,13 +910,17 @@ impl WorkspaceView {
             loading_more: false,
             next_marker: None,
             current_prefix: None,
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
             selected_object_key: None,
             selected_object_keys: indexmap::IndexSet::new(),
             selection_anchor: None,
             renaming: None,
             renaming_busy: false,
             object_filter: None,
+            path_input: None,
             filtered_ix: None,
+            object_sort: ObjectSort::default(),
             settings,
             settings_path,
             settings_modal: None,
@@ -1058,8 +1152,10 @@ impl WorkspaceView {
         }
         self.selected_bucket = Some(name.to_string());
         self.current_prefix = None;
-        // 跳桶 = 重上下文切换：关闭过滤条（与 Finder 语义一致；
-        // ⌘R 刷新/翻页保留过滤词——只关这里，不动 reload_objects）
+        // 跳桶 = 重上下文切换：清导航历史（历史只在桶内有意义）、关闭过滤条
+        // （⌘R 刷新/翻页保留过滤词——只关这里，不动 reload_objects）
+        self.nav_back.clear();
+        self.nav_forward.clear();
         self.object_filter = None;
         self.filtered_ix = None;
         self.reload_objects(cx);
@@ -1072,6 +1168,8 @@ impl WorkspaceView {
         self.loading_more = false;
         self.next_marker = None;
         self.current_prefix = None;
+        self.nav_back.clear();
+        self.nav_forward.clear();
         self.clear_object_selection();
         // 过滤命中缓存基于 entries，数据已换直接作废缓存与过滤条
         // （跳桶是重上下文切换，Finder 同样不保留过滤）。
@@ -1105,12 +1203,44 @@ impl WorkspaceView {
         self.details_overlay_open = false;
     }
 
-    /// 下钻到某个目录前缀。
+    /// 下钻到某个目录前缀（压导航历史，⌘[ 可回退）。
     fn open_prefix(&mut self, prefix: String, cx: &mut Context<Self>) {
         // 目录切换 = 重上下文切换：关闭过滤条（与跳桶同理）
         self.object_filter = None;
         self.filtered_ix = None;
+        self.push_nav_history();
         self.current_prefix = Some(prefix);
+        self.reload_objects(cx);
+    }
+
+    /// 导航位置变更前：当前位置压入 back 栈并清空 forward 栈
+    /// （浏览器语义：新跳转使 forward 失效）。
+    fn push_nav_history(&mut self) {
+        self.nav_back.push(self.current_prefix.clone());
+        self.nav_forward.clear();
+    }
+
+    /// ⌘[：回退到上一个位置（桶内前缀栈，栈空不动）。
+    fn handle_nav_back(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.nav_back.pop() else {
+            return;
+        };
+        self.nav_forward.push(self.current_prefix.clone());
+        self.current_prefix = previous;
+        self.object_filter = None;
+        self.filtered_ix = None;
+        self.reload_objects(cx);
+    }
+
+    /// ⌘]：前进（回退后又点过新位置则 forward 已清空，不动）。
+    fn handle_nav_forward(&mut self, cx: &mut Context<Self>) {
+        let Some(next) = self.nav_forward.pop() else {
+            return;
+        };
+        self.nav_back.push(self.current_prefix.clone());
+        self.current_prefix = next;
+        self.object_filter = None;
+        self.filtered_ix = None;
         self.reload_objects(cx);
     }
 
@@ -1120,17 +1250,19 @@ impl WorkspaceView {
         }
         self.object_filter = None;
         self.filtered_ix = None;
+        self.push_nav_history();
         self.current_prefix = None;
         self.reload_objects(cx);
     }
 
-    /// 返回上一级目录；已在根目录则无操作。
+    /// 返回上一级目录（压历史）；已在根目录则无操作。
     fn go_up(&mut self, cx: &mut Context<Self>) {
         let Some(prefix) = self.current_prefix.clone() else {
             return;
         };
-        self.current_prefix = parent_prefix(&prefix).map(str::to_string);
-        self.reload_objects(cx);
+        if let Some(parent) = parent_prefix(&prefix).map(str::to_string) {
+            self.open_prefix(parent, cx);
+        }
     }
 
     /// 「加载更多」：带 marker 请求下一页并追加（错误时保留已加载内容）。
@@ -2880,6 +3012,12 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ⌘L 路径框与过滤条同处 toolbar 下方，共用 ObjectFilter context 的 Esc
+        if self.path_input.take().is_some() {
+            self.focus_handle.focus(window);
+            cx.notify();
+            return;
+        }
         if self.object_filter.is_some() {
             self.close_object_filter(window, cx);
         }
@@ -3616,7 +3754,14 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::File).text_color(theme.muted_foreground))
+                    .child(
+                        crate::file_type::file_type_icon(
+                            &object.key,
+                            theme.muted_foreground,
+                            theme.accent,
+                        )
+                        .text_size(tokens::text(42.)),
+                    )
                     .into_any_element(),
             }
         } else {
@@ -5041,6 +5186,92 @@ impl WorkspaceView {
         self.select_bucket(&action.0, cx);
     }
 
+    fn handle_navigate_back(&mut self, _: &NavigateBack, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
+            return;
+        }
+        self.handle_nav_back(cx);
+    }
+
+    fn handle_navigate_forward(
+        &mut self,
+        _: &NavigateForward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
+            return;
+        }
+        self.handle_nav_forward(cx);
+    }
+
+    fn handle_focus_path(&mut self, _: &FocusPath, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
+            return;
+        }
+        if self.selected_bucket.is_none() {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "请先选择一个 Bucket 再跳转路径".into(),
+            });
+            cx.notify();
+            return;
+        }
+        // 已有路径框：只聚焦；否则以当前前缀为初值新建（回车跳转，Esc 关闭）
+        if let Some(editor) = &self.path_input {
+            editor.update(cx, |state, cx| state.focus(window, cx));
+            return;
+        }
+        let initial = self.current_prefix.clone().unwrap_or_default();
+        let editor = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("输入路径，如 photos/2024/（以 / 结尾为目录）")
+                .default_value(initial)
+        });
+        cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.commit_path_jump(window, cx);
+                }
+            },
+        )
+        .detach();
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        self.path_input = Some(editor);
+        cx.notify();
+    }
+
+    /// ⌘L 提交：把输入框内容规范化为前缀后跳转（空 = 根目录）。
+    /// `/` 分隔、自动补结尾 `/`（目录语义）；拒绝 `/` 开头（绝对路径形态）。
+    fn commit_path_jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.path_input.clone() else {
+            return;
+        };
+        let raw = editor.read(cx).value().to_string();
+        self.path_input = None;
+        self.focus_handle.focus(window);
+        let trimmed = raw.trim();
+        let prefix = if trimmed.is_empty() {
+            None
+        } else if trimmed.starts_with('/') {
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: "路径不能以 / 开头（相对当前空间）".into(),
+            });
+            cx.notify();
+            return;
+        } else {
+            Some(format!("{}/", trimmed.trim_end_matches('/')))
+        };
+        self.object_filter = None;
+        self.filtered_ix = None;
+        self.push_nav_history();
+        self.current_prefix = prefix;
+        self.reload_objects(cx);
+    }
+
     /// 面板状态观察：面板自己调用 close() 置 open=false 时，这里收尾——
     /// 丢弃实体（遮罩与卡片随之消失）并把焦点归还 Workspace 根节点。
     /// 在 observe 回调里丢弃面板是安全的：回调参数持有的 Entity 让它
@@ -5568,8 +5799,18 @@ impl WorkspaceView {
             );
         }
 
-        content = content.child(self.render_object_list(theme, cx));
-        content = content.child(self.render_blank_clear_layer(cx));
+        content = content
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_object_list(theme, cx))
+                    // 空白清空层必须 absolute 覆盖（普通子元素无约束时高度
+                    // 为 0，content_bounds 恒零 → 命中检测永不生效）。
+                    .child(self.render_blank_clear_layer(cx).absolute().inset_0()),
+            )
+            .child(self.render_object_status_bar(theme, cx));
         if self.top_more_open {
             content = content.child(
                 div()
@@ -5588,14 +5829,19 @@ impl WorkspaceView {
     /// 空白点击清空（Finder 语义）——canvas + window 级监听 + 几何命中检测。
     /// 不依赖容器事件分发顺序：钩子只处理「坐标在内容区但不在任何行内」
     /// 的点击（行点击由行自己的处理器负责，互不干扰，顺序无关）。
-    /// 前两版 capture/bubble 方案因 gpui hit-test 只统计滚动 hitbox 链而
-    /// 不可靠，已废弃。
-    fn render_blank_clear_layer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    ///
+    /// B6 根因（此前三种方案失败的真正原因）：canvas 回调里
+    /// `window.root::<WorkspaceView>()` 的窗口根是 gpui-component 的 `Root`
+    /// 包装（main.rs `Root::new(workspace, …)`），downcast 永远返回
+    /// `Some(None)`，bounds 从未写入、钩子静默 return。修复：回调改用
+    /// `cx.weak_entity()` 升级实体取 self，不经过 window.root。
+    fn render_blank_clear_layer(&self, cx: &mut Context<Self>) -> gpui::Canvas<()> {
         let weak = cx.weak_entity();
+        let weak_bounds = weak.clone();
         gpui::canvas(
-            |bounds, window, _cx| {
+            move |bounds, _window, _cx| {
                 // 每帧执行：记录内容区 bounds
-                if let Some(Some(view)) = window.root::<crate::WorkspaceView>() {
+                if let Some(view) = weak_bounds.upgrade() {
                     view.update(_cx, |this, _| {
                         *this.content_bounds.borrow_mut() = Some(bounds);
                     });
@@ -5649,10 +5895,12 @@ impl WorkspaceView {
 
     /// 行 bounds 记录器：透明 canvas 包住一行，paint 阶段把自身 bounds
     /// 写入 row_bounds（供空白点击命中检测）。不拦截任何事件。
-    fn row_bounds_recorder(&self) -> gpui::Canvas<()> {
+    /// 实体获取走 weak_entity（B6 根因：window.root 是 Root 包装，downcast 失败）。
+    fn row_bounds_recorder(&self, cx: &Context<Self>) -> gpui::Canvas<()> {
+        let weak = cx.weak_entity();
         gpui::canvas(
-            |bounds, window, _cx| {
-                if let Some(Some(view)) = window.root::<crate::WorkspaceView>() {
+            move |bounds, _window, _cx| {
+                if let Some(view) = weak.upgrade() {
                     view.update(_cx, |this, _| {
                         this.row_bounds.borrow_mut().push(bounds);
                     });
@@ -5708,6 +5956,39 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_selection = !self.selected_object_keys.is_empty();
+        // ⌘L 路径输入态：整条工具栏替换为输入框（Esc 关闭复用 DismissFilter）
+        if let Some(editor) = &self.path_input {
+            return v_flex()
+                .w_full()
+                .border_b_1()
+                .border_color(theme.border)
+                .key_context("ObjectFilter")
+                .child(
+                    h_flex()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .child(
+                            Button::new("path-cancel")
+                                .icon(Icon::new(IconName::Close))
+                                .ghost()
+                                .with_size(Size::Small)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.path_input = None;
+                                    this.focus_handle.focus(window);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
+                        .child(
+                            div()
+                                .text_size(tokens::text(12.))
+                                .text_color(theme.muted_foreground)
+                                .child("回车跳转"),
+                        ),
+                );
+        }
         v_flex()
             .w_full()
             .border_b_1()
@@ -5799,6 +6080,44 @@ impl WorkspaceView {
                             .with_size(Size::Small)
                             .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
                     }))
+                    .child(
+                        Button::new("nav-back")
+                            .icon(Icon::new(IconName::ArrowLeft))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .tooltip("后退 ⌘[")
+                            .disabled(self.nav_back.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
+                    )
+                    .child(
+                        Button::new("nav-forward")
+                            .icon(Icon::new(IconName::ArrowRight))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .tooltip("前进 ⌘]")
+                            .disabled(self.nav_forward.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
+                    )
+                    .child(
+                        Button::new("objects-focus-path")
+                            .icon(Icon::new(IconName::Search))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .tooltip("跳转路径 ⌘L")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.handle_focus_path(&FocusPath, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("objects-sort")
+                            .label(format!("排序：{}", self.object_sort.label()))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.object_sort = this.object_sort.next();
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         Button::new("objects-refresh")
                             .label("刷新")
@@ -5934,14 +6253,22 @@ impl WorkspaceView {
         }
 
         // ⌘F 过滤开启时只渲染命中项；命中为空给出明确空态。
-        // 过滤只影响展示：entries 全集与选择集合不动（Finder 语义）。
-        let visible: Vec<(usize, &ListingEntry)> = match &self.filtered_ix {
-            Some(ix) => ix
-                .iter()
-                .filter_map(|&ix| self.entries.get(ix).map(|e| (ix, e)))
-                .collect(),
-            None => self.entries.iter().enumerate().collect(),
+        // 过滤与排序都只影响展示：entries 全集与选择集合不动（Finder 语义）。
+        // 展示顺序 = 排序全量顺序 ∩ 过滤命中（先按排序取全量，再保留命中行）。
+        let display_order: Vec<usize> = {
+            let sorted = sort_entries(&self.entries, self.object_sort);
+            match &self.filtered_ix {
+                Some(ix) => {
+                    let keep: std::collections::HashSet<usize> = ix.iter().copied().collect();
+                    sorted.into_iter().filter(|i| keep.contains(i)).collect()
+                }
+                None => sorted,
+            }
         };
+        let visible: Vec<(usize, &ListingEntry)> = display_order
+            .into_iter()
+            .filter_map(|ix| self.entries.get(ix).map(|e| (ix, e)))
+            .collect();
         let open_menu_top = self.object_menu_open.as_deref().and_then(|open_key| {
             visible
                 .iter()
@@ -6010,7 +6337,7 @@ impl WorkspaceView {
                             .border_color(theme.border)
                             .text_size(tokens::text(13.))
                             .hover(|row| row.bg(theme.accent))
-                            .child(self.row_bounds_recorder().absolute().inset_0())
+                            .child(self.row_bounds_recorder(cx).absolute().inset_0())
                             .child(
                                 h_flex()
                                     .flex_1()
@@ -6099,7 +6426,7 @@ impl WorkspaceView {
                             // hover 是可交互反馈用 accent
                             .when(selected, |row| row.bg(theme.list_active))
                             .hover(|row| row.bg(theme.accent))
-                            .child(self.row_bounds_recorder().absolute().inset_0())
+                            .child(self.row_bounds_recorder(cx).absolute().inset_0())
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -6122,8 +6449,12 @@ impl WorkspaceView {
                                             .min_w_0()
                                             .gap_2()
                                             .child(
-                                                Icon::new(IconName::File)
-                                                    .text_color(theme.muted_foreground),
+                                                // 按扩展名区分的 Lucide 类型图标
+                                                crate::file_type::file_type_icon(
+                                                    &object.key,
+                                                    theme.muted_foreground,
+                                                    theme.accent,
+                                                ),
                                             )
                                             .child(
                                                 div()
@@ -6187,36 +6518,6 @@ impl WorkspaceView {
             }
         }
 
-        if self.entries.is_empty() {
-            return list.into_any_element();
-        }
-
-        // 底部：统计 + 翻页
-        let mut footer = h_flex()
-            .px_3()
-            .py_2()
-            .gap_3()
-            .border_t_1()
-            .border_color(theme.border)
-            .text_size(tokens::text(12.))
-            .text_color(theme.muted_foreground)
-            .child(format!("共 {} 项", self.entries.len()));
-        if self.next_marker.is_some() {
-            footer = footer.child(
-                Button::new("objects-load-more")
-                    .label(if self.loading_more {
-                        "加载中…"
-                    } else {
-                        "加载更多"
-                    })
-                    .loading(self.loading_more)
-                    .disabled(self.loading_more)
-                    .ghost()
-                    .with_size(Size::Small)
-                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
-            );
-        }
-        list = list.child(footer);
         if let Some(top) = open_menu_top {
             list = list.child(
                 div()
@@ -6230,6 +6531,47 @@ impl WorkspaceView {
             );
         }
         list.into_any_element()
+    }
+
+    /// 对象区状态条：「共 N 项」+ 翻页。固定钉在内容区底部（Finder 语义），
+    /// 恒定全宽，不随条数滚动或浮动——滚动容器里只放行，任何常驻元素
+    /// 必须在滚动容器外（否则条数少时上浮、条数多时被卷走）。
+    fn render_object_status_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible_count = match &self.filtered_ix {
+            Some(ix) => ix.len(),
+            None => self.entries.len(),
+        };
+        let mut bar = h_flex()
+            .w_full()
+            .flex_shrink_0() // 不被滚动区挤压，恒定钉底
+            .px_3()
+            .py_2()
+            .gap_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .text_size(tokens::text(12.))
+            .text_color(theme.muted_foreground)
+            .child(if visible_count == self.entries.len() {
+                format!("共 {} 项", self.entries.len())
+            } else {
+                format!("显示 {visible_count} / 共 {} 项", self.entries.len())
+            });
+        if self.next_marker.is_some() {
+            bar = bar.child(
+                Button::new("objects-load-more")
+                    .label(if self.loading_more {
+                        "加载中…"
+                    } else {
+                        "加载更多"
+                    })
+                    .loading(self.loading_more)
+                    .disabled(self.loading_more)
+                    .ghost()
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
+            );
+        }
+        bar
     }
 
     /// 右侧 Inspector：选中对象的元数据；未选中时显示占位破折号。
@@ -7103,6 +7445,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_open_about))
             .on_action(cx.listener(Self::handle_open_object))
             .on_action(cx.listener(Self::handle_reveal_in_finder))
+            .on_action(cx.listener(Self::handle_navigate_back))
+            .on_action(cx.listener(Self::handle_navigate_forward))
+            .on_action(cx.listener(Self::handle_focus_path))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
@@ -8179,6 +8524,109 @@ mod tests {
         assert_eq!(filter_entries(&entries, None), vec![0, 1]);
         assert_eq!(filter_entries(&entries, Some("")), vec![0, 1]);
         assert_eq!(filter_entries(&entries, Some("   ")), vec![0, 1]);
+    }
+
+    fn entry_object_sized(key: &str, size: u64, time: i64) -> ListingEntry {
+        ListingEntry::Object(CloudObject {
+            key: key.into(),
+            size,
+            mime_type: None,
+            etag: None,
+            put_time_millis: time,
+        })
+    }
+
+    #[test]
+    fn sort_entries_natural_is_identity() {
+        let entries = vec![
+            entry_object("z.txt"),
+            ListingEntry::CommonPrefix("a/".into()),
+            entry_object("m.txt"),
+        ];
+        assert_eq!(sort_entries(&entries, ObjectSort::Natural), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sort_entries_name_asc_puts_dirs_first_case_insensitive() {
+        let entries = vec![
+            entry_object("Zebra.txt"),
+            ListingEntry::CommonPrefix("Apple/".into()),
+            entry_object("apple.txt"),
+        ];
+        let order = sort_entries(&entries, ObjectSort::NameAsc);
+        let names: Vec<String> = order
+            .iter()
+            .map(|&i| match &entries[i] {
+                ListingEntry::CommonPrefix(p) => p.clone(),
+                ListingEntry::Object(o) => o.key.clone(),
+            })
+            .collect();
+        // 目录恒在对象前；对象大小写不敏感字典序
+        assert_eq!(names, vec!["Apple/", "apple.txt", "Zebra.txt"]);
+    }
+
+    #[test]
+    fn sort_entries_name_desc_reverses_objects_keeps_dirs_first() {
+        let entries = vec![
+            entry_object("a.txt"),
+            entry_object("b.txt"),
+            ListingEntry::CommonPrefix("dir/".into()),
+        ];
+        let order = sort_entries(&entries, ObjectSort::NameDesc);
+        let names: Vec<String> = order
+            .iter()
+            .map(|&i| match &entries[i] {
+                ListingEntry::CommonPrefix(p) => p.clone(),
+                ListingEntry::Object(o) => o.key.clone(),
+            })
+            .collect();
+        assert_eq!(names, vec!["dir/", "b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn sort_entries_size_and_time_desc() {
+        let entries = vec![
+            entry_object_sized("small", 1, 100),
+            entry_object_sized("big", 999, 50),
+            entry_object_sized("newest", 10, 300),
+        ];
+        let by_size = sort_entries(&entries, ObjectSort::SizeDesc);
+        let keys: Vec<&str> = by_size
+            .iter()
+            .map(|&i| match &entries[i] {
+                ListingEntry::Object(o) => o.key.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(keys, vec!["big", "newest", "small"]);
+
+        let by_time = sort_entries(&entries, ObjectSort::TimeDesc);
+        let keys: Vec<&str> = by_time
+            .iter()
+            .map(|&i| match &entries[i] {
+                ListingEntry::Object(o) => o.key.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(keys, vec!["newest", "small", "big"]);
+    }
+
+    #[test]
+    fn object_sort_cycles_and_labels() {
+        let mut s = ObjectSort::default();
+        let labels = std::iter::from_fn(|| {
+            let label = s.label();
+            s = s.next();
+            Some(label)
+        })
+        .take(5)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["默认", "名称 A→Z", "名称 Z→A", "最大", "最新"],
+            "循环一周回到默认"
+        );
+        assert_eq!(s, ObjectSort::Natural, "第 5 次 next 应回到 Natural");
     }
 
     #[test]

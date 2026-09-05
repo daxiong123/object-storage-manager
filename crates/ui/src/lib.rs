@@ -1,6 +1,7 @@
 pub mod account_modal;
 pub mod actions;
 pub mod command_palette;
+pub mod file_type;
 pub mod settings_modal;
 pub mod theme;
 pub mod tokens;
@@ -11,6 +12,7 @@ use gpui_component::TitleBar;
 
 pub use account_modal::AddAccountModal;
 pub use command_palette::{CommandKind, PaletteCommand, PaletteHandler};
+pub use file_type::AppAssets;
 pub use settings_modal::SettingsModal;
 pub use theme::observe_appearance;
 pub use workspace_view::WorkspaceView;

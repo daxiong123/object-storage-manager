@@ -5,10 +5,10 @@ use object_storage_app::AppServices;
 use object_storage_ui::{self as ui, WorkspaceView};
 use std::sync::Arc;
 use ui::actions::{
-    CloseWindow, Copy, CopyObjectUrl, Cut, DeleteObject, DownloadObject, OpenAbout,
-    OpenCommandPalette, OpenObject, OpenSettings, Paste, Quit, Redo, Refresh, RenameObject,
-    RevealInFinder, SaveTextObject, SelectAll, SelectObjectAll, ToggleSidebar, Undo, UploadFiles,
-    UploadFolder,
+    CloseWindow, Copy, CopyObjectUrl, Cut, DeleteObject, DownloadObject, FocusPath, NavigateBack,
+    NavigateForward, OpenAbout, OpenCommandPalette, OpenObject, OpenSettings, Paste, PreviewObject,
+    Quit, Redo, Refresh, RenameObject, RevealInFinder, SaveTextObject, SelectAll, SelectObjectAll,
+    ToggleSidebar, Undo, UploadFiles, UploadFolder,
 };
 
 /// macOS 应用菜单（规范 §11/§22：与快捷键共享同一 Action；§26：⌘ 符号随键位自动显示）。
@@ -44,6 +44,10 @@ fn app_menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("命令面板…", OpenCommandPalette),
                 MenuItem::separator(),
+                MenuItem::action("后退", NavigateBack),
+                MenuItem::action("前进", NavigateForward),
+                MenuItem::action("跳转路径…", FocusPath),
+                MenuItem::separator(),
                 MenuItem::action("刷新", Refresh),
                 MenuItem::separator(),
                 MenuItem::action("切换边栏", ToggleSidebar),
@@ -53,6 +57,7 @@ fn app_menus() -> Vec<Menu> {
             name: "对象".into(),
             items: vec![
                 MenuItem::action("打开", OpenObject),
+                MenuItem::action("预览", PreviewObject),
                 MenuItem::action("在 Finder 中显示", RevealInFinder),
                 MenuItem::action("下载…", DownloadObject),
                 MenuItem::action("上传文件…", UploadFiles),
@@ -67,8 +72,21 @@ fn app_menus() -> Vec<Menu> {
             ],
         },
         Menu {
+            name: "传输".into(),
+            items: vec![
+                MenuItem::action("上传文件…", UploadFiles),
+                MenuItem::action("上传文件夹…", UploadFolder),
+                MenuItem::separator(),
+                MenuItem::action("刷新", Refresh),
+            ],
+        },
+        Menu {
             name: "窗口".into(),
             items: vec![MenuItem::action("关闭窗口", CloseWindow)],
+        },
+        Menu {
+            name: "帮助".into(),
+            items: vec![MenuItem::action("命令面板…", OpenCommandPalette)],
         },
     ]
 }
@@ -85,7 +103,7 @@ fn main() {
         }
     };
 
-    let app = Application::new().with_assets(gpui_component_assets::Assets);
+    let app = Application::new().with_assets(object_storage_ui::AppAssets);
 
     app.run(move |cx| {
         // 必须最先初始化 gpui-component（官方要求）。

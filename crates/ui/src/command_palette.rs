@@ -21,10 +21,10 @@ use gpui_component::{
 };
 
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, OpenAbout, OpenObject,
-    OpenSettings, PaletteClose, PaletteSelectNext, PaletteSelectPrev, PreviewObject, Quit, Refresh,
-    RenameObject, RevealInFinder, SaveTextObject, SelectObjectAll, ToggleSidebar, UploadFiles,
-    UploadFolder,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, FocusPath, NavigateBack,
+    NavigateForward, OpenAbout, OpenObject, OpenSettings, PaletteClose, PaletteSelectNext,
+    PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject, RevealInFinder, SaveTextObject,
+    SelectObjectAll, ToggleSidebar, UploadFiles, UploadFolder,
 };
 use crate::tokens;
 
@@ -155,6 +155,12 @@ impl CommandPaletteView {
                 .keywords(&["copy", "url", "link", "share"]),
             PaletteCommand::action("保存并上传", Box::new(SaveTextObject))
                 .keywords(&["save", "upload", "edit"]),
+            PaletteCommand::action("导航：后退", Box::new(NavigateBack))
+                .keywords(&["back", "navigate", "history"]),
+            PaletteCommand::action("导航：前进", Box::new(NavigateForward))
+                .keywords(&["forward", "navigate", "history"]),
+            PaletteCommand::action("跳转路径…", Box::new(FocusPath))
+                .keywords(&["go", "path", "jump", "prefix"]),
         ]
     }
 

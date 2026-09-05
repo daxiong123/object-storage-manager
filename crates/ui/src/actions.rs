@@ -46,6 +46,11 @@ actions!(
         OpenSettings,
         // 打开关于弹窗：菜单（设置上方）/ 命令面板共享
         OpenAbout,
+        // 导航历史（spec §11）：⌘[ 回退 / ⌘] 前进（桶内前缀栈，浏览器语义）
+        NavigateBack,
+        NavigateForward,
+        // ⌘L 路径跳转（spec §11 Focus Path）：打开路径输入框，回车跳转
+        FocusPath,
         // 用默认应用打开选中对象（spec §14：下载到临时目录 → NSWorkspace open）
         OpenObject,
         // 在 Finder 中显示选中对象的本地副本（spec §16）
@@ -108,6 +113,11 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 ⌘F：过滤当前对象列表。Workspace context 绑定，输入框聚焦时
         // 不触发（输入组件原生响应链优先）。
         KeyBinding::new("cmd-f", ToggleObjectFilter, Some("Workspace")),
+        // 规范 §11：⌘[ 回退 / ⌘] 前进（桶内导航历史）。
+        KeyBinding::new("cmd-[", NavigateBack, None),
+        KeyBinding::new("cmd-]", NavigateForward, None),
+        // 规范 §11：⌘L 聚焦路径跳转输入框。
+        KeyBinding::new("cmd-l", FocusPath, None),
         // 规范 ⌘,：设置。
         KeyBinding::new("cmd-,", OpenSettings, None),
         // 规范 ⌘O：用默认应用打开选中对象。

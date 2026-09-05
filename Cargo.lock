@@ -4053,6 +4053,7 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "indexmap",
  "objc",
  "object-storage-app",
