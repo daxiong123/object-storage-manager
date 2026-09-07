@@ -523,15 +523,10 @@ impl StorageProvider for AliyunProvider {
     }
 }
 
-fn text_or_invalid(
-    resp: reqwest::Response,
-    context: &str,
-) -> impl std::future::Future<Output = Result<String, StorageError>> {
-    async move {
-        resp.text()
-            .await
-            .map_err(|e| StorageError::InvalidResponse(format!("{context}: 读取响应失败: {e}")))
-    }
+async fn text_or_invalid(resp: reqwest::Response, context: &str) -> Result<String, StorageError> {
+    resp.text()
+        .await
+        .map_err(|e| StorageError::InvalidResponse(format!("{context}: 读取响应失败: {e}")))
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -632,9 +627,9 @@ fn parse_list_bucket(text: &str) -> Result<ObjectPage, StorageError> {
     }
     let next_marker = if truncated {
         next_marker.or_else(|| {
-            entries.iter().rev().find_map(|e| match e {
-                ListingEntry::Object(o) => Some(o.key.clone()),
-                ListingEntry::CommonPrefix(p) => Some(p.clone()),
+            entries.iter().next_back().map(|e| match e {
+                ListingEntry::Object(o) => o.key.clone(),
+                ListingEntry::CommonPrefix(p) => p.clone(),
             })
         })
     } else {

@@ -12,7 +12,7 @@ use object_storage_qiniu::QiniuProvider;
 
 #[derive(Debug)]
 pub enum BuiltProvider {
-    Qiniu(QiniuProvider),
+    Qiniu(Box<QiniuProvider>),
     Aliyun(AliyunProvider),
 }
 

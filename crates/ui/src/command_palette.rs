@@ -322,7 +322,7 @@ impl CommandPaletteView {
                     .gap_3()
                     .text_size(tokens::text(13.))
                     .when(selected, |row| row.bg(theme.accent))
-                    .hover(|row| row.bg(theme.accent))
+                    .hover(|row| row.bg(theme.list_hover))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.selected = row_ix;
                         this.execute_selected(window, cx);
@@ -357,7 +357,7 @@ impl Render for CommandPaletteView {
             .bg(theme.background)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(10.))
+            .rounded(px(8.))
             .shadow_lg()
             .overflow_hidden()
             .child(

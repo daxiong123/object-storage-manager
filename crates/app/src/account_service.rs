@@ -206,7 +206,7 @@ impl AccountService {
                     .map_err(|e| AccountError::InvalidInput(e.to_string()))?;
                 Ok((
                     account,
-                    BuiltProvider::Qiniu(QiniuProvider::new(credential)),
+                    BuiltProvider::Qiniu(Box::new(QiniuProvider::new(credential))),
                 ))
             }
             ProviderKind::Aliyun => {

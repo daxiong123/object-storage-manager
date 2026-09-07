@@ -20,21 +20,21 @@ actions!(
         OpenCommandPalette,
         // 添加账号：侧栏「+ 添加账号」入口与命令面板共享（规范 §11/§22）
         AddAccount,
-        // 下载选中对象：Inspector 按钮 / 「对象」菜单 / 命令面板三入口共享
+        // 下载选中对象：「对象」菜单 / 命令面板入口共享
         DownloadObject,
-        // 上传本地文件到当前空间：⌘U / 「对象」菜单 / 命令面板 / Inspector
+        // 上传本地文件到当前空间：⌘U / 「对象」菜单 / 命令面板
         UploadFiles,
-        // 上传本地目录（递归文件入队）：菜单 / 命令面板 / Inspector
+        // 上传本地目录（递归文件入队）：菜单 / 命令面板
         UploadFolder,
         // 刷新当前视图：有空间则重载对象列表，否则刷新空间/账号（规范 ⌘R）
         Refresh,
-        // 删除选中远端对象：⌘⌫ / 「对象」菜单 / 命令面板 / Inspector，必须确认
+        // 删除选中远端对象：⌘⌫ / 「对象」菜单 / 命令面板，必须确认
         DeleteObject,
         // 预览选中对象：Space / 命令面板
         PreviewObject,
-        // 复制选中对象的签名下载链接：菜单 / 命令面板 / Inspector
+        // 复制选中对象的签名下载链接：菜单 / 命令面板
         CopyObjectUrl,
-        // 保存文本编辑并覆盖上传：Inspector「保存并上传」/ ⌘S（Workspace 上下文）
+        // 保存文本编辑并覆盖上传：⌘S（Workspace 上下文）
         SaveTextObject,
         // 全选当前对象列表：⌘A（仅 Workspace 上下文，不吞文本输入的原生响应链）
         SelectObjectAll,
@@ -94,6 +94,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseWindow, None),
         // 规范 §7：Sidebar ⌘⌥S（菜单显示 ⌘ 符号，不是 "Cmd"）
         KeyBinding::new("cmd-alt-s", ToggleSidebar, None),
+        // 添加账号：仅 Workspace context 生效，避免模态/Input 聚焦时误触。
+        KeyBinding::new("cmd-n", AddAccount, Some("Workspace")),
         // 命令面板：⌘K 全局打开；↑↓/Esc 收窄到 context "Palette"——
         // 无 context 的绑定按 keymap 深度规则会压过组件（如 Input）的同键绑定。
         // 方向键能用的前提：单行 Input 只在 multi_line 下注册 MoveUp/MoveDown，

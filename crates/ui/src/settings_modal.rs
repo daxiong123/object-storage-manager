@@ -486,7 +486,7 @@ impl Render for SettingsModal {
             .bg(theme.background)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(10.))
+            .rounded(px(8.))
             .shadow_lg()
             .overflow_hidden()
             .on_action(cx.listener(Self::handle_dismiss))
@@ -588,9 +588,7 @@ impl SettingsModal {
                             .text_color(text_color)
                             .text_size(tokens::text(13.))
                             .when(!selected, |el| {
-                                el.hover(|el| {
-                                    el.bg(theme.accent).text_color(theme.accent_foreground)
-                                })
+                                el.hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
                             })
                             .on_mouse_down(
                                 MouseButton::Left,

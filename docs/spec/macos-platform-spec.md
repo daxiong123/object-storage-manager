@@ -142,7 +142,7 @@ gpui-component
 * 非 Chromium
 * 高度可定制
 * 非常适合开发工具
-* 非常适合三栏 Workspace
+* 非常适合两列 Workspace
 * 非常适合大量 Object Table
 * 非常适合 Command Palette
 * 非常适合 Keyboard-first UI
@@ -364,31 +364,13 @@ Sidebar Resize 时必须：
 
 ---
 
-# 10. Inspector
+# 10. 主界面结构
 
-右侧 Inspector：
+主界面只保留两列结构。
 
-```text
-min: 280px
-default: 320px
-max: 520px
-```
+主界面保持 Sidebar + Content 两列结构，对象详情、预览、打开方式与 Finder 显示通过对象菜单、命令面板或弹层承载。
 
-可以：
-
-```text
-Collapse
-Expand
-Resize
-```
-
-可以考虑快捷键：
-
-```text
-Cmd + Option + I
-```
-
-没有选中 Object 时允许自动折叠。
+不得再提供切换额外详情列的菜单项或快捷键。
 
 ---
 
@@ -891,7 +873,6 @@ New Bucket
 View
 
 Toggle Sidebar
-Toggle Inspector
 Command Palette
 Refresh
 ```
@@ -1524,7 +1505,6 @@ Trackpad
 ```text
 Object Virtual Table
 Sidebar
-Inspector
 Preview
 ```
 

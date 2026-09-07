@@ -18,11 +18,11 @@ pub use theme::observe_appearance;
 pub use workspace_view::WorkspaceView;
 
 /// 应用图标（512px PNG，构建期嵌入）。「关于」弹层与 Dock/Finder 图标共用同一来源。
-pub const APP_ICON_PNG: &'static [u8] = include_bytes!("../assets/app-icon.png");
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 
 /// 应用初始化（在 gpui_component::init 之后调用）。
 pub fn init(cx: &mut gpui::App) {
-    // 全局快捷键（⌘Q / ⌘W / ⌘⌥S / ⌘⌥I）。
+    // 全局快捷键（⌘Q / ⌘W / ⌘⌥S）。
     actions::bind_keys(cx);
     // 应用主题（OpenChamber 设计基调）：必须在 gpui_component::init 之后、
     // 窗口创建之前写入，首帧即是我们的视觉身份。

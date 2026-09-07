@@ -296,7 +296,7 @@ mod tests {
         assert!(auth.starts_with("OSS ak:"));
         let sig = auth.trim_start_matches("OSS ak:");
         assert!(
-            sig.contains('=') || sig.len() % 4 == 0,
+            sig.contains('=') || sig.len().is_multiple_of(4),
             "标准 Base64 应带 padding，实际 {sig}"
         );
         assert!(!sig.contains('-') && !sig.contains('_'));

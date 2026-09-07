@@ -190,8 +190,7 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 - 面板宽度 state 存在 `window.use_keyed_state(group_id)`：同一 group id 共享/记忆宽度。
   需要多套互不干扰的布局（如 边栏开/关 各自记忆宽度）时用**不同 group id**。
 - resize handle 挂在每个面板的 LEFT 边，作用目标是 `panel_ix - 1`（即拖左边缘改前一个面板宽）。
-  副作用：最右面板（Inspector）的 280..520 范围无法被它自己的把手约束——已知限制，
-  待实现真实 Inspector 时解决。
+  当前只保留左侧栏 + 内容区两列布局；不要再新增额外的详情列 resizable 面板。
 
 ### TitleBar
 - `TitleBar` 的 children 只渲染**左侧**（预留 80px macOS padding 给 Traffic Lights）。
@@ -200,7 +199,7 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 ### 主题与图标
 - Theme tokens（theme_color.rs:123+）：`sidebar` / `sidebar_foreground` / `sidebar_border` /
   `sidebar_accent` 等可直接用。
-- `IconName` 有：PanelLeft/Open/Close、PanelRight/Open/Close、Globe、FolderOpen、Star、
+- `IconName` 有：PanelLeft/Open/Close、Globe、FolderOpen、Star、
   Settings、Inbox 等；**没有** Cloud / HardDrive / History（需要时从 Lucide 补 SVG，
   只用 Lucide 一家，禁止混用图标集）。
 - `Size` 枚举：XSmall / Small / Medium（默认）/ Large；`Sizable::with_size(Size::Small)`。

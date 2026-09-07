@@ -17,7 +17,8 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable as _, Size, Theme, button::Button,
-    button::ButtonVariants as _, h_flex, input::Input, input::InputState, v_flex,
+    button::ButtonVariant, button::ButtonVariants as _, h_flex, input::Input, input::InputState,
+    v_flex,
 };
 
 use object_storage_app::AppServices;
@@ -240,7 +241,7 @@ impl Render for AddAccountModal {
             .bg(theme.background)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(10.))
+            .rounded(px(8.))
             .shadow_lg()
             .p_4()
             .gap_3()
@@ -254,9 +255,13 @@ impl Render for AddAccountModal {
                 h_flex()
                     .gap_2()
                     .child(
+                        // 分段控件：选中 = secondary 实底（中性），非选中 = ghost。
+                        // 不用 primary 实心——primary 留给底部主 CTA（selection ≠ primary）。
                         Button::new("provider-qiniu")
                             .label("七牛 Kodo")
-                            .when(self.provider == ProviderKind::Qiniu, |b| b.primary())
+                            .when(self.provider == ProviderKind::Qiniu, |b| {
+                                b.with_variant(ButtonVariant::Secondary)
+                            })
                             .when(self.provider != ProviderKind::Qiniu, |b| b.ghost())
                             .with_size(Size::Small)
                             .disabled(self.saving)
@@ -268,7 +273,9 @@ impl Render for AddAccountModal {
                     .child(
                         Button::new("provider-aliyun")
                             .label("阿里云 OSS")
-                            .when(self.provider == ProviderKind::Aliyun, |b| b.primary())
+                            .when(self.provider == ProviderKind::Aliyun, |b| {
+                                b.with_variant(ButtonVariant::Secondary)
+                            })
                             .when(self.provider != ProviderKind::Aliyun, |b| b.ghost())
                             .with_size(Size::Small)
                             .disabled(self.saving)
