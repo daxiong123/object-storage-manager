@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "object-storage-aliyun"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "futures-util",
@@ -3955,7 +3955,7 @@ dependencies = [
 
 [[package]]
 name = "object-storage-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "object-storage-aliyun",
  "object-storage-core",
@@ -3970,11 +3970,11 @@ dependencies = [
 
 [[package]]
 name = "object-storage-common"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "object-storage-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "object-storage-domain",
  "thiserror 2.0.20",
@@ -3982,7 +3982,7 @@ dependencies = [
 
 [[package]]
 name = "object-storage-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3994,11 +3994,11 @@ dependencies = [
 
 [[package]]
 name = "object-storage-domain"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "object-storage-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block",
  "objc",
@@ -4009,7 +4009,7 @@ dependencies = [
 
 [[package]]
 name = "object-storage-persistence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs 6.0.0",
  "object-storage-domain",
@@ -4021,11 +4021,11 @@ dependencies = [
 
 [[package]]
 name = "object-storage-preview"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "object-storage-qiniu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "futures-util",
@@ -4041,14 +4041,14 @@ dependencies = [
 
 [[package]]
 name = "object-storage-transfer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "object-storage-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "gpui",

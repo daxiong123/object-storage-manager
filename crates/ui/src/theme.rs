@@ -343,6 +343,9 @@ fn config(
         // 代码编辑器（code_editor 文本预览/编辑）高亮配色：跟随亮/暗模式，
         // 中性底色与 surface 族同冷灰系。
         cfg.highlight = Some(highlight_theme_style(mode));
+        // Linear 纯平：关闭库组件（Button/Input/Select/Checkbox/Radio/Slider）的
+        // shadow_xs。自建浮层卡片的 shadow_lg() 是显式调用，不受此开关影响。
+        cfg.shadow = Some(false);
         let hex = |v: [f32; 4]| SharedString::from(hsla_to_hex(v));
         let c = &mut cfg.colors;
         // surface
@@ -660,6 +663,7 @@ mod tests {
             assert!(theme.colors.background.is_some(), "background 必须设置");
             assert_eq!(theme.radius, Some(5), "Linear 风格小圆角");
             assert_eq!(theme.radius_lg, Some(8));
+            assert_eq!(theme.shadow, Some(false), "Linear 纯平：组件无阴影");
         }
     }
 

@@ -28,8 +28,8 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Corner, Entity, ExternalPaths,
     FocusHandle, Img, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
     ParentElement as _, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, Window, anchored, div, img, point,
-    prelude::FluentBuilder, px,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, Window, anchored, deferred, div,
+    img, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -279,6 +279,10 @@ pub struct WorkspaceView {
     preview_open_quicklook: bool,
     /// 文件名/预览按钮触发的应用内预览弹层。
     preview_overlay_open: bool,
+    /// 打开预览时置位：焦点必须在弹层元素**渲染挂载后**再设置——
+    /// 在 on_mouse_down 处理器里立即 window.focus() 会被同一次点击的
+    /// 后续处理覆盖（焦点回到 workspace 根），Esc 派发不到 Overlay context。
+    preview_needs_focus: bool,
     /// 当前打开对象菜单的 object key。
     object_menu_open: Option<String>,
     /// 顶部「更多」菜单是否打开。
@@ -930,6 +934,7 @@ impl WorkspaceView {
             text_editor: None,
             preview_open_quicklook: false,
             preview_overlay_open: false,
+            preview_needs_focus: false,
             object_menu_open: None,
             top_more_open: false,
             details_overlay_open: false,
@@ -2264,12 +2269,13 @@ impl WorkspaceView {
 
     /// 预览弹层：打开聚焦弹层（Esc 经焦点链命中 Overlay context），
     /// 关闭归还 Workspace 根。
-    fn open_preview_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_preview_overlay(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.preview_overlay_open = true;
+        // 焦点延迟到渲染挂载后设置（见 preview_needs_focus 注释）
+        self.preview_needs_focus = true;
         self.object_menu_open = None;
         self.details_overlay_open = false;
         self.preview_open_quicklook = false;
-        window.focus(&self.overlay_focus);
         self.start_object_preview(cx);
     }
 
@@ -3423,8 +3429,8 @@ impl WorkspaceView {
             }))
             .drag_over::<ExternalPaths>(|style, _, _, cx| {
                 style
-                    .border_color(cx.theme().accent)
-                    .bg(cx.theme().accent.opacity(0.18))
+                    .border_color(cx.theme().drag_border)
+                    .bg(cx.theme().drop_target)
             })
     }
 
@@ -3751,9 +3757,22 @@ impl WorkspaceView {
                 .into_any_element()
         } else if kind == PreviewKind::Image {
             match self.preview_path.clone() {
-                Some(path) => img(path)
+                Some(path) => div()
                     .size_full()
-                    .object_fit(ObjectFit::Contain)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .child(
+                        // 不用 size_full：img 布局阶段的 aspect_ratio/自然尺寸推导
+                        // 会把元素撑出固定高容器、被 overflow 裁成"按宽裁切"。
+                        // max 约束让元素始终 ≤ 容器，paint 阶段 Contain 兜底等比。
+                        img(path)
+                            .max_w_full()
+                            .max_h_full()
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                    )
                     .into_any_element(),
                 None => div()
                     .size_full()
@@ -5378,7 +5397,9 @@ impl WorkspaceView {
 
         body.child(
             // ResizablePanelGroup 自身渲染为 size_full 容器，需包一层分配剩余空间。
-            div().flex_1().min_w_0().h_full().child(group),
+            // min_h_0 必须显式：flex 子元素默认 min-height:auto（=内容高度），
+            // 列表行数多时会把 content 撑出窗口、状态条被挤出可视区。
+            div().flex_1().min_w_0().min_h_0().h_full().child(group),
         )
     }
 
@@ -5750,6 +5771,9 @@ impl WorkspaceView {
                 .relative()
                 .flex_1()
                 .min_w_0()
+                // min_h_0：允许被父容器压缩。缺省的 min-height:auto 会让 20+ 行
+                // 内容把 content 撑出窗口，状态条被挤到可视区外（与数据重叠）。
+                .min_h_0()
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
@@ -6054,33 +6078,18 @@ impl WorkspaceView {
                                     ),
                             )
                             .when(self.top_more_open, |button| {
-                                button.child(
+                                // gpui 浮层标准写法（对齐 gpui-component select/popup_menu）：
+                                // deferred 保证下一帧绘制在最上层；anchored 的 child 直接是
+                                // 菜单卡片。此前内嵌 div().absolute() 与 anchored 锚定机制
+                                // 冲突，菜单渲染不可见（点击 ⋯ 后无菜单弹出）。
+                                button.child(deferred(
                                     anchored()
                                         .anchor(Corner::TopRight)
                                         .offset(point(px(0.), px(4.)))
                                         .snap_to_window_with_margin(px(8.))
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .right_0()
-                                                .top(px(28.))
-                                                .occlude()
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                    cx.stop_propagation()
-                                                })
-                                                .on_mouse_up(MouseButton::Left, |_, _, cx| {
-                                                    cx.stop_propagation()
-                                                })
-                                                .child(self.render_top_more_menu(theme, cx)),
-                                        ),
-                                )
+                                        .child(self.render_top_more_menu(theme, cx)),
+                                ))
                             }),
-                    )
-                    .child(
-                        Button::new("toolbar-file-fragments")
-                            .label("文件碎片")
-                            .with_size(Size::Small)
-                            .disabled(true),
                     )
                     .child(div().flex_1())
                     .children(has_selection.then(|| {
@@ -6113,9 +6122,10 @@ impl WorkspaceView {
                     )
                     .children(self.current_prefix.is_some().then(|| {
                         Button::new("objects-go-up")
-                            .icon(Icon::new(IconName::ArrowLeft))
+                            .icon(Icon::new(IconName::ArrowUp))
                             .ghost()
                             .with_size(Size::Small)
+                            .tooltip("上级 ⌘⇧[")
                             .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
                     }))
                     .child(
@@ -6276,7 +6286,11 @@ impl WorkspaceView {
         let mut list = v_flex()
             .id("object-list")
             .relative()
-            .flex_1()
+            .flex_1() // row 主轴：宽度占满
+            // h_full 必须显式：包裹层（row 容器）不拉伸子元素高度，缺省时
+            // 滚动容器高度=内容自然高度 → 越过包裹层叠在状态条上、且无溢出
+            // 不产生滚动（滚动条失效）。约束后溢出才成立，滚动条恢复。
+            .h_full()
             .min_h_0()
             .overflow_y_scroll()
             .bg(theme.background);
@@ -6324,13 +6338,6 @@ impl WorkspaceView {
             .into_iter()
             .filter_map(|ix| self.entries.get(ix).map(|e| (ix, e)))
             .collect();
-        let open_menu_top = self.object_menu_open.as_deref().and_then(|open_key| {
-            visible
-                .iter()
-                .position(|(_, entry)| matches!(entry, ListingEntry::Object(object) if object.key == open_key))
-                // 表头已钉在滚动容器外：行 y 只含行高（py 6×2 + 行内容 ≈ 28）
-                .map(|row| px(6. + row as f32 * 40. + 28.))
-        });
         if self.filtered_ix.is_some() && visible.is_empty() {
             list = list.child(
                 div()
@@ -6360,19 +6367,6 @@ impl WorkspaceView {
 
         if !visible.is_empty() {
             list = list.children(self.object_list_rows(theme, visible, cx));
-        }
-
-        if let Some(top) = open_menu_top {
-            list = list.child(
-                div()
-                    .absolute()
-                    .top(top)
-                    .right(px(12.))
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.render_object_menu(theme, cx)),
-            );
         }
         list.into_any_element()
     }
@@ -6418,7 +6412,6 @@ impl WorkspaceView {
                     let label = display_name(prefix).to_string();
                     let prefix_sel = prefix.clone();
                     let prefix_nav = prefix.clone();
-                    let prefix_action = prefix.clone();
                     rows.push(
                         h_flex()
                             .id(("object-row", ix))
@@ -6485,17 +6478,8 @@ impl WorkspaceView {
                                             .child("-"),
                                     ),
                             )
-                            .child(
-                                h_flex().w(px(64.)).flex_shrink_0().gap_1().child(
-                                    Button::new(("open-prefix", ix))
-                                        .label("进入")
-                                        .ghost()
-                                        .with_size(Size::Small)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.open_prefix(prefix_action.clone(), cx)
-                                        })),
-                                ),
-                            )
+                            // 操作列：目录行留空（下钻 = 点击行本身），仅保持列对齐
+                            .child(h_flex().w(px(64.)).flex_shrink_0())
                             .into_any_element(),
                     );
                 }
@@ -6504,6 +6488,7 @@ impl WorkspaceView {
                     let key = object.key.clone();
                     let name_key = object.key.clone();
                     let menu_key = object.key.clone();
+                    let menu_open_key = object.key.clone();
                     let size = format_size(object.size);
                     let time = format_time(object.put_time_millis);
                     rows.push(
@@ -6594,19 +6579,40 @@ impl WorkspaceView {
                                     ),
                             )
                             .child(
-                                div().w(px(64.)).flex_shrink_0().child(
-                                    Button::new(("object-menu-row", ix))
-                                        .icon(Icon::new(IconName::EllipsisVertical))
-                                        .ghost()
-                                        .with_size(Size::Small)
-                                        .tooltip("更多操作")
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.toggle_object_menu(&menu_key, cx);
-                                        })),
-                                ),
+                                div()
+                                    .relative()
+                                    .w(px(64.))
+                                    .flex_shrink_0()
+                                    .child(
+                                        Button::new(("object-menu-row", ix))
+                                            .icon(Icon::new(IconName::EllipsisVertical))
+                                            .ghost()
+                                            .with_size(Size::Small)
+                                            .tooltip("更多操作")
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.toggle_object_menu(&menu_key, cx);
+                                            })),
+                                    )
+                                    .when(
+                                        self.object_menu_open.as_deref()
+                                            == Some(menu_open_key.as_str()),
+                                        |el| {
+                                            // anchored 锚定到按钮容器（与 toolbar 菜单同
+                                            // 模式）：位置由 gpui 按锚点计算。替代手算行
+                                            // 偏移——行高随字号缩放/内容变化，手算 40px
+                                            // 会随行号线性错位。
+                                            el.child(deferred(
+                                                anchored()
+                                                    .anchor(Corner::TopRight)
+                                                    .offset(point(px(0.), px(4.)))
+                                                    .snap_to_window_with_margin(px(8.))
+                                                    .child(self.render_object_menu(theme, cx)),
+                                            ))
+                                        },
+                                    ),
                             )
                             .into_any_element(),
                     );
@@ -6988,6 +6994,11 @@ impl Render for WorkspaceView {
             root = root.child(self.render_details_overlay(&theme, cx));
         }
         if self.preview_overlay_open {
+            // 焦点在弹层元素挂载后设置（mouse_down 里设置会被同一点击覆盖）
+            if self.preview_needs_focus {
+                self.preview_needs_focus = false;
+                window.focus(&self.overlay_focus);
+            }
             root = root.child(self.render_preview_overlay(&theme, cx));
         }
         if self.renaming.is_some() {

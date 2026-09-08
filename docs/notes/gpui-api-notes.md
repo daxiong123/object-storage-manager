@@ -192,6 +192,33 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 - resize handle 挂在每个面板的 LEFT 边，作用目标是 `panel_ix - 1`（即拖左边缘改前一个面板宽）。
   当前只保留左侧栏 + 内容区两列布局；不要再新增额外的详情列 resizable 面板。
 
+### 弹出层（anchored / deferred / 焦点）
+- 浮层标准写法（对齐 gpui-component select/popup_menu）：
+  `deferred(anchored().anchor(corner).offset(...).snap_to_window_with_margin(...).child(<菜单卡片>))`。
+  **不要在 anchored 的 child 里再套 `div().absolute()`**——absolute 与 anchored 锚定机制
+  冲突，菜单渲染不可见（曾导致「更多操作」菜单点击后无菜单弹出）。
+- 行内弹出菜单（每行 `...` 按钮）锚定在**按钮所在容器**（包一层 `div().relative()`），
+  菜单作为 `deferred(anchored(...))` 挂同一容器。**禁止手算行 y 偏移**（`row × 40px` 一类）：
+  行高随字号缩放/内容变化，手算值会随行号线性错位。
+- **不要在 `on_mouse_down` 处理器里 `window.focus()`**：焦点会被同一次点击的后续处理
+  覆盖回原焦点（实测焦点回到 workspace 根），键盘派发（如 Esc → Overlay context）全部
+  落空。正确做法：处理器里只置 `needs_focus` 标记，在 `render()` 中弹层元素渲染挂载后
+  再 `window.focus()`（参考 WorkspaceView.preview_needs_focus）。
+- `InputState` 内部处理 Escape：无 context menu / inline completion / IME 且未设
+  `clean_on_escape`（默认 false）时会 `cx.propagate()`，Esc 能继续沿焦点链派发到
+  Overlay context——编辑器里的 Esc 关弹层因此可用，无需额外处理。
+
+### 布局（flex 高度约束）
+- **row 容器不拉伸子元素高度**：`div()` 默认 align 非 stretch，column 子容器（如
+  滚动列表 `v_flex().overflow_y_scroll()`）必须显式 `.h_full()` 约束高度。缺省时
+  滚动容器高度=内容自然高度：内容越过父容器叠在下方元素上，且容器=内容高度
+  **无溢出 → overflow_y_scroll 滚动条失效**。两个症状一个根因（曾致状态条与行重叠）。
+- **flex 列容器链条上的 `min_h_0()` 要显式补全**：flex 子元素默认 min-height:auto
+  （=内容最小高度），任何一层缺了都会把内容高度向上传染，把底部固定元素
+  （状态条等）挤出可视区。参考 WorkspaceView render_body → content 链。
+- 排查布局用 `gpui::canvas` 打 bounds（paint 阶段回调拿 `Bounds<Pixels>`），
+  比 screenshot + 猜测快得多；对照组：滚动区包裹层 / 滚动容器 / 状态条三层。
+
 ### TitleBar
 - `TitleBar` 的 children 只渲染**左侧**（预留 80px macOS padding 给 Traffic Lights）。
   右侧内容用 `h_flex().w_full().justify_between()` 自行布局。
