@@ -36,7 +36,7 @@ use tokio::task::JoinHandle;
 
 /// 传输任务唯一标识（引擎内自增，进程内唯一）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TransferId(u64);
+pub struct TransferId(pub u64);
 
 /// 任务状态机。
 ///

@@ -32,10 +32,10 @@ use gpui::{
     img, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
-    button::ButtonVariants as _, h_flex, input::Input, input::InputEvent, input::InputState,
-    resizable::h_resizable, resizable::resizable_panel, scroll::ScrollableElement,
-    spinner::Spinner, v_flex,
+    ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar,
+    button::Button, button::ButtonVariants as _, h_flex, input::Input, input::InputEvent,
+    input::InputState, progress::Progress, resizable::h_resizable, resizable::resizable_panel,
+    scroll::ScrollableElement, spinner::Spinner, v_flex,
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
@@ -287,6 +287,8 @@ pub struct WorkspaceView {
     object_menu_open: Option<String>,
     /// 顶部「更多」菜单是否打开。
     top_more_open: bool,
+    /// 传输面板是否展开（显示每任务明细）。收起态仅显示一行汇总。
+    transfers_expanded: bool,
     /// 当前是否显示对象详情弹层。
     details_overlay_open: bool,
     /// 当前是否显示「关于」弹层（独立于设置模态）。
@@ -937,6 +939,7 @@ impl WorkspaceView {
             preview_needs_focus: false,
             object_menu_open: None,
             top_more_open: false,
+            transfers_expanded: false,
             details_overlay_open: false,
             about_overlay_open: false,
             delete_prompt_open: false,
@@ -1320,10 +1323,20 @@ impl WorkspaceView {
                         } else {
                             None
                         };
+                        // 目录占位对象（key 以 / 结尾）：与 CommonPrefix 语义重复、
+                        // 无文件内容（下载/预览/URL 均 404），列表不展示
+                        let entries: Vec<ListingEntry> = page
+                            .entries
+                            .into_iter()
+                            .filter(|entry| match entry {
+                                ListingEntry::Object(object) => !is_directory_object(&object.key),
+                                ListingEntry::CommonPrefix(_) => true,
+                            })
+                            .collect();
                         if is_more {
-                            this.entries.extend(page.entries);
+                            this.entries.extend(entries);
                         } else {
-                            this.entries = page.entries;
+                            this.entries = entries;
                         }
                         this.next_marker = marker;
                         this.objects_state = AsyncState::Idle;
@@ -2049,6 +2062,13 @@ impl WorkspaceView {
                 .code_editor(language)
                 .default_value(text)
         });
+        // 订阅 Change：按键即重渲染，保存按钮的 dirty 禁用态实时刷新
+        cx.subscribe_in(&editor, window, |_, _, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        })
+        .detach();
         self.text_editor = Some(editor);
         cx.notify();
     }
@@ -2072,6 +2092,12 @@ impl WorkspaceView {
                 .code_editor(language)
                 .default_value(text)
         });
+        cx.subscribe_in(&editor, window, |_, _, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        })
+        .detach();
         self.text_editor = Some(editor);
     }
 
@@ -2112,6 +2138,13 @@ impl WorkspaceView {
 
     fn confirm_and_save_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.text_editor.is_none() {
+            return;
+        }
+        // 无改动不保存（与保存按钮禁用态同语义，⌘S 快捷键同此约束）
+        if let (Some(editor), Some(original)) =
+            (self.text_editor.as_ref(), self.preview_text.as_deref())
+            && editor.read(cx).value().as_ref() == original
+        {
             return;
         }
         if self.palette.is_some() || self.add_modal.is_some() {
@@ -3946,11 +3979,21 @@ impl WorkspaceView {
                             )
                             .when(self.preview_text.is_some(), |row| {
                                 if self.text_editor.is_some() {
+                                    // 内容与原文一致（无改动）时禁用保存：
+                                    // 未编辑不产生覆盖上传，避免误触远端覆盖
+                                    let text_dirty = self
+                                        .text_editor
+                                        .as_ref()
+                                        .zip(self.preview_text.as_deref())
+                                        .is_some_and(|(editor, original)| {
+                                            editor.read(cx).value().as_ref() != original
+                                        });
                                     row.child(
                                         Button::new("preview-overlay-save-text")
                                             .label("保存并上传")
                                             .primary()
                                             .with_size(Size::Small)
+                                            .disabled(!text_dirty)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.confirm_and_save_text_edit(window, cx)
                                             })),
@@ -5850,6 +5893,7 @@ impl WorkspaceView {
                     // 为 0，content_bounds 恒零 → 命中检测永不生效）。
                     .child(self.render_blank_clear_layer(cx).absolute().inset_0()),
             )
+            .child(self.render_transfer_panel(theme, cx))
             .child(self.render_object_status_bar(theme, cx));
         content.into_any_element()
     }
@@ -6528,14 +6572,11 @@ impl WorkspaceView {
                                             .flex_1()
                                             .min_w_0()
                                             .gap_2()
-                                            .child(
-                                                // 按扩展名区分的 Lucide 类型图标
-                                                crate::file_type::file_type_icon(
-                                                    &object.key,
-                                                    theme.muted_foreground,
-                                                    theme.accent,
-                                                ),
-                                            )
+                                            .child(crate::file_type::file_type_icon(
+                                                &object.key,
+                                                theme.muted_foreground,
+                                                theme.accent,
+                                            ))
                                             .child(
                                                 div()
                                                     .min_w_0()
@@ -6620,6 +6661,218 @@ impl WorkspaceView {
             }
         }
         rows
+    }
+
+    /// 传输面板：底部状态条上方，展示进行中的上传/下载。收起态一行汇总
+    /// （转圈 + 数量 + 总进度条 + 展开箭头）；展开态列出每任务明细
+    /// （名字 + 进度条 + 字节 + 状态 + 取消/继续/重试按钮）。
+    fn render_transfer_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let transfers = &self.transfers;
+        if transfers.is_empty() {
+            return div().into_any_element();
+        }
+
+        let active: Vec<&TransferTask> = transfers.iter().filter(|t| t.state.is_active()).collect();
+        let finished: Vec<&TransferTask> =
+            transfers.iter().filter(|t| t.state.is_finished()).collect();
+        let total_count = transfers.len();
+        let active_count = active.len();
+
+        // 总进度：所有任务的 bytes_done / bytes_total 汇总
+        let total_done: u64 = transfers.iter().map(|t| t.bytes_done).sum();
+        let total_size: u64 = transfers.iter().filter_map(|t| t.bytes_total).sum();
+        let overall_pct = if total_size > 0 {
+            (total_done as f32 / total_size as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let has_running = active.iter().any(|t| t.state == TransferState::Running);
+
+        let summary = h_flex()
+            .id("transfer-summary")
+            .w_full()
+            .h(px(32.))
+            .px_3()
+            .gap_2()
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.list_head)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.transfers_expanded = !this.transfers_expanded;
+                cx.notify();
+            }))
+            .when(has_running, |row| row.child(Spinner::new().with_size(Size::Small)))
+            .child(
+                div()
+                    .text_size(tokens::text(12.))
+                    .text_color(theme.foreground)
+                    .child(if active_count > 0 {
+                        format!("{active_count} 个传输中")
+                    } else {
+                        format!("{total_count} 个已完成")
+                    }),
+            )
+            .child(div().h(px(4.)))
+            .child(Progress::new().h(px(4.)).value(overall_pct).flex_1())
+            .child(
+                div()
+                    .text_size(tokens::text(11.))
+                    .text_color(theme.muted_foreground)
+                    .child(if total_size > 0 {
+                        format!(
+                            "{} / {}",
+                            format_size(total_done),
+                            format_size(total_size)
+                        )
+                    } else {
+                        format_size(total_done)
+                    }),
+            )
+            .child(Icon::new(if self.transfers_expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronUp
+            }));
+
+        let mut panel = v_flex().w_full().flex_shrink_0().child(summary);
+
+        if self.transfers_expanded {
+            for task in transfers {
+                panel = panel.child(self.transfer_task_row(task.clone(), theme, cx));
+            }
+            if !finished.is_empty() {
+                panel = panel.child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .px_3()
+                        .py_1()
+                        .child(
+                            Button::new("transfers-clear-finished")
+                                .label("清除已完成")
+                                .ghost()
+                                .with_size(Size::Small)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.engine.clear_finished();
+                                    this.transfers = this.engine.snapshot();
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+        }
+
+        panel.into_any_element()
+    }
+
+    fn transfer_task_row(
+        &self,
+        task: TransferTask,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pct = match task.bytes_total {
+            Some(total) if total > 0 => {
+                (task.bytes_done as f32 / total as f32).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let bytes_label = match task.bytes_total {
+            Some(total) => format!(
+                "{} / {}",
+                format_size(task.bytes_done),
+                format_size(total)
+            ),
+            None => format_size(task.bytes_done),
+        };
+        let state_color = match task.state {
+            TransferState::Failed => theme.danger,
+            TransferState::Completed => theme.success,
+            _ => theme.muted_foreground,
+        };
+
+        let mut row = h_flex()
+            .id(("transfer-row", task.id.0))
+            .w_full()
+            .px_3()
+            .py(px(4.))
+            .gap_2()
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.list_head)
+            .text_size(tokens::text(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.foreground)
+                    .child(task.display_name.clone()),
+            )
+            .child(Progress::new().h(px(4.)).value(pct).w(px(80.)))
+            .child(
+                div()
+                    .w(px(96.))
+                    .flex_shrink_0()
+                    .text_color(theme.muted_foreground)
+                    .text_size(tokens::text(11.))
+                    .child(bytes_label),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(state_color)
+                    .child(task.state.label()),
+            );
+
+        // 操作按钮：活动态可取消，暂停/失败可继续（重试）
+        match task.state {
+            TransferState::Queued
+            | TransferState::Running
+            | TransferState::Waiting
+            | TransferState::Paused => {
+                row = row.child(
+                    Button::new(("transfer-cancel", task.id.0))
+                        .label("取消")
+                        .ghost()
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.engine.cancel(task.id);
+                            this.transfers = this.engine.snapshot();
+                            cx.notify();
+                        })),
+                );
+            }
+            TransferState::Failed => {
+                row = row.child(
+                    Button::new(("transfer-resume", task.id.0))
+                        .label("重试")
+                        .ghost()
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.engine.resume(task.id);
+                            this.transfers = this.engine.snapshot();
+                            cx.notify();
+                        })),
+                );
+            }
+            TransferState::Completed | TransferState::Cancelled => {}
+        }
+
+        if let Some(error) = &task.error {
+            row = row.child(
+                div()
+                    .text_color(theme.danger)
+                    .text_size(tokens::text(11.))
+                    .line_height(gpui::DefiniteLength::Fraction(1.4))
+                    .child(error.clone()),
+            );
+        }
+
+        row
     }
 
     /// 对象区状态条：「共 N 项」+ 翻页。固定钉在内容区底部（Finder 语义），
@@ -6822,6 +7075,13 @@ pub fn display_name(key: &str) -> &str {
         Some(i) => &trimmed[i + 1..],
         None => trimmed,
     }
+}
+
+/// 七牛目录占位对象：key 以 `/` 结尾（size=0，mimeType 为
+/// `application/qiniu-object-manager`）。下载必 404，无预览/打开/URL 语义；
+/// 交互上应与 CommonPrefix 一致：点击 = 下钻。
+fn is_directory_object(key: &str) -> bool {
+    key.ends_with('/')
 }
 
 fn preview_kind(key: &str) -> PreviewKind {
@@ -7175,6 +7435,16 @@ mod tests {
         let err = collect_folder_uploads(&path).unwrap_err();
         assert!(err.contains("不是目录"), "实际 {err}");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn is_directory_object_matches_trailing_slash_only() {
+        // 七牛目录占位对象 key 以 / 结尾；普通文件（含无扩展名）不算目录
+        assert!(is_directory_object("config/"));
+        assert!(is_directory_object("a/b/c/"));
+        assert!(!is_directory_object("config"));
+        assert!(!is_directory_object("a/b/file.txt"));
+        assert!(!is_directory_object("README"));
     }
 
     #[test]
