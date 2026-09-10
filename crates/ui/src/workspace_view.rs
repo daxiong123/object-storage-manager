@@ -25,17 +25,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Corner, Entity, ExternalPaths,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths,
     FocusHandle, Img, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
     ParentElement as _, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
     StatefulInteractiveElement as _, Styled, StyledImage as _, Window, anchored, deferred, div,
     img, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar,
-    button::Button, button::ButtonVariants as _, h_flex, input::Input, input::InputEvent,
-    input::InputState, progress::Progress, resizable::h_resizable, resizable::resizable_panel,
-    scroll::ScrollableElement, spinner::Spinner, v_flex,
+    ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
+    button::ButtonVariants as _, h_flex, input::Editor, input::EditorState, input::Input,
+    input::InputEvent, input::InputState, progress::Progress, resizable::h_resizable,
+    resizable::resizable_panel, scroll::ScrollableElement, spinner::Spinner, v_flex,
 };
 
 use object_storage_app::{AppServices, PersistedTransfer};
@@ -272,9 +272,9 @@ pub struct WorkspaceView {
     previewing: bool,
     /// 已下载到本地缓存、供 GPUI img 直接渲染的预览路径
     preview_path: Option<PathBuf>,
-    /// 文本预览内容；编辑器使用 GPUI InputState，不自建 WebView
+    /// 文本预览内容；编辑器使用 GPUI Kit EditorState，不自建 WebView
     preview_text: Option<String>,
-    text_editor: Option<Entity<InputState>>,
+    text_editor: Option<Entity<EditorState>>,
     /// Space 触发预览时，系统格式下载完成后自动打开 Quick Look
     preview_open_quicklook: bool,
     /// 文件名/预览按钮触发的应用内预览弹层。
@@ -1431,13 +1431,13 @@ impl WorkspaceView {
         self.object_menu_open = None;
         self.preview_overlay_open = false;
         self.details_overlay_open = true;
-        window.focus(&self.overlay_focus);
+        window.focus(&self.overlay_focus, cx);
         cx.notify();
     }
 
     fn close_details_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.details_overlay_open = false;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -2058,8 +2058,8 @@ impl WorkspaceView {
             .map(|object| syntax_language(&object.key))
             .unwrap_or("text");
         let editor = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor(language)
+            EditorState::new(window, cx)
+                .language(language)
                 .default_value(text)
         });
         // 订阅 Change：按键即重渲染，保存按钮的 dirty 禁用态实时刷新
@@ -2088,8 +2088,8 @@ impl WorkspaceView {
             .map(|object| syntax_language(&object.key))
             .unwrap_or("text");
         let editor = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor(language)
+            EditorState::new(window, cx)
+                .language(language)
                 .default_value(text)
         });
         cx.subscribe_in(&editor, window, |_, _, event: &InputEvent, _, cx| {
@@ -2314,7 +2314,7 @@ impl WorkspaceView {
 
     fn close_preview_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.preview_overlay_open = false;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -3033,7 +3033,7 @@ impl WorkspaceView {
     fn close_object_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.object_filter.take().is_some() {
             self.filtered_ix = None;
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
             cx.notify();
         }
     }
@@ -3059,7 +3059,7 @@ impl WorkspaceView {
     ) {
         // ⌘L 路径框与过滤条同处 toolbar 下方，共用 ObjectFilter context 的 Esc
         if self.path_input.take().is_some() {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
             cx.notify();
             return;
         }
@@ -3628,7 +3628,7 @@ impl WorkspaceView {
             return; // saving/error 等常规通知，不处理
         }
         self.add_modal = None;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         if done {
             self.load_accounts(cx);
         }
@@ -3754,13 +3754,7 @@ impl WorkspaceView {
                         .text_color(theme.muted_foreground)
                         .child(format!("{} · 可编辑文本", syntax_language(&object.key))),
                 )
-                .child(
-                    Input::new(&editor)
-                        .flex_1()
-                        .w_full()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(theme.mono_font_size),
-                )
+                .child(Editor::new(&editor).flex_1().w_full())
                 .into_any_element()
         } else if let Some(text) = self.preview_text.clone() {
             v_flex()
@@ -4396,7 +4390,7 @@ impl WorkspaceView {
 
     fn close_about_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.about_overlay_open = false;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -5031,7 +5025,7 @@ impl WorkspaceView {
             return;
         }
         self.about_overlay_open = true;
-        window.focus(&self.overlay_focus);
+        window.focus(&self.overlay_focus, cx);
         cx.notify();
     }
 
@@ -5063,7 +5057,7 @@ impl WorkspaceView {
             return;
         }
         self.settings_modal = None;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -5117,7 +5111,7 @@ impl WorkspaceView {
                         .await;
                     match result {
                         Ok(()) => {
-                            let _ = cx.update(|cx| cx.quit());
+                            cx.update(|cx| cx.quit());
                         }
                         Err(e) => {
                             this.update(cx, |this, cx| {
@@ -5140,7 +5134,7 @@ impl WorkspaceView {
                         .await;
                     match result {
                         Ok(()) => {
-                            let _ = cx.update(|cx| cx.quit());
+                            cx.update(|cx| cx.quit());
                         }
                         Err(e) => {
                             this.update(cx, |this, cx| {
@@ -5170,7 +5164,8 @@ impl WorkspaceView {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        // 关闭窗口（gpui 0.2.2 在 macOS 15 上的绕行方案，实测记录见 docs/notes/gpui-api-notes.md）：
+        // 关闭窗口（macOS 15 上的绕行方案，升级 gpui-pre 0.3.4 后仍保留；
+        // 实测记录见 docs/notes/gpui-api-notes.md）：
         //
         // 根因：macOS 15 上 NSWindow close 默认带窗口动画，而 gpui 的 MacWindow::drop 会在
         // close 后毫秒级 autorelease（dealloc），把动画中途杀死，窗口卡在可见状态——表现为
@@ -5320,7 +5315,7 @@ impl WorkspaceView {
         };
         let raw = editor.read(cx).value().to_string();
         self.path_input = None;
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         let trimmed = raw.trim();
         let prefix = if trimmed.is_empty() {
             None
@@ -5355,7 +5350,7 @@ impl WorkspaceView {
             return; // 过滤/选行等常规通知，不处理
         }
         self.palette = None;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -6048,7 +6043,7 @@ impl WorkspaceView {
                                 .with_size(Size::Small)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.path_input = None;
-                                    this.focus_handle.focus(window);
+                                    this.focus_handle.focus(window, cx);
                                     cx.notify();
                                 })),
                         )
@@ -6128,7 +6123,7 @@ impl WorkspaceView {
                                 // 冲突，菜单渲染不可见（点击 ⋯ 后无菜单弹出）。
                                 button.child(deferred(
                                     anchored()
-                                        .anchor(Corner::TopRight)
+                                        .anchor(Anchor::TopRight)
                                         .offset(point(px(0.), px(4.)))
                                         .snap_to_window_with_margin(px(8.))
                                         .child(self.render_top_more_menu(theme, cx)),
@@ -6647,7 +6642,7 @@ impl WorkspaceView {
                                             // 会随行号线性错位。
                                             el.child(deferred(
                                                 anchored()
-                                                    .anchor(Corner::TopRight)
+                                                    .anchor(Anchor::TopRight)
                                                     .offset(point(px(0.), px(4.)))
                                                     .snap_to_window_with_margin(px(8.))
                                                     .child(self.render_object_menu(theme, cx)),
@@ -6682,7 +6677,7 @@ impl WorkspaceView {
         let total_done: u64 = transfers.iter().map(|t| t.bytes_done).sum();
         let total_size: u64 = transfers.iter().filter_map(|t| t.bytes_total).sum();
         let overall_pct = if total_size > 0 {
-            (total_done as f32 / total_size as f32).clamp(0.0, 1.0)
+            (total_done as f32 / total_size as f32 * 100.0).clamp(0.0, 100.0)
         } else {
             0.0
         };
@@ -6703,7 +6698,9 @@ impl WorkspaceView {
                 this.transfers_expanded = !this.transfers_expanded;
                 cx.notify();
             }))
-            .when(has_running, |row| row.child(Spinner::new().with_size(Size::Small)))
+            .when(has_running, |row| {
+                row.child(Spinner::new().with_size(Size::Small))
+            })
             .child(
                 div()
                     .text_size(tokens::text(12.))
@@ -6715,17 +6712,19 @@ impl WorkspaceView {
                     }),
             )
             .child(div().h(px(4.)))
-            .child(Progress::new().h(px(4.)).value(overall_pct).flex_1())
+            .child(
+                Progress::new("transfer-overall-progress")
+                    .accessibility_label("总体传输进度")
+                    .h(px(4.))
+                    .value(overall_pct)
+                    .flex_1(),
+            )
             .child(
                 div()
                     .text_size(tokens::text(11.))
                     .text_color(theme.muted_foreground)
                     .child(if total_size > 0 {
-                        format!(
-                            "{} / {}",
-                            format_size(total_done),
-                            format_size(total_size)
-                        )
+                        format!("{} / {}", format_size(total_done), format_size(total_size))
                     } else {
                         format_size(total_done)
                     }),
@@ -6744,22 +6743,17 @@ impl WorkspaceView {
             }
             if !finished.is_empty() {
                 panel = panel.child(
-                    h_flex()
-                        .w_full()
-                        .justify_end()
-                        .px_3()
-                        .py_1()
-                        .child(
-                            Button::new("transfers-clear-finished")
-                                .label("清除已完成")
-                                .ghost()
-                                .with_size(Size::Small)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.engine.clear_finished();
-                                    this.transfers = this.engine.snapshot();
-                                    cx.notify();
-                                })),
-                        ),
+                    h_flex().w_full().justify_end().px_3().py_1().child(
+                        Button::new("transfers-clear-finished")
+                            .label("清除已完成")
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.engine.clear_finished();
+                                this.transfers = this.engine.snapshot();
+                                cx.notify();
+                            })),
+                    ),
                 );
             }
         }
@@ -6775,16 +6769,12 @@ impl WorkspaceView {
     ) -> impl IntoElement {
         let pct = match task.bytes_total {
             Some(total) if total > 0 => {
-                (task.bytes_done as f32 / total as f32).clamp(0.0, 1.0)
+                (task.bytes_done as f32 / total as f32 * 100.0).clamp(0.0, 100.0)
             }
             _ => 0.0,
         };
         let bytes_label = match task.bytes_total {
-            Some(total) => format!(
-                "{} / {}",
-                format_size(task.bytes_done),
-                format_size(total)
-            ),
+            Some(total) => format!("{} / {}", format_size(task.bytes_done), format_size(total)),
             None => format_size(task.bytes_done),
         };
         let state_color = match task.state {
@@ -6812,7 +6802,13 @@ impl WorkspaceView {
                     .text_color(theme.foreground)
                     .child(task.display_name.clone()),
             )
-            .child(Progress::new().h(px(4.)).value(pct).w(px(80.)))
+            .child(
+                Progress::new(("transfer-task-progress", task.id.0))
+                    .accessibility_label(format!("{} 的传输进度", task.display_name))
+                    .h(px(4.))
+                    .value(pct)
+                    .w(px(80.)),
+            )
             .child(
                 div()
                     .w(px(96.))
@@ -7257,7 +7253,7 @@ impl Render for WorkspaceView {
             // 焦点在弹层元素挂载后设置（mouse_down 里设置会被同一点击覆盖）
             if self.preview_needs_focus {
                 self.preview_needs_focus = false;
-                window.focus(&self.overlay_focus);
+                window.focus(&self.overlay_focus, cx);
             }
             root = root.child(self.render_preview_overlay(&theme, cx));
         }

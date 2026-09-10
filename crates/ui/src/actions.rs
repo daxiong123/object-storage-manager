@@ -58,16 +58,12 @@ actions!(
     ]
 );
 
-// 命令面板（⌘K，规范 §22）内部导航：仅通过 context "Palette" 生效（见 bind_keys），
-// 避免与 Input / List 等组件的同键位 Action 冲突。
-actions!(
-    cloud_storage,
-    [PaletteClose, PaletteSelectPrev, PaletteSelectNext,]
-);
-
 // 自建模态（添加账号等）的关闭：仅通过 context "AccountModal" 生效。
 // 输入框未处理 Esc 时会 propagate 到这里（与命令面板同一机制）。
 actions!(cloud_storage, [DismissModal]);
+
+// 命令面板必须一按 Esc 就关闭，覆盖 Command 默认的「有查询时先清空」。
+actions!(cloud_storage, [DismissCommandPalette]);
 
 // 重命名弹窗的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
 // 未设 clean_on_escape，Esc 由 Input escape() propagate 到这里。
@@ -96,10 +92,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-alt-s", ToggleSidebar, None),
         // 添加账号：仅 Workspace context 生效，避免模态/Input 聚焦时误触。
         KeyBinding::new("cmd-n", AddAccount, Some("Workspace")),
-        // 命令面板：⌘K 全局打开；↑↓/Esc 收窄到 context "Palette"——
-        // 无 context 的绑定按 keymap 深度规则会压过组件（如 Input）的同键绑定。
-        // 方向键能用的前提：单行 Input 只在 multi_line 下注册 MoveUp/MoveDown，
-        // 未处理时 keymap 会沿绑定列表落到这里的 PaletteSelectPrev/Next。
+        // 命令面板内部过滤、↑↓/Enter 由 GPUI Kit Command 负责；Esc 见下方覆盖绑定。
         KeyBinding::new("cmd-u", UploadFiles, None),
         KeyBinding::new("cmd-r", Refresh, None),
         // 规范 §43：⌘⌫ 删除；不绑 Delete，避免误触。面板打开时 handler 直接 return。
@@ -125,9 +118,8 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 ⌘O：用默认应用打开选中对象。
         KeyBinding::new("cmd-o", OpenObject, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
-        KeyBinding::new("escape", PaletteClose, Some("Palette")),
-        KeyBinding::new("up", PaletteSelectPrev, Some("Palette")),
-        KeyBinding::new("down", PaletteSelectNext, Some("Palette")),
+        // ui::init 晚于 gpui_component::init，后注册的同 context 绑定优先。
+        KeyBinding::new("escape", DismissCommandPalette, Some("Command")),
         KeyBinding::new("escape", DismissModal, Some("AccountModal")),
         // 设置弹窗与添加账号共用 DismissModal action，context 不同：
         // 保存进行中由 SettingsModal::close 自身拒绝关闭。
