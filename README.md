@@ -21,7 +21,17 @@ brew update
 brew upgrade --cask daxiong123/tap/cloudstorage
 ```
 
-要求 macOS 14+、Apple Silicon。当前发布包使用 ad-hoc 签名且尚未经过 Apple 公证；若首次启动被 macOS 拦截，请在「系统设置 → 隐私与安全性」中选择「仍要打开」。
+要求 macOS 14+、Apple Silicon。
+
+### 首次启动
+
+当前发布包使用 ad-hoc 签名且尚未经过 Apple 公证。安装完成后，可以用以下命令仅移除 CloudStorage 的 Gatekeeper 隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/CloudStorage.app"
+```
+
+请仅对通过上述 Homebrew tap 或本项目 GitHub Releases 获取的应用执行该命令。也可以不执行命令，首次启动被拦截时在「系统设置 → 隐私与安全性」中选择「仍要打开」。
 
 也可以从 [GitHub Releases](https://github.com/daxiong123/object-storage-manager/releases) 下载应用压缩包，解压后将 `CloudStorage.app` 移入「应用程序」。
 
