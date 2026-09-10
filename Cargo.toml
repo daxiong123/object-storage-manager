@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/zhangweijian/object-storage-manager"
+repository = "https://github.com/daxiong123/object-storage-manager"
 
 [workspace.dependencies]
 # --- UI（macOS Only，GPUI 固定栈，见 agents.md §3）---

@@ -88,6 +88,16 @@ cargo build -p object-storage-desktop
 cargo build --release
 ```
 
+## Homebrew 安装
+
+要求 macOS 14+、Apple Silicon：
+
+```bash
+brew install --cask daxiong123/tap/cloudstorage
+```
+
+当前发布包使用 ad-hoc 签名且尚未经过 Apple 公证；若首次启动被 macOS 拦截，请在「系统设置 → 隐私与安全性」中选择「仍要打开」。
+
 常用验证：
 
 ```bash
