@@ -10,7 +10,6 @@ repository.workspace = true
 serde_json = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
-gpui-component-assets = { workspace = true }
 objc = "0.2"
 raw-window-handle = "0.6"
 object-storage-app = { workspace = true }
@@ -21,3 +20,7 @@ object-storage-transfer = { workspace = true }
 object-storage-persistence = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui-component = { workspace = true, features = ["test-support"] }
