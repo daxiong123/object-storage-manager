@@ -93,7 +93,9 @@ cargo build --release
 要求 macOS 14+、Apple Silicon：
 
 ```bash
-brew install --cask daxiong123/tap/cloudstorage
+brew trust --cask daxiong123/object-storage-manager/cloudstorage
+brew tap daxiong123/object-storage-manager https://github.com/daxiong123/object-storage-manager.git
+brew install --cask daxiong123/object-storage-manager/cloudstorage
 ```
 
 当前发布包使用 ad-hoc 签名且尚未经过 Apple 公证；若首次启动被 macOS 拦截，请在「系统设置 → 隐私与安全性」中选择「仍要打开」。

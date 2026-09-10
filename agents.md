@@ -136,7 +136,7 @@ crates/
 
 - 主 Target：`aarch64-apple-darwin`；`cargo build --release`。
 - CI 只跑 macOS ARM64：`cargo fmt --check` → `cargo clippy --all-targets` → `cargo test` → `cargo build --release` → App Bundle → Code Sign → Notarize。
-- 发布：标准 `.app` Bundle（Info.plist + `.icns`）→ Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由 `daxiong123/homebrew-tap` 分发。初期不做 App Store Sandbox。
+- 发布：标准 `.app` Bundle（Info.plist + `.icns`）→ Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由当前仓库的 `Casks/cloudstorage.rb` 分发。初期不做 App Store Sandbox。
 - 开发环境只保证 macOS + Apple Silicon，不为 Linux CI / Windows Developer 加 Workaround。
 
 ## 10. 工程纪律
