@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme, Theme, h_flex, input::Input, input::InputEvent, input::InputState, kbd::Kbd,
@@ -26,6 +26,7 @@ use crate::actions::{
     PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject, RevealInFinder, SaveTextObject,
     SelectObjectAll, ToggleSidebar, UploadFiles, UploadFolder,
 };
+use crate::overlay;
 use crate::tokens;
 
 /// 自定义命令处理器（无键位提示）。
@@ -292,7 +293,7 @@ impl CommandPaletteView {
                 div()
                     .px_3()
                     .py_4()
-                    .text_size(tokens::text(13.))
+                    .text_size(tokens::body())
                     .text_color(theme.muted_foreground)
                     .child("无匹配命令"),
             );
@@ -315,14 +316,21 @@ impl CommandPaletteView {
                     .id(("palette-row", row_ix))
                     .mx_1()
                     .px_3()
-                    .py(px(6.))
-                    .rounded(px(6.))
+                    .py(tokens::row_pad_y())
+                    // 同心圆角：卡片 radius_lg()=8 − mx_1 内缩 4 = 4
+                    .rounded(tokens::radius_nested(px(4.)))
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .text_size(tokens::text(13.))
-                    .when(selected, |row| row.bg(theme.accent))
-                    .hover(|row| row.bg(theme.list_hover))
+                    .text_size(tokens::body())
+                    // 选中格用 theme.selection（≈ 侧栏 sidebar_accent 的观感）；
+                    // **不要用 list_active**：gpui-component 的 apply_config 会把
+                    // list_active/table_active 的 alpha 压到 ≤0.2（schema.rs:637），
+                    // 我们的源色是极淡靛蓝，压完叠在白底上只剩约 2% 差异，
+                    // 键盘光标实际看不见。hover 只给未选中行——否则鼠标停在
+                    // 选中行上会把选中色替换成中性 hover 灰。
+                    .when(selected, |row| row.bg(theme.selection))
+                    .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.selected = row_ix;
                         this.execute_selected(window, cx);
@@ -338,27 +346,18 @@ impl CommandPaletteView {
 impl Render for CommandPaletteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        // 水平居中；顶部偏移 96px，接近 Spotlight 的视觉比例。
-        let viewport = window.viewport_size();
-        let card_w = px(560.);
-        let left = (viewport.width - card_w) / 2.;
 
-        v_flex()
+        // 水平居中与「顶部偏移 96px、接近 Spotlight 的比例」由遮罩承担
+        // （render_palette_overlay 里 mask().justify_start().pt(...)）——
+        // 面板自己不算 left：手算 (viewport - card_w)/2 在窗口比卡片窄时
+        // 会得到负值，卡片直接压出窗口边缘。
+        overlay::surface(&theme)
             .key_context("Palette")
             .on_action(cx.listener(Self::handle_select_prev))
             .on_action(cx.listener(Self::handle_select_next))
             .on_action(cx.listener(Self::handle_close))
-            // 卡片内点击不冒泡到遮罩（否则点卡片会关闭面板）。
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .absolute()
-            .left(left)
-            .top(px(96.))
-            .w(card_w)
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(8.))
-            .shadow_lg()
+            .w_full()
+            .max_w(px(560.))
             .overflow_hidden()
             .child(
                 h_flex()
@@ -378,7 +377,7 @@ impl Render for CommandPaletteView {
                     .py_1()
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(tokens::text(11.))
+                    .text_size(tokens::caption())
                     .text_color(theme.muted_foreground)
                     .child("↑↓ 选择 · ↵ 执行 · Esc 关闭"),
             )

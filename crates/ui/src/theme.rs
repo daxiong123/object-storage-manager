@@ -27,7 +27,7 @@
 
 use std::sync::{OnceLock, RwLock};
 
-use gpui::{App, SharedString};
+use gpui::{App, Hsla, SharedString};
 use gpui_component::{Theme, ThemeConfig, ThemeMode, highlighter::HighlightThemeStyle};
 use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings};
 
@@ -395,6 +395,14 @@ fn config(
         c.ring = Some(hex(p.ring));
         c.sidebar_accent = Some(hex(p.sidebar_accent));
         c.sidebar_accent_foreground = Some(hex(p.sidebar_accent_foreground));
+        // ⚠️ gpui-component 的 apply_config 会强制压这三个字段的 alpha
+        // （schema.rs 末尾）：list_active / table_active ≤ 0.2，selection ≤ 0.3。
+        // 这里写的是不透明色，实际渲染是它们按上述 alpha 叠在底色上——
+        // list_active 源色 l=0.925 太淡，压到 0.2 后叠白底只剩约 2% 差异，
+        // 选中态肉眼不可见（实测 249,249,252 vs 白 255,255,255）。
+        // 所以**列表选中态一律用 `selection`**（源色 l=0.80，压到 0.3 约
+        // (229,232,245)，与侧栏不透明的 `sidebar_accent` 观感一致），
+        // 不要用 list_active / table_active 做选中底色。
         c.list_active = Some(hex(p.list_active));
         c.list_active_border = Some(hex(p.list_active_border));
         c.table_active = Some(hex(p.table_active));
@@ -408,6 +416,24 @@ fn config(
         cfg
     }
     build(mode, name, p, prefs)
+}
+
+/// 图片描边：`img()` 用的 1px 内描边取色。
+///
+/// 亮色纯黑 10%、暗色纯白 10%——**刻意不参与上面的冷灰中性色族（hue 225）**。
+/// 带色相的描边会吸附图片下方的底色，在图片边缘看起来像脏边；它也不能取
+/// accent / primary，描边是中性的边缘分隔线，不是主题元素。这两条都容易在
+/// 「统一色族」时被顺手改掉，所以在此写明。
+///
+/// 之所以是模块级函数而不是 `Palette` 字段：`ThemeConfigColors` 是
+/// gpui-component 的固定字段集，没有图片描边这一位，无法经 `ThemeConfig`
+/// 下发；放在这里仍然是「颜色只在 theme.rs 定义」。
+pub fn image_outline(mode: ThemeMode) -> Hsla {
+    if mode.is_dark() {
+        gpui::hsla(0., 0., 1., 0.10)
+    } else {
+        gpui::hsla(0., 0., 0., 0.10)
+    }
 }
 
 /// 代码高亮主题（编辑器底/前景/活动行/行号 + 常用语法 token）。
@@ -607,6 +633,40 @@ mod tests {
         }
     }
 
+    /// 选中态能否看见，取决于「源色明度 × 库强制的 alpha 上限」：
+    /// gpui-component 的 `apply_config` 把 list_active / table_active 的 alpha
+    /// 压到 ≤0.2、selection 压到 ≤0.3（schema.rs 末尾），叠加后与底色的明度差
+    /// 小于约 5% 就肉眼不可见。
+    ///
+    /// 这正是踩过的坑：`list_active` 源色 l=0.925，在 0.2 档只差 1.5%
+    /// （实测渲染 249,249,252 对白底 255,255,255），对象列表与命令面板的
+    /// 选中态形同不存在。现在选中底色统一用 `selection`（0.3 档 → 约 6%，
+    /// 实测 229,232,245），与侧栏不透明的 `sidebar_accent` 观感一致。
+    #[test]
+    fn selection_tint_survives_library_alpha_clamp() {
+        const LIST_ACTIVE_CLAMP: f32 = 0.2;
+        const SELECTION_CLAMP: f32 = 0.3;
+        const MIN_VISIBLE_DELTA: f32 = 0.05;
+
+        for (name, p) in [("light", light_palette()), ("dark", dark_palette())] {
+            let base_l = p.background[2];
+            let selection_delta = SELECTION_CLAMP * (p.selection[2] - base_l).abs();
+            assert!(
+                selection_delta >= MIN_VISIBLE_DELTA,
+                "{name}: selection 叠加后明度差仅 {selection_delta:.3}，选中态会看不见"
+            );
+
+            // 反例即记录本身：list_active 在 0.2 档下确实不可见，不能拿来做
+            // 选中底色。若本断言失败，说明库的 clamp 或源色变了——此时应
+            // 重新评估选中色，而不是把它改回 list_active。
+            let list_active_delta = LIST_ACTIVE_CLAMP * (p.list_active[2] - base_l).abs();
+            assert!(
+                list_active_delta < MIN_VISIBLE_DELTA,
+                "{name}: list_active 变得可见了（{list_active_delta:.3}）——库 clamp 或源色已变，需重新判断选中色"
+            );
+        }
+    }
+
     #[test]
     fn row_hover_is_neutral_not_indigo() {
         // hover 是中性位置反馈（hue 225），选中才是 indigo 染色（hue 233）——
@@ -717,5 +777,23 @@ mod tests {
             );
             assert_eq!(config.mono_font_size, Some(15.0));
         }
+    }
+
+    #[test]
+    fn image_outline_is_neutral_black_or_white() {
+        // 图片描边必须中性（饱和度为 0）且只有 10% 不透明度：带色相会吸附
+        // 图片下方的底色，边缘看起来像脏边；太不透明则会压过图片本身。
+        let light = image_outline(ThemeMode::Light);
+        assert_eq!(light.s, 0., "亮色描边不得有饱和度");
+        assert_eq!(
+            light.l, 0.,
+            "亮色描边必须是纯黑，不能用近黑灰（slate/zinc 一类）"
+        );
+        assert!((light.a - 0.10).abs() < 1e-6, "alpha 应为 0.10");
+
+        let dark = image_outline(ThemeMode::Dark);
+        assert_eq!(dark.s, 0., "暗色描边不得有饱和度");
+        assert_eq!(dark.l, 1., "暗色描边必须是纯白");
+        assert!((dark.a - 0.10).abs() < 1e-6, "alpha 应为 0.10");
     }
 }

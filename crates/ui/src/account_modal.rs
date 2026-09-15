@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, Styled, Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable as _, Size, Theme, button::Button,
@@ -25,6 +25,7 @@ use object_storage_app::AppServices;
 use object_storage_domain::ProviderKind;
 
 use crate::actions::DismissModal;
+use crate::overlay;
 use crate::tokens;
 
 pub struct AddAccountModal {
@@ -166,7 +167,7 @@ impl AddAccountModal {
             .gap_1()
             .child(
                 div()
-                    .text_size(tokens::text(12.))
+                    .text_size(tokens::label())
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.muted_foreground)
                     .child(label),
@@ -174,7 +175,7 @@ impl AddAccountModal {
             .child(Input::new(input))
             .children(hint.map(|h| {
                 div()
-                    .text_size(tokens::text(11.))
+                    .text_size(tokens::caption())
                     .text_color(theme.muted_foreground)
                     .child(h)
             }))
@@ -188,9 +189,9 @@ impl AddAccountModal {
             .gap_2()
             .px_2()
             .py_1()
-            .rounded(px(6.))
+            .rounded(tokens::radius())
             .text_color(theme.danger)
-            .text_size(tokens::text(12.))
+            .text_size(tokens::label())
             .child(Icon::new(IconName::TriangleAlert))
             .child(div().truncate().child(error.clone()))
             .into_any_element()
@@ -232,24 +233,38 @@ impl Render for AddAccountModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
 
-        v_flex()
+        overlay::surface(&theme)
             .key_context("AccountModal")
             .on_action(cx.listener(Self::handle_dismiss))
-            // 点击卡片内部不冒泡到遮罩（否则会误关模态）。
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w(px(440.))
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(8.))
-            .shadow_lg()
+            .w_full()
+            .max_w(px(440.))
             .p_4()
             .gap_3()
+            // 标题栏：标题左、关闭按钮右（弹层规范，与其余 6 个弹层一致；
+            // 标题字号同用 tokens::title()，别在这里退回 heading()）
             .child(
-                div()
-                    .text_size(tokens::text(15.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("添加账号"),
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(tokens::title())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("添加账号"),
+                    )
+                    .child(
+                        Button::new("close-account-modal")
+                            .icon(Icon::new(IconName::Close))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .tooltip("关闭")
+                            .disabled(self.saving)
+                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                    ),
             )
             .child(
                 h_flex()

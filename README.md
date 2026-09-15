@@ -74,11 +74,33 @@ crates/
   transfer/         Transfer Engine
   persistence/      SQLite / settings / state
   macos/            Keychain、系统事件、Quick Look、Clipboard、通知等
-  preview/          预览相关能力
-  common/           小型共享工具
-```
+   preview/          预览相关能力
+   common/           小型共享工具
+ ```
 
-## 本地开发
+ ## 安装（Homebrew）
+
+ 应用以 Homebrew cask 形式发布，安装命令：
+
+ ```bash
+ brew install daxiong123/tap/cloudstorage
+ ```
+
+ 如果 Gatekeeper 提示「无法验证开发者」，在「系统设置 → 隐私与安全性」中点击「仍要打开」，
+ 或安装时跳过 quarantine：
+
+ ```bash
+ brew install --cask --no-quarantine daxiong123/tap/cloudstorage
+ ```
+
+ 说明：
+
+ - 当前发行产物为 ad-hoc 签名，正式发布将改用 Apple Developer ID 签名与公证（届时无需上述步骤）。
+ - 应用产物通过 GitHub Releases 分发，cask 定义位于 `Casks/cloudstorage.rb`。
+ - 手动打包可运行 `./scripts/build-app.sh`（产物为 `dist/CloudStorage-{版本}-macos-{架构}.zip`，脚本会输出 sha256）。
+ - 卸载：`brew uninstall --cask cloudstorage`（数据留在 `~/Library/Application Support/CloudStorage/`，可用 `brew zap` 一并清理）。
+
+ ## 本地开发
 
 要求：macOS 14+，Apple Silicon 优先。
 
