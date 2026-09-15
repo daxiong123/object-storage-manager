@@ -6,13 +6,14 @@ members = ["crates/*"]
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/zhangweijian/object-storage-manager"
+repository = "https://github.com/daxiong123/object-storage-manager"
 
 [workspace.dependencies]
 # --- UI（macOS Only，GPUI 固定栈，见 agents.md §3）---
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+gpui = { package = "gpui-pre", version = "0.3.1" }
+gpui-platform = { package = "gpui-pre-platform", version = "0.3.1", features = ["font-kit", "runtime_shaders"] }
+gpui-component = { version = "0.6.1", features = ["tree-sitter"] }
+gpui-kit-assets = "0.6.1"
 
 # --- 基础 ---
 anyhow = "1"

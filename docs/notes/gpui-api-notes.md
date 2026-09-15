@@ -1,13 +1,13 @@
-# gpui 0.2.2 / gpui-component 0.5.1 API 笔记（已验证）
+# gpui-pre 0.3.4 / gpui-component 0.6.1 API 笔记（已验证）
 
 > 本文记录**在源码中核实过**的 API 事实与陷阱，供后续开发直接引用，避免凭记忆猜签名。
 > 核对基准（本地 registry 源码，grep 不猜）：
-> - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/`
-> - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-component-0.5.1/`
+> - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-0.3.4/`
+> - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-component-0.6.1/`
 >
 > 版本固定于 crates.io 正式版，禁止换 git 依赖。升级版本时必须重新核对本文每一条。
 
-## gpui 0.2.2
+## gpui-pre 0.3.4
 
 ### 类型与转换
 - **没有 blanket `From<E: IntoElement> for AnyElement`**。把具体元素塞进接受 `AnyElement` 的
@@ -29,14 +29,18 @@
   窗口内要拦截 Quit（弹确认）应在视图 `.on_action` 处理，不要依赖全局先跑。
 - `App::quit()` 在 app.rs:749。
 - `Window::remove_window()` 在 window.rs:1375（⌘W 关窗口用）。
-- `Window::focus(&FocusHandle)` 在 window.rs:1386；open_window 回调里给根视图设置初始焦点，
+- `Window::focus(&FocusHandle, cx)`；open_window 回调里给根视图设置初始焦点，
   菜单 Action 才能沿焦点链派发到视图。
+- `Application::new()` 已移除；macOS 入口使用 `gpui-pre-platform` 的
+  `gpui_platform::application()`，并保留 `font-kit` / `runtime_shaders` feature。
+- `AsyncApp::update` 直接返回闭包结果，不再返回 `Result`，调用处不要追加 `?`。
+- 浮层锚点枚举由 `Corner` 更名为 `Anchor`。
 
 ### 文件对话框：必须走 gpui 平台 API，禁止自建 runModal（重要，有闪退案例）
 
 **症状**：在 gpui 事件处理器（on_click / on_action 监听器）里同步调 NSSavePanel 的
 `runModal` → 面板能弹出、也能选目录，但确定/取消瞬间闪退。
-日志：`thread 'main' panicked at gpui-0.2.2/src/app.rs:676:39: RefCell already borrowed`
+历史日志：`thread 'main' panicked at gpui-0.2.2/src/app.rs:676:39: RefCell already borrowed`
 随后 `failed to initiate panic, error 3, aborting`。
 
 **根因**：事件处理器本身运行在 gpui 的 `App` RefCell 借用作用域内；`runModal` 起
@@ -92,7 +96,8 @@ window.remove_window();
 
 ### 关闭窗口：失败方案存档（勿重复尝试）
 
-以下方案全部实测失败，记录以避免踩坑（2025 年 macOS 15 / gpui 0.2.2）：
+以下方案全部实测失败，记录以避免踩坑（2025 年 macOS 15 / 当时 gpui 0.2.2；
+升级 0.3.4 后仍需保留规避，直到真实运行验证上游已修复）：
 
 | # | 方案 | 结果 |
 |---|---|---|
@@ -112,7 +117,7 @@ window.remove_window();
 - 排查此类问题用 CGWindowList（`CGWindowListCopyWindowInfo` + `.optionOnScreenOnly`，
   swift 一段脚本即可，无需屏幕录制权限）+ eprintln trace + `exec-launch` 重定向。
 - `screencapture` 需要屏幕录制权限（终端宿主常没有），CGWindowList 不需要。
-- gpui 0.2.2 无 AX 树，无法用 Accessibility 检查 UI。
+- gpui-pre 0.3.4 已接入 AccessKit macOS 无障碍支持；是否足以覆盖本项目 UI 自动化需另行实测。
 - CGEvent `postToPid` 可在无前台权限时向指定进程注入键盘事件（菜单/快捷键自动化测试用）。
 
 ### 确认对话框：必须走 `Window::prompt`（NSAlert sheet + oneshot）
@@ -140,8 +145,8 @@ mousemove→`cx.notify`。系统拖入前一帧 `active_drag` 为空，不注册
 ### raw-window-handle（获取 NSWindow）
 
 - gpui **不重导出** raw-window-handle；需要时自己加依赖 `raw-window-handle = "0.6"`
-  （与 gpui 0.2.2 的版本一致，trait 才能对上）。
-- gpui 0.2.2 的 `Window` 实现 `HasWindowHandle`（window.rs:4845）——用**新 API**：
+  （与 gpui-pre 0.3.4 的版本一致，trait 才能对上）。
+- gpui-pre 0.3.4 的 `Window` 实现 `HasWindowHandle`——用**新 API**：
 
 ```rust
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -170,18 +175,15 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 - `bool::then(|| self.render(&mut cx))` 这类写法会触发 E0524（两个闭包同时捕获 `&mut cx`）。
   改用普通 `if` 语句分分支构造。
 
-## gpui-component 0.5.1
+## gpui-component 0.6.1
 
-### 根重导出缺口
-- 根 crate 重导出了 `icon::*` / `styled::*` / `theme::*` / `title_bar::*` / `Root`，
-  **但没重导出 `Button` 和 `h_resizable`**。要写完整路径：
+### 导入路径
+- `Button` 和 `h_resizable` 继续使用完整路径：
   `gpui_component::button::Button`（+ `button::ButtonVariants`）、
   `gpui_component::resizable::h_resizable` / `resizable_panel`。
 
 ### Sidebar（本仓库弃用）
-- `Sidebar` 是固定 `DEFAULT_WIDTH px(255.)` / `COLLAPSED_WIDTH px(48.)`，构造为
-  `Sidebar::new(side)`，实现 `Styled` 但 `refine_style` 在 collapsed 覆盖**之前**应用——
-  自定义宽度会被覆盖。与规范 180/220/360 + 44px rail 冲突，故自建视图。
+- 本项目需要 180/220/360 + 44px rail，与组件默认布局约束不同，故继续自建视图。
   自建时用它的 primitives（Icon / theme tokens / Button）保持视觉一致。
 
 ### Resizable
@@ -191,10 +193,12 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
   需要多套互不干扰的布局（如 边栏开/关 各自记忆宽度）时用**不同 group id**。
 - resize handle 挂在每个面板的 LEFT 边，作用目标是 `panel_ix - 1`（即拖左边缘改前一个面板宽）。
   当前只保留左侧栏 + 内容区两列布局；不要再新增额外的详情列 resizable 面板。
+- 0.6.1 已修复 resize 时的闪烁，升级即可受益，无需应用层补丁。
 
 ### 弹出层（anchored / deferred / 焦点）
 - 浮层标准写法（对齐 gpui-component select/popup_menu）：
-  `deferred(anchored().anchor(corner).offset(...).snap_to_window_with_margin(...).child(<菜单卡片>))`。
+  `deferred(anchored().anchor(anchor).offset(...).snap_to_window_with_margin(...).child(<菜单卡片>))`，
+  锚点类型是 `gpui::Anchor`。
   **不要在 anchored 的 child 里再套 `div().absolute()`**——absolute 与 anchored 锚定机制
   冲突，菜单渲染不可见（曾导致「更多操作」菜单点击后无菜单弹出）。
 - 行内弹出菜单锚定：**必须按触发点的窗口坐标绝对定位**，即
@@ -220,6 +224,26 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
   `clean_on_escape`（默认 false）时会 `cx.propagate()`，Esc 能继续沿焦点链派发到
   Overlay context——编辑器里的 Esc 关弹层因此可用，无需额外处理。
 
+### Input / Editor
+- 0.6.1 将单行 `Input`、多行 `Textarea`、代码 `Editor` 分成独立组件。
+- 文本对象预览/编辑使用 `EditorState::new(...).language(...).default_value(...)` +
+  `Editor::new(...)`；普通表单继续用 `InputState` + `Input`。
+- 当前只启用 `tree-sitter` 基础 feature（保留 JSON 高亮）；没有真实格式需求前不引入整套语法 grammar。
+
+### Command
+- 命令面板使用 `Command` + `CommandState`；组件原生提供大小写不敏感过滤、关键词、
+  虚拟列表、↑↓/Enter/Esc、滚动定位、无障碍 listbox 语义和 Action 键位提示。
+- 本项目命令执行仍由 `on_confirm(IndexPath)` 回调编排：条目本身不直接挂 Action，先关闭面板
+  再沿现有焦点链派发共享 Action；动态 Bucket 命令继续经 WeakEntity 直调，避免失效焦点。
+- 组件默认 Esc 在查询非空时先清空；项目契约要求一按即关，因此 `ui::init` 在同一个
+  `Command` context 后注册 `DismissCommandPalette` 覆盖绑定（GPUI 同深度后注册者优先）。
+- UI crate 的 dev-dependency 启用 0.6.1 `test-support`；headless 测试用
+  `TestAppContext` + `simulate_keystrokes("enter")` 验证过滤和动态命令确认链路。
+
+### Progress
+- `Progress::new(id)` 必须提供稳定 ElementId；`.value(...)` 的范围是 **0..=100**，不是 0..=1。
+- 传输进度附带 `accessibility_label`；0.6.1 内建平滑进度过渡，无需手写动画。
+
 ### 布局（flex 高度约束）
 - **row 容器不拉伸子元素高度**：`div()` 默认 align 非 stretch，column 子容器（如
   滚动列表 `v_flex().overflow_y_scroll()`）必须显式 `.h_full()` 约束高度。缺省时
@@ -238,9 +262,9 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 ### 主题与图标
 - Theme tokens（theme_color.rs:123+）：`sidebar` / `sidebar_foreground` / `sidebar_border` /
   `sidebar_accent` 等可直接用。
-- `IconName` 有：PanelLeft/Open/Close、Globe、FolderOpen、Star、
-  Settings、Inbox 等；**没有** Cloud / HardDrive / History（需要时从 Lucide 补 SVG，
-  只用 Lucide 一家，禁止混用图标集）。
+- 完整 Lucide 目录由 `gpui-kit-assets::IconName` 共享；组件兼容枚举仍可用。
+- 自有 Lucide SVG 直接 `Icon::default().data(include_bytes!(...))`，不再为路径维护组合
+  `AssetSource`；默认图标资产源仍在应用入口设为 `gpui_kit_assets::Assets`。
 - `Size` 枚举：XSmall / Small / Medium（默认）/ Large；`Sizable::with_size(Size::Small)`。
 
 ### 初始化顺序
@@ -281,6 +305,12 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
   的方法**（`key_context` / `child` 等都要在传入前接完）。所以动画必须包在链式装配
   的**最后一步**：本仓库统一用 `overlay::fade_in(id, el)`（overlay.rs）。
 - `ElementId` 可由 `&'static str` 转换（`impl From<&'static str> for ElementId`）。
+- **行号索引（已在 gpui-pre 0.3.4 上逐条复核）**：`Animation` 构造
+  `elements/animation.rs:33/44/50/60`（`new`/`repeat`/`repeat_synced`/`with_easing`，
+  仍**无**完成回调）；`AnimationExt` blanket impl `elements/animation.rs:158`；
+  组透明度 `elements/div.rs:2489` → `window.rs:3786-3798`
+  （`element_opacity = previous * opacity`）；动画 state 卸载即丢弃
+  `window.rs:1125`（`accessed_element_states` 只迁移本帧访问过的 key）。
 
 ## 几何与绘制（已核实）
 
@@ -306,3 +336,11 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
   （列表行）或不透明的 `sidebar_accent`（侧栏语义面）。
 - **`ThemeConfigColors` 是库里的固定字段集，没有扩展位**：想加自定义色无法经
   `ThemeConfig` 下发，只能在 `theme.rs` 另设语义访问器（如 `theme::image_outline`）。
+- **行号索引（已在 gpui-pre 0.3.4 / gpui-component 0.6.1 上逐条复核）**：
+  `ContentMask` 只有 `bounds` `window.rs:2081-2084`；`Style::paint` 先
+  `continuation` 后边框 `style.rs:742` / `:744`（`is_border_visible` 在 `:764`）；
+  `Img` 把自身 `corner_radii` 传给 `paint_image` `elements/img.rs:494`；
+  `Icon` 尺寸解析 `icon.rs:169-187`（`has_base_size` 为假时取继承字号，
+  `self.size` 分支在后覆盖；`Icon::data(&[u8])` 在 `:136`）；
+  alpha clamp `theme/schema.rs:1039-1056`（list/table ≤0.2、selection ≤0.3，
+  库自带断言在 `:1300`）。

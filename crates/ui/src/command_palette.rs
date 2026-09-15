@@ -1,47 +1,39 @@
 //! 命令面板（⌘K，规范 §22）。
 //!
-//! 自建实现（gpui-component 0.5.1 无 command_palette 模块）。键盘机制依赖
-//! gpui 0.2.2 keymap 语义（源码验证，详见 docs/notes/gpui-api-notes.md）：
-//! - 单行 `InputState` 只在 multi_line 下注册 MoveUp/MoveDown 的 on_action，
-//!   因此 context "Palette" 的 "up"/"down" 绑定能接住方向键做行选择；
-//! - 输入框 Esc 走 `escape()`：未设 clean_on_escape → `cx.propagate()`
-//!   → context "Palette" 的 PaletteClose 接住；
-//! - 回车通过订阅 `InputEvent::PressEnter` 执行选中命令。
+//! 过滤、虚拟列表、键盘导航与无障碍语义由 GPUI Kit `Command` 提供；
+//! 本层只保留应用命令及动态 Bucket 跳转的编排。
 
 use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, prelude::FluentBuilder as _, px,
+    Action, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, SharedString, Styled as _, Window, div,
+    px,
 };
 use gpui_component::{
-    ActiveTheme, Theme, h_flex, input::Input, input::InputEvent, input::InputState, kbd::Kbd,
-    v_flex,
+    ActiveTheme as _, command::Command, command::CommandItem, command::CommandState, h_flex,
+    kbd::Kbd, v_flex,
 };
 
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DownloadObject, FocusPath, NavigateBack,
-    NavigateForward, OpenAbout, OpenObject, OpenSettings, PaletteClose, PaletteSelectNext,
-    PaletteSelectPrev, PreviewObject, Quit, Refresh, RenameObject, RevealInFinder, SaveTextObject,
-    SelectObjectAll, ToggleSidebar, UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissCommandPalette, DownloadObject,
+    FocusPath, NavigateBack, NavigateForward, OpenAbout, OpenObject, OpenSettings, PreviewObject,
+    Quit, Refresh, RenameObject, RevealInFinder, SaveTextObject, SelectObjectAll, ToggleSidebar,
+    UploadFiles, UploadFolder,
 };
-use crate::overlay;
 use crate::tokens;
 
-/// 自定义命令处理器（无键位提示）。
+/// 自定义命令处理器（用于动态 Bucket 跳转，无键位提示）。
 pub type PaletteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// 命令种类：分发 gpui Action（键位提示自动从绑定表反查），或直接执行闭包。
+/// 命令种类：分发共享 gpui Action，或直接执行动态闭包。
 pub enum CommandKind {
     Action(Box<dyn Action>),
     Handler(PaletteHandler),
 }
 
-/// 命令面板条目（规范 §22：与菜单/快捷键共享同一 Action）。
 pub struct PaletteCommand {
     pub title: SharedString,
-    /// 额外匹配关键词（英文/拼音别名）。
     pub keywords: Vec<SharedString>,
     pub kind: CommandKind,
 }
@@ -66,53 +58,32 @@ impl PaletteCommand {
         }
     }
 
-    /// 追加匹配关键词（字面量，'static）。
     pub fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
-        self.keywords = keywords.iter().map(|k| SharedString::from(*k)).collect();
+        self.keywords = keywords.iter().map(|keyword| (*keyword).into()).collect();
         self
     }
 }
 
-/// 命令面板视图。WorkspaceView 收到 OpenCommandPalette 时创建，
-/// 关闭（open=false）后由 WorkspaceView 的 observe 丢弃实体并归还焦点；
-/// 因此每次打开都是全新状态（查询词与选中行自动重置）。
 pub struct CommandPaletteView {
-    input: Entity<InputState>,
+    state: Entity<CommandState>,
     commands: Vec<PaletteCommand>,
-    /// 命中过滤的下标（指向 commands）。
-    filtered: Vec<usize>,
-    /// 当前选中行在 filtered 中的位置。
-    selected: usize,
-    last_query: String,
     open: bool,
 }
 
 impl CommandPaletteView {
-    /// `extra`：调用方注入的动态命令（如「跳转到 Bucket」，命令面板本身
-    /// 无动态数据源，由 WorkspaceView 打开时按当前账号的 bucket 列表生成，
-    /// 每次打开都是全新面板 = 天然最新）。
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, extra: Vec<PaletteCommand>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索命令…"));
-        cx.subscribe_in(&input, window, Self::on_input_event)
-            .detach();
-
-        let mut commands = Self::default_commands();
-        // 动态命令排在前（输入词为空时可见性最高；有查询词时按相关度自然排序）
-        for cmd in extra.into_iter().rev() {
-            commands.insert(0, cmd);
-        }
-        let filtered = (0..commands.len()).collect();
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mut extra: Vec<PaletteCommand>,
+    ) -> Self {
+        extra.extend(Self::default_commands());
         Self {
-            input,
-            commands,
-            filtered,
-            selected: 0,
-            last_query: String::new(),
+            state: cx.new(|cx| CommandState::new(window, cx)),
+            commands: extra,
             open: true,
         }
     }
 
-    /// 初始命令集。命令来自 crate::actions 的共享 Action（规范 §22）。
     fn default_commands() -> Vec<PaletteCommand> {
         vec![
             PaletteCommand::action("切换边栏", Box::new(ToggleSidebar))
@@ -165,221 +136,187 @@ impl CommandPaletteView {
         ]
     }
 
-    /// 是否处于打开状态（WorkspaceView 的 observe 据此丢弃实体）。
     pub fn open(&self) -> bool {
         self.open
     }
 
-    /// 把焦点移入搜索输入框（打开面板后必须调用，否则 ⌘K 面板无输入焦点）。
     pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |state, cx| state.focus(window, cx));
+        self.state.focus_handle(cx).focus(window, cx);
     }
 
-    /// 关闭面板：置 open=false 并 notify，由 WorkspaceView 的 observe 收尾
-    /// （丢弃实体 + 焦点归还 Workspace 根节点）。
     pub fn close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.open = false;
         cx.notify();
     }
 
-    // ---- 事件 ----
-
-    fn handle_close(&mut self, _: &PaletteClose, window: &mut Window, cx: &mut Context<Self>) {
-        self.close(window, cx);
-    }
-
-    fn handle_select_prev(
-        &mut self,
-        _: &PaletteSelectPrev,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.filtered.is_empty() {
-            return;
-        }
-        self.selected = if self.selected == 0 {
-            self.filtered.len() - 1
-        } else {
-            self.selected - 1
-        };
-        cx.notify();
-    }
-
-    fn handle_select_next(
-        &mut self,
-        _: &PaletteSelectNext,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.filtered.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1) % self.filtered.len();
-        cx.notify();
-    }
-
-    fn on_input_event(
-        &mut self,
-        _: &Entity<InputState>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            InputEvent::Change => {
-                let query = self.input.read(cx).value().to_string();
-                if query == self.last_query {
-                    return;
-                }
-                self.apply_filter(&query);
-                self.last_query = query;
-                cx.notify();
-            }
-            InputEvent::PressEnter { .. } => self.execute_selected(window, cx),
-            _ => {}
-        }
-    }
-
-    fn apply_filter(&mut self, query: &str) {
-        let q = query.trim().to_lowercase();
-        self.filtered = self
-            .commands
-            .iter()
-            .enumerate()
-            .filter(|(_, cmd)| {
-                q.is_empty()
-                    || cmd.title.to_lowercase().contains(&q)
-                    || cmd.keywords.iter().any(|k| k.to_lowercase().contains(&q))
-            })
-            .map(|(ix, _)| ix)
-            .collect();
-        self.selected = 0;
-    }
-
-    /// 执行选中命令。先关闭面板再执行：WorkspaceView 在效果刷新时丢弃面板并
-    /// 归还焦点，保证「关闭窗口」这类命令不被遗留的面板焦点拖累。
-    fn execute_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.filtered.get(self.selected).copied() else {
+    fn execute(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self.commands.get(index) else {
             return;
         };
+        let command = match &command.kind {
+            CommandKind::Action(action) => CommandKind::Action(action.boxed_clone()),
+            CommandKind::Handler(handler) => CommandKind::Handler(handler.clone()),
+        };
+
         self.close(window, cx);
-        match &self.commands[ix].kind {
-            CommandKind::Action(action) => {
-                // 从当前焦点（面板输入框）沿渲染树冒泡；WorkspaceView 根节点
-                // 持有同名 on_action，Quit 由 App 全局 capture 接住。
-                window.dispatch_action(action.boxed_clone(), cx);
-            }
+        match command {
+            CommandKind::Action(action) => window.dispatch_action(action, cx),
             CommandKind::Handler(handler) => handler(window, cx),
         }
     }
 
-    // ---- 渲染 ----
-
-    fn render_list(
-        &self,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut list = v_flex()
-            .id("palette-list")
-            .w_full()
-            .max_h(px(340.))
-            .overflow_y_scroll()
-            .py_1();
-
-        if self.filtered.is_empty() {
-            return list.child(
-                div()
-                    .px_3()
-                    .py_4()
-                    .text_size(tokens::body())
-                    .text_color(theme.muted_foreground)
-                    .child("无匹配命令"),
-            );
-        }
-
-        for (row_ix, &cmd_ix) in self.filtered.iter().enumerate() {
-            let cmd = &self.commands[cmd_ix];
-            let selected = row_ix == self.selected;
-            // 键位提示从真实绑定表反查（与菜单同一数据源，规范 §26）。
-            let hint: Option<AnyElement> = match &cmd.kind {
-                CommandKind::Action(action) => {
-                    Kbd::binding_for_action(action.as_ref(), None, window)
-                        .map(|kbd| kbd.into_any_element())
-                }
-                CommandKind::Handler(_) => None,
-            };
-
-            list = list.child(
-                h_flex()
-                    .id(("palette-row", row_ix))
-                    .mx_1()
-                    .px_3()
-                    .py(tokens::row_pad_y())
-                    // 同心圆角：卡片 radius_lg()=8 − mx_1 内缩 4 = 4
-                    .rounded(tokens::radius_nested(px(4.)))
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .text_size(tokens::body())
-                    // 选中格用 theme.selection（≈ 侧栏 sidebar_accent 的观感）；
-                    // **不要用 list_active**：gpui-component 的 apply_config 会把
-                    // list_active/table_active 的 alpha 压到 ≤0.2（schema.rs:637），
-                    // 我们的源色是极淡靛蓝，压完叠在白底上只剩约 2% 差异，
-                    // 键盘光标实际看不见。hover 只给未选中行——否则鼠标停在
-                    // 选中行上会把选中色替换成中性 hover 灰。
-                    .when(selected, |row| row.bg(theme.selection))
-                    .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.selected = row_ix;
-                        this.execute_selected(window, cx);
-                    }))
-                    .child(div().flex_1().child(cmd.title.clone()))
-                    .children(hint),
-            );
-        }
-        list
+    fn command_items(&self) -> Vec<CommandItem> {
+        self.commands
+            .iter()
+            .map(|command| {
+                let item = CommandItem::new()
+                    .label(command.title.clone())
+                    .keywords(command.keywords.clone());
+                let CommandKind::Action(action) = &command.kind else {
+                    return item;
+                };
+                let action = action.boxed_clone();
+                let title = command.title.clone();
+                item.child(move |window, _| {
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_3()
+                        .child(div().flex_1().child(title.clone()))
+                        .children(Kbd::binding_for_action(action.as_ref(), None, window))
+                })
+            })
+            .collect()
     }
 }
 
 impl Render for CommandPaletteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let card_width = px(560.);
+        let left = (window.viewport_size().width - card_width) / 2.;
+        let confirm_owner = cx.weak_entity();
+        let cancel_owner = cx.weak_entity();
 
-        // 水平居中与「顶部偏移 96px、接近 Spotlight 的比例」由遮罩承担
-        // （render_palette_overlay 里 mask().justify_start().pt(...)）——
-        // 面板自己不算 left：手算 (viewport - card_w)/2 在窗口比卡片窄时
-        // 会得到负值，卡片直接压出窗口边缘。
-        overlay::surface(&theme)
-            .key_context("Palette")
-            .on_action(cx.listener(Self::handle_select_prev))
-            .on_action(cx.listener(Self::handle_select_next))
-            .on_action(cx.listener(Self::handle_close))
-            .w_full()
-            .max_w(px(560.))
-            .overflow_hidden()
-            .child(
-                h_flex()
-                    .w_full()
-                    .px_2()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(Input::new(&self.input).flex_1()),
-            )
-            .child(self.render_list(&theme, window, cx))
-            .child(
+        let command = Command::new(&self.state)
+            .items(self.command_items())
+            .placeholder("搜索命令…")
+            .max_h(px(340.))
+            .empty(|_, _, cx| {
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(tokens::text(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("无匹配命令")
+            })
+            .footer(|_, _, cx| {
                 h_flex()
                     .w_full()
                     .justify_end()
                     .px_3()
                     .py_1()
                     .border_t_1()
-                    .border_color(theme.border)
-                    .text_size(tokens::caption())
-                    .text_color(theme.muted_foreground)
-                    .child("↑↓ 选择 · ↵ 执行 · Esc 关闭"),
+                    .border_color(cx.theme().border)
+                    .text_size(tokens::text(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("↑↓ 选择 · ↵ 执行 · Esc 关闭")
+            })
+            .on_confirm(move |index, window, cx| {
+                _ = confirm_owner.update(cx, |palette, cx| {
+                    palette.execute(index.row, window, cx);
+                });
+            })
+            .on_cancel(move |window, cx| {
+                _ = cancel_owner.update(cx, |palette, cx| palette.close(window, cx));
+            });
+
+        v_flex()
+            .absolute()
+            .left(left)
+            .top(px(96.))
+            .w(card_width)
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(
+                cx.listener(|palette, _: &DismissCommandPalette, window, cx| {
+                    palette.close(window, cx);
+                }),
             )
+            .child(command)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn native_command_filters_and_confirms_dynamic_items(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::init(cx);
+        });
+
+        let confirmations = Rc::new(Cell::new(0));
+        let confirmations_for_handler = confirmations.clone();
+        let (palette, cx) = cx.add_window_view(move |window, cx| {
+            CommandPaletteView::new(
+                window,
+                cx,
+                vec![
+                    PaletteCommand::handler("唯一动态命令", move |_, _| {
+                        confirmations_for_handler.set(confirmations_for_handler.get() + 1);
+                    })
+                    .keywords(&["needle-unique"]),
+                ],
+            )
+        });
+
+        cx.run_until_parked();
+        let state = cx.update(|window, cx| {
+            _ = window.draw(cx);
+            palette.read(cx).state.clone()
+        });
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_query("needle-unique", window, cx);
+                assert_eq!(state.matched_count(), 1);
+                state.focus(window, cx);
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert_eq!(confirmations.get(), 1);
+        assert!(!palette.read_with(cx, |palette, _| palette.open()));
+    }
+
+    #[gpui::test]
+    fn escape_closes_even_with_a_nonempty_query(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::init(cx);
+        });
+        let (palette, cx) =
+            cx.add_window_view(|window, cx| CommandPaletteView::new(window, cx, Vec::new()));
+
+        cx.run_until_parked();
+        let state = cx.update(|window, cx| {
+            _ = window.draw(cx);
+            let state = palette.read(cx).state.clone();
+            state.update(cx, |state, cx| {
+                state.set_query("refresh", window, cx);
+                state.focus(window, cx);
+            });
+            state
+        });
+        assert!(state.read_with(cx, |state, cx| !state.query(cx).is_empty()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(!palette.read_with(cx, |palette, _| palette.open()));
     }
 }
