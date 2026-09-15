@@ -201,9 +201,21 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
   锚点类型是 `gpui::Anchor`。
   **不要在 anchored 的 child 里再套 `div().absolute()`**——absolute 与 anchored 锚定机制
   冲突，菜单渲染不可见（曾导致「更多操作」菜单点击后无菜单弹出）。
-- 行内弹出菜单（每行 `...` 按钮）锚定在**按钮所在容器**（包一层 `div().relative()`），
-  菜单作为 `deferred(anchored(...))` 挂同一容器。**禁止手算行 y 偏移**（`row × 40px` 一类）：
-  行高随字号缩放/内容变化，手算值会随行号线性错位。
+- 行内弹出菜单锚定：**必须按触发点的窗口坐标绝对定位**，即
+  `anchored().anchor(Corner::TopLeft).position_mode(AnchoredPositionMode::Window).position(<触发点窗口坐标>)`。
+  右键触发时取 `MouseDownEvent.position`（其文档即「position of the mouse on the window」）。
+  **不要靠「锚定元素所在容器的原点」相对定位**（= 不传 `position` 时的默认行为）：菜单挂在
+  `w_full()` 的行上时锚点落在行的**左端**，菜单会越过行左边界压到侧栏上；而行身处
+  `overflow_y_scroll` 容器时，taffy 给绝对定位元素解出的 `bounds.origin` 与视口坐标系不一致，
+  纵向还会整体偏移（对象行右键菜单曾因此两次跑偏）。
+- 为什么「按窗口坐标」是安全的（读源码确认的坐标契约）：`Window::layout_bounds` 会
+  `bounds.origin += element_offset()`（window.rs）；而 `element.rs` 在每个元素 `prepaint` 前
+  用 `with_absolute_element_offset(origin)` **把偏移绝对设成该元素自己的 layout origin**。
+  于是 `Anchored::prepaint` 里 `element_offset() == bounds.origin`，再经
+  `offset = desired.origin - bounds.origin` + `with_element_offset(offset)`，子元素恰好被画在
+  `desired.origin`——与所在容器、与滚动偏移都无关。默认那条「相对 `bounds.origin` 锚定」
+  才会跟着容器/滚动跑。
+- **禁止手算行 y 偏移**（`row × 40px` 一类）：行高随字号缩放/内容变化，手算值会随行号线性错位。
 - **不要在 `on_mouse_down` 处理器里 `window.focus()`**：焦点会被同一次点击的后续处理
   覆盖回原焦点（实测焦点回到 workspace 根），键盘派发（如 Esc → Overlay context）全部
   落空。正确做法：处理器里只置 `needs_focus` 标记，在 `render()` 中弹层元素渲染挂载后
@@ -260,3 +272,75 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 
 ### 杂项
 - 查 crates.io API（版本号等）需要带 `User-Agent` 头，否则被拒。
+
+## 动效（能力边界，已核实）
+
+- **`Div` 没有 `transform` / `scale` / `rotate`**：`Transformation` 只定义在
+  `elements/svg.rs`，由 `Svg::with_transformation` 使用；`Styled` 上没有相关方法。
+  只有 SVG 能变换（gpui-component 的 `Icon` 会转发 `transform`，所以 Spinner 能转）。
+  → 「点按缩放 `scale(0.96)`」「位移进场 `translateY`」在普通 div 上**做不了**。
+- **没有元素级 blur**：gpui 里 `blur` 只作为 `BoxShadow.blur_radius` 存在，没有
+  `filter` / `BackdropFilter` 样式。→ 淡入只能靠 opacity，没有 `blur(4px)→0`。
+- **`Style.opacity` 是组透明度**：Div 的 paint 走 `window.with_element_opacity`
+  （`elements/div.rs`），而 `Window` 内部 `element_opacity = previous * opacity`
+  相乘下传。→ 淡化最外层 div 即淡化整棵子树（遮罩 + 卡片一起淡入，无需分别处理）。
+- **`Animation` 没有完成回调**：`elements/animation.rs` 只有 `new(Duration)` /
+  `with_easing` / `repeat`。一次性动画在 `delta > 1.0` 时置 done，并停止
+  `request_animation_frame`（自驱帧、无需父级 notify；done 后不再重绘）。
+  → **退场动画必须自建「先播动画 + 定时器再真正卸载」**。照抄 gpui-component
+  `notification.rs` 时注意它的定时器（0.15s）短于动画（0.25s），退场被截断——
+  定时器应 ≥ 动画时长。
+- **动画 state 随元素卸载而丢弃**：state 按「元素 id + 渲染树位置」缓存，且帧末只
+  保留本帧访问过的 state（`window.rs` 的 `accessed_element_states` 迁移）。
+  → 浮层卸载后重开 = 新 state = 动画重放（想要的行为）；反过来，**要在同一元素上
+  重放动画必须改 id**（gpui-component 的 switch/checkbox 用
+  `ElementId::NamedInteger("move", checked as u64)` 就是为此）。
+- **缓动函数**：gpui 导出 `linear` / `quadratic` / `ease_in_out`（都是
+  `fn(f32) -> f32`，可直接传）与工厂 `ease_out_quint()` / `bounce(..)` /
+  `pulsating_between(..)`（需调用）。**gpui 本体没有 cubic-bezier**，要用
+  `gpui_component::animation::cubic_bezier(x1, y1, x2, y2)`。
+- **`AnimationExt`（`with_animation` / `with_animations`）不在 prelude**，须显式
+  `use gpui::AnimationExt as _;`。blanket impl 在 `IntoElement` 上，animator 签名是
+  `Fn(Self, f32) -> Self`，返回 `AnimationElement<Self>`——**调用后不能再接 `Div`
+  的方法**（`key_context` / `child` 等都要在传入前接完）。所以动画必须包在链式装配
+  的**最后一步**：本仓库统一用 `overlay::fade_in(id, el)`（overlay.rs）。
+- `ElementId` 可由 `&'static str` 转换（`impl From<&'static str> for ElementId`）。
+- **行号索引（已在 gpui-pre 0.3.4 上逐条复核）**：`Animation` 构造
+  `elements/animation.rs:33/44/50/60`（`new`/`repeat`/`repeat_synced`/`with_easing`，
+  仍**无**完成回调）；`AnimationExt` blanket impl `elements/animation.rs:158`；
+  组透明度 `elements/div.rs:2489` → `window.rs:3786-3798`
+  （`element_opacity = previous * opacity`）；动画 state 卸载即丢弃
+  `window.rs:1125`（`accessed_element_states` 只迁移本帧访问过的 key）。
+
+## 几何与绘制（已核实）
+
+- **`overflow_hidden()` 只裁矩形**：`ContentMask` 只有 `bounds`，没有圆角。→ 圆角必须
+  落在**自己绘制位图/背景的那个元素**上。`Img` 会把自身 `corner_radii` 传给
+  `window.paint_image`，所以 `img().rounded(..)` 生效；而外层 `div().rounded(..) +
+  overflow_hidden()` 对图片**无效**（位图仍是方角）。
+- **`img` 是叶子节点，border 画在位图之上、bounds 内侧**：`Style::paint` 先内容后边框，
+  且 taffy 的 border-box 只内缩**子元素**。→ `img().border_1().border_color(..)` 等价于
+  CSS `outline: 1px; outline-offset: -1px`，位图不缩小。若把 border 加在外层 Div 上，
+  子元素会被内缩（图像变小），语义变成 `border` 而非 `outline`。
+- **阴影环只能向外**：`BoxShadow` 没有 `inset` 字段，`spread_radius` 只向外扩张。→ 做不出
+  内描边环，只能靠 border。
+- **`Button` 覆盖图标尺寸**：Button 渲染时取自己的 `icon_size` 并调
+  `icon.with_size(icon_size)`（`button.rs`），且 `Icon::render` 中显式 size 分支在
+  `text_size` 分支**之后**生效。→ 给 Button 的 icon 写 `.size_4()` / `.size_3()` 是**死代码**。
+- **`Icon` 不写尺寸时取继承的字号**（`window.text_style().font_size`）→ 图标与相邻文字
+  同步随字号缩放；写了 `size_4()` 一类固定值就脱离字号缩放（140% 档位下会比正文还小）。
+  按 `agents.md` §5，图标优先继承行字号或用 `tokens::text()` 取值。
+- **`Theme::apply_config` 会压 alpha**：`list_active` / `table_active` ≤ 0.2，
+  `selection` ≤ 0.3（库 `theme/schema.rs` 末尾）。→ 选中底色**不要**用
+  `list_active` / `table_active`（源色太淡，压完肉眼不可见），用 `selection`
+  （列表行）或不透明的 `sidebar_accent`（侧栏语义面）。
+- **`ThemeConfigColors` 是库里的固定字段集，没有扩展位**：想加自定义色无法经
+  `ThemeConfig` 下发，只能在 `theme.rs` 另设语义访问器（如 `theme::image_outline`）。
+- **行号索引（已在 gpui-pre 0.3.4 / gpui-component 0.6.1 上逐条复核）**：
+  `ContentMask` 只有 `bounds` `window.rs:2081-2084`；`Style::paint` 先
+  `continuation` 后边框 `style.rs:742` / `:744`（`is_border_visible` 在 `:764`）；
+  `Img` 把自身 `corner_radii` 传给 `paint_image` `elements/img.rs:494`；
+  `Icon` 尺寸解析 `icon.rs:169-187`（`has_base_size` 为假时取继承字号，
+  `self.size` 分支在后覆盖；`Icon::data(&[u8])` 在 `:136`）；
+  alpha clamp `theme/schema.rs:1039-1056`（list/table ≤0.2、selection ≤0.3，
+  库自带断言在 `:1300`）。

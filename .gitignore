@@ -19,6 +19,12 @@ dist/
 # Contains mutation testing data
 **/mutants.out*/
 
+# Agent / 本地工具目录（勿提交）
+# .cindy-worktrees 内含完整 worktree 副本（含 target），体积可达几十 GB
+.cindy-worktrees/
+.zcode/
+.commandcode/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

@@ -1,6 +1,7 @@
 //! 主窗口 Workspace。
 //!
 //! 结构（agents.md §7）：Unified Titlebar + Sidebar(180/220/360) + Content。
+//! - Titlebar 承载导航（后退/前进）、当前位置面包屑、过滤、上传；内容区不再堆工具栏。
 //! - Sidebar 折叠为 44px 图标栏（规范硬指标；gpui-component 自带 Sidebar 固定 255px/48px，
 //!   无法满足，故自建，用其 Icon/主题 token 保持视觉一致）。
 //! - Sidebar 宽度用 gpui-component Resizable；折叠/展开切换布局变体（不同的 resizable group id），
@@ -25,11 +26,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths,
-    FocusHandle, Img, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    ParentElement as _, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, Window, anchored, deferred, div,
-    img, point, prelude::FluentBuilder, px,
+    Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, ClickEvent, Context, Entity,
+    ExternalPaths, FocusHandle, Img, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Point, PromptButton,
+    PromptLevel, Render, SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _,
+    Window, anchored, deferred, div, img, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -54,10 +55,12 @@ use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
     DownloadObject, FocusPath, NavigateBack, NavigateForward, OpenAbout, OpenCommandPalette,
     OpenObject, OpenSettings, PreviewObject, Quit, Refresh, RenameObject, RevealInFinder,
-    SaveTextObject, SelectBucketByName, SelectObjectAll, ToggleObjectFilter, ToggleSidebar,
-    UnifiedDismiss, UploadFiles, UploadFolder,
+    SaveTextObject, SelectBucketByName, SelectObjectAll, SelectObjectNext, SelectObjectNextRange,
+    SelectObjectPrev, SelectObjectPrevRange, ToggleObjectFilter, ToggleSidebar, UnifiedDismiss,
+    UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
+use crate::overlay;
 use crate::settings_modal::SettingsModal;
 use crate::tokens;
 
@@ -67,7 +70,8 @@ const RAIL_WIDTH: Pixels = px(44.);
 const SIDEBAR_DEFAULT: Pixels = px(220.);
 const SIDEBAR_MIN: Pixels = px(180.);
 const SIDEBAR_MAX: Pixels = px(360.);
-/// 对象列表单页条数（七牛列举单页上限内）。
+/// 对象列表单页条数（七牛列举单页上限内）。列宽在 tokens.rs
+/// （`col_size_width` / `col_time_width`，随字号缩放；表头与行共用保证对齐）。
 const OBJECTS_PAGE_LIMIT: u32 = 100;
 // 签名链接 TTL / 剪贴板清除秒数不再用编译期常量：运行时取 self.settings
 // （settings.json，⌘, 可改；默认值见 object-storage-persistence）。
@@ -115,6 +119,8 @@ enum ObjectMenuItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TopMoreMenuItem {
+    UploadFolder,
+    CreateFolder,
     CopyTo,
     MoveTo,
     Delete,
@@ -149,10 +155,19 @@ fn object_menu_items() -> Vec<ObjectMenuItem> {
 
 fn top_more_menu_items() -> Vec<TopMoreMenuItem> {
     vec![
+        TopMoreMenuItem::UploadFolder,
+        TopMoreMenuItem::CreateFolder,
         TopMoreMenuItem::CopyTo,
         TopMoreMenuItem::MoveTo,
         TopMoreMenuItem::Delete,
     ]
+}
+
+fn provider_icon(kind: ProviderKind) -> IconName {
+    match kind {
+        ProviderKind::Qiniu => IconName::Globe,
+        ProviderKind::Aliyun => IconName::Building2,
+    }
 }
 
 fn object_menu_item_label(item: ObjectMenuItem) -> &'static str {
@@ -169,8 +184,10 @@ fn object_menu_item_label(item: ObjectMenuItem) -> &'static str {
 
 fn top_more_menu_item_label(item: TopMoreMenuItem) -> &'static str {
     match item {
-        TopMoreMenuItem::CopyTo => "复制到",
-        TopMoreMenuItem::MoveTo => "移动到",
+        TopMoreMenuItem::UploadFolder => "上传文件夹…",
+        TopMoreMenuItem::CreateFolder => "新建目录…",
+        TopMoreMenuItem::CopyTo => "复制到…",
+        TopMoreMenuItem::MoveTo => "移动到…",
         TopMoreMenuItem::Delete => "删除",
     }
 }
@@ -191,7 +208,7 @@ pub struct WorkspaceView {
     focus_handle: FocusHandle,
     /// 无输入框弹层（预览/详情/关于）的焦点句柄：打开时聚焦，Esc 经
     /// context "Overlay" 沿焦点链派发到弹层的 UnifiedDismiss handler，
-    /// 关闭后归还 Workspace 根（与 rename 弹窗同机制，gpui-api-notes）。
+    /// 关闭后归还 Workspace 根。
     overlay_focus: FocusHandle,
     sidebar_collapsed: bool,
     /// 当前打开的命令面板（⌘K）。Some 时在根容器上渲染模态遮罩层；
@@ -236,7 +253,7 @@ pub struct WorkspaceView {
     selected_object_keys: indexmap::IndexSet<String>,
     /// 范围选择锚点（对象序号；上次普通/⌘点击的对象，不含目录前缀）。
     selection_anchor: Option<usize>,
-    /// 重命名弹窗进行中：(对象 key，输入框)。
+    /// 行内重命名进行中：(对象 key，输入框)。
     renaming: Option<(String, Entity<InputState>)>,
     /// rename 后台执行中（防重入）。
     renaming_busy: bool,
@@ -254,14 +271,6 @@ pub struct WorkspaceView {
     settings_path: PathBuf,
     /// 设置模态（⌘,）。Some 时渲染遮罩。
     settings_modal: Option<Entity<SettingsModal>>,
-    /// capture 清空前的选择快照：(集合, 锚点)。行 mouse-down 处理器
-    /// 消费（⌘/⇧ 基线）；普通点击不消费（下一次快照覆盖）。
-    selection_before_capture: Option<(indexmap::IndexSet<String>, Option<usize>)>,
-    /// 本帧渲染的对象行 bounds（paint 阶段写入；窗口级 mouse-down 钩子
-    /// 据此做命中检测：点击不在任何行/按钮 bounds 内 = 空白 → 清空）。
-    row_bounds: std::cell::RefCell<Vec<gpui::Bounds<gpui::Pixels>>>,
-    /// 内容区 bounds（paint 阶段写入；钩子只处理内容区内的点击）。
-    content_bounds: std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>,
     /// 对象下载进行中（按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -285,6 +294,12 @@ pub struct WorkspaceView {
     preview_needs_focus: bool,
     /// 当前打开对象菜单的 object key。
     object_menu_open: Option<String>,
+    /// 打开对象菜单时右键的**窗口坐标**（`MouseDownEvent.position`）。
+    ///
+    /// 菜单位置必须按这个点算，不能靠 `anchored()` 的默认锚定（它拿锚定元素
+    /// 所在容器的原点当锚点，而行在滚动容器里、坐标空间与视口不一致，菜单会
+    /// 跑到侧栏上）。右键位置是唯一不依赖容器/滚动坐标系的锚。
+    object_menu_at: Option<Point<Pixels>>,
     /// 顶部「更多」菜单是否打开。
     top_more_open: bool,
     /// 传输面板是否展开（显示每任务明细）。收起态仅显示一行汇总。
@@ -317,9 +332,10 @@ pub struct WorkspaceView {
     /// ⌘Q 确认面板已弹出：gpui 禁止重入 `window.prompt`，二次 ⌘Q 直接忽略
     quit_prompt_open: bool,
 
-    // ---- 串台防护：账号/对象各自的自增代号 ----
+    // ---- 串台防护：账号/对象/预览各自的自增代号 ----
     bucket_gen: u64,
     object_gen: u64,
+    preview_gen: u64,
 }
 
 /// 对象多选语义（规范 §7：Click / ⌘Click / ⇧Click / ⌘A）的纯决策逻辑。
@@ -334,9 +350,9 @@ pub(crate) struct ObjectSelectionIntent {
     pub shift: bool,
     /// ⌘A：全选当前列表可见对象。
     pub select_all: bool,
-    /// 是否点了空白处（清空选择；列表空白处点击才传 true）。
-    pub clicked_empty: bool,
-    /// 点击对象在 ordered_keys（不含目录前缀）中的下标；⌘A / 空白点击时为 None。
+    /// 点击对象在 ordered_keys（不含目录前缀）中的下标；⌘A / 无命中项时为 None。
+    /// 空白点击清空选择不在这里表达——它由列表容器直接调
+    /// `clear_object_selection`（还要一并关菜单/弹层，纯函数表达不了）。
     pub clicked_index: Option<usize>,
 }
 
@@ -362,9 +378,6 @@ pub(crate) fn apply_object_selection(
     if intent.select_all {
         let all: indexmap::IndexSet<String> = ordered_keys.iter().cloned().collect();
         return (all, anchor, false);
-    }
-    if intent.clicked_empty {
-        return (indexmap::IndexSet::new(), None, false);
     }
     match clicked {
         ClickedEntry::CommonPrefix(_) => (selection.clone(), anchor, false),
@@ -405,6 +418,67 @@ pub(crate) fn apply_object_selection(
     }
 }
 
+/// 键盘移动方向（对象列表 / 预览）。到边界停止，不循环。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectNavDirection {
+    Prev,
+    Next,
+}
+
+/// 键盘导航纯决策：`keys` 是当前**展示顺序**下的对象 key（不含目录前缀）。
+/// `anchor` 与 `keys` 同一坐标系。⇧ 扩选复用 `apply_object_selection` 的范围语义。
+pub(crate) fn apply_object_keyboard_nav(
+    keys: &[String],
+    selection: &indexmap::IndexSet<String>,
+    primary: Option<&str>,
+    anchor: Option<usize>,
+    direction: ObjectNavDirection,
+    extend: bool,
+) -> (indexmap::IndexSet<String>, Option<usize>, usize) {
+    if keys.is_empty() {
+        return (indexmap::IndexSet::new(), None, 0);
+    }
+    let current = primary
+        .and_then(|key| keys.iter().position(|candidate| candidate == key))
+        .or_else(|| {
+            selection
+                .last()
+                .and_then(|key| keys.iter().position(|candidate| candidate == key))
+        });
+    let target = match (current, direction) {
+        (None, ObjectNavDirection::Next) => 0,
+        (None, ObjectNavDirection::Prev) => keys.len() - 1,
+        (Some(index), ObjectNavDirection::Next) => (index + 1).min(keys.len() - 1),
+        (Some(index), ObjectNavDirection::Prev) => index.saturating_sub(1),
+    };
+    let intent = ObjectSelectionIntent {
+        command: false,
+        shift: extend,
+        select_all: false,
+        clicked_index: Some(target),
+    };
+    let (next, next_anchor, _) = apply_object_selection(
+        intent,
+        keys,
+        selection,
+        if extend { anchor.or(current) } else { current },
+        ClickedEntry::Object(keys[target].clone()),
+    );
+    (next, next_anchor, target)
+}
+
+/// 展示顺序下的对象 key（跳过目录前缀）。键盘导航与 Shift 范围用这套顺序。
+pub(crate) fn visible_object_keys(
+    entries: &[ListingEntry],
+    display_order: &[usize],
+) -> Vec<String> {
+    display_order
+        .iter()
+        .filter_map(|&index| entries.get(index).and_then(object_key))
+        .map(str::to_string)
+        .collect()
+}
+
 /// 由当前 key 和新名字推导 rename 目标 key：只替换最后一段（`/` 后的
 /// 文件名部分），保持目录前缀不变。名字含 `/` 视为非法（不允许借
 /// rename 移动目录，防误操作把对象搬进意外前缀）。
@@ -425,6 +499,18 @@ pub(crate) fn rename_target_key(current_key: &str, new_name: &str) -> Result<Str
     }
 }
 
+/// 列表行「激活」判据：单击只做选择，**双击整行**才打开（对象 → 预览、目录 → 进入）。
+///
+/// Finder 语义。抽成纯函数是为了让两处行渲染（对象行 / 目录行）共用同一条判据，
+/// 免得日后一处改了一处没改；单测锁死「单击不激活」这一点——把判据放松成
+/// `>= 1` 会让单击既选中又打开，等于回到「点一下就跳走」。
+///
+/// `renaming`：行内重命名还在进行（即 mouse_down 里的提交校验失败、inline editor
+/// 仍残留）时不激活，否则会跳走并丢掉编辑态。
+pub(crate) fn row_activation(click_count: usize, renaming: bool) -> bool {
+    click_count >= 2 && !renaming
+}
+
 /// ⌘F 过滤：大小写不敏感子串匹配。命中对象 key 或目录前缀名任意即保留。
 /// `None` query = 不过滤。返回保留项下标（指向 entries）。
 pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> Vec<usize> {
@@ -443,7 +529,7 @@ pub(crate) fn filter_entries(entries: &[ListingEntry], query: Option<&str>) -> V
         .collect()
 }
 
-/// 对象列表排序方式（工具栏循环切换；Finder 式：目录恒在对象前）。
+/// 对象列表排序方式（表头点击切换；Finder 式：目录恒在对象前）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ObjectSort {
     /// 列举原序（provider 返回顺序；字典序）
@@ -460,25 +546,57 @@ pub(crate) enum ObjectSort {
 }
 
 impl ObjectSort {
-    /// 循环切换顺序（工具栏单按钮）。
-    fn next(self) -> Self {
+    fn cycle_name(self) -> Self {
         match self {
-            ObjectSort::Natural => ObjectSort::NameAsc,
             ObjectSort::NameAsc => ObjectSort::NameDesc,
-            ObjectSort::NameDesc => ObjectSort::SizeDesc,
-            ObjectSort::SizeDesc => ObjectSort::TimeDesc,
-            ObjectSort::TimeDesc => ObjectSort::Natural,
+            ObjectSort::NameDesc => ObjectSort::Natural,
+            _ => ObjectSort::NameAsc,
         }
     }
 
-    /// 工具栏显示标签。
-    fn label(self) -> &'static str {
+    fn cycle_size(self) -> Self {
         match self {
-            ObjectSort::Natural => "默认",
-            ObjectSort::NameAsc => "名称 A→Z",
-            ObjectSort::NameDesc => "名称 Z→A",
-            ObjectSort::SizeDesc => "最大",
-            ObjectSort::TimeDesc => "最新",
+            ObjectSort::SizeDesc => ObjectSort::Natural,
+            _ => ObjectSort::SizeDesc,
+        }
+    }
+
+    fn cycle_time(self) -> Self {
+        match self {
+            ObjectSort::TimeDesc => ObjectSort::Natural,
+            _ => ObjectSort::TimeDesc,
+        }
+    }
+
+    fn name_mark(self) -> &'static str {
+        match self {
+            ObjectSort::NameAsc => " ↑",
+            ObjectSort::NameDesc => " ↓",
+            _ => "",
+        }
+    }
+
+    fn size_mark(self) -> &'static str {
+        match self {
+            ObjectSort::SizeDesc => " ↓",
+            _ => "",
+        }
+    }
+
+    fn time_mark(self) -> &'static str {
+        match self {
+            ObjectSort::TimeDesc => " ↓",
+            _ => "",
+        }
+    }
+
+    fn label(self) -> Option<&'static str> {
+        match self {
+            ObjectSort::Natural => None,
+            ObjectSort::NameAsc => Some("名称 A→Z"),
+            ObjectSort::NameDesc => Some("名称 Z→A"),
+            ObjectSort::SizeDesc => Some("最大优先"),
+            ObjectSort::TimeDesc => Some("最新优先"),
         }
     }
 }
@@ -521,6 +639,22 @@ pub(crate) fn sort_entries(entries: &[ListingEntry], sort: ObjectSort) -> Vec<us
         _ => ix.sort_by_key(|&i| key(&entries[i])),
     }
     ix
+}
+
+/// 展示顺序：先按排序取全量下标，再与过滤命中求交（过滤不影响 entries 本身）。
+pub(crate) fn display_entry_order(
+    entries: &[ListingEntry],
+    sort: ObjectSort,
+    filtered_ix: Option<&[usize]>,
+) -> Vec<usize> {
+    let sorted = sort_entries(entries, sort);
+    match filtered_ix {
+        Some(ix) => {
+            let keep: std::collections::HashSet<usize> = ix.iter().copied().collect();
+            sorted.into_iter().filter(|i| keep.contains(i)).collect()
+        }
+        None => sorted,
+    }
 }
 
 fn object_selection_ix(entries: &[ListingEntry], key: &str) -> Option<usize> {
@@ -763,26 +897,8 @@ fn batch_download_confirm_texts(count: usize, default_dir: &Path) -> (String, St
     )
 }
 
-/// 弹层规范锚点（详见 agents.md「弹层规范」行），回答「这套阻断配置下
-/// 卡片内的点击/滚动事件是否会冒泡误关弹层」——返回 `true` 即不合规。
-/// - `card_stops_mouse_down=false`：点卡片任意事件直接冒泡到遮罩 → 误关；
-/// - 含滚动列表（预览/复制移动）的弹层还必须阻断 `mouse_up`：仅阻断 down
-///   时，列表上的 mouse up 仍会走遮罩链路引发误关；
-/// - `busy` 与阻断无关（busy 由各 close handler 自行拒绝）。
-///   仅测试消费（规范判据），生产路径按 agents.md 约定直接实现。
-#[allow(dead_code)]
-fn overlay_scroll_dismisses_modal(
-    busy: bool,
-    card_stops_mouse_down: bool,
-    card_stops_mouse_up: bool,
-    has_scrollable_list: bool,
-) -> bool {
-    let _ = busy;
-    if !card_stops_mouse_down {
-        return true;
-    }
-    has_scrollable_list && !card_stops_mouse_up
-}
+// 弹层「卡片阻断两相冒泡」这条规范原先是这里的纯函数判据（已删除）：现在由
+// `overlay::surface()` 统一提供，构造即合规，不再需要靠测试断言去守。
 
 fn provider_url_scheme(provider: ProviderKind) -> &'static str {
     match provider {
@@ -924,9 +1040,6 @@ impl WorkspaceView {
             settings,
             settings_path,
             settings_modal: None,
-            selection_before_capture: None,
-            row_bounds: std::cell::RefCell::new(Vec::new()),
-            content_bounds: std::cell::RefCell::new(None),
             downloading: false,
             uploading: false,
             deleting: false,
@@ -938,6 +1051,7 @@ impl WorkspaceView {
             preview_overlay_open: false,
             preview_needs_focus: false,
             object_menu_open: None,
+            object_menu_at: None,
             top_more_open: false,
             transfers_expanded: false,
             details_overlay_open: false,
@@ -956,6 +1070,7 @@ impl WorkspaceView {
             quit_prompt_open: false,
             bucket_gen: 0,
             object_gen: 0,
+            preview_gen: 0,
         };
         this.load_accounts(cx);
         this.restore_persisted_transfers(cx);
@@ -1258,6 +1373,7 @@ impl WorkspaceView {
     }
 
     /// 返回上一级目录（压历史）；已在根目录则无操作。
+    #[allow(dead_code)]
     fn go_up(&mut self, cx: &mut Context<Self>) {
         let Some(prefix) = self.current_prefix.clone() else {
             return;
@@ -1395,20 +1511,25 @@ impl WorkspaceView {
         self.renaming = None;
     }
 
-    fn open_object_menu(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.select_object_for_row_action(key);
+    /// 打开对象菜单。`at` 是触发这次打开的窗口坐标（右键位置），菜单以它为锚点。
+    fn open_object_menu(&mut self, key: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.selected_object_keys.contains(key) {
+            self.select_object_for_row_action(key);
+        }
         self.object_menu_open = Some(key.to_string());
+        self.object_menu_at = Some(at);
         self.preview_overlay_open = false;
         self.details_overlay_open = false;
         cx.notify();
     }
 
-    fn toggle_object_menu(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn toggle_object_menu(&mut self, key: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
         if self.object_menu_open.as_deref() == Some(key) {
             self.object_menu_open = None;
+            self.object_menu_at = None;
             cx.notify();
         } else {
-            self.open_object_menu(key, cx);
+            self.open_object_menu(key, at, cx);
         }
     }
 
@@ -1468,6 +1589,8 @@ impl WorkspaceView {
     ) {
         self.close_top_more_menu();
         match item {
+            TopMoreMenuItem::UploadFolder => self.start_folder_upload(cx),
+            TopMoreMenuItem::CreateFolder => self.open_create_folder_overlay(window, cx),
             TopMoreMenuItem::CopyTo => self.open_copy_move_overlay(CopyMoveMode::Copy, window, cx),
             TopMoreMenuItem::MoveTo => self.open_copy_move_overlay(CopyMoveMode::Move, window, cx),
             TopMoreMenuItem::Delete => self.confirm_and_delete_object(window, cx),
@@ -1818,9 +1941,6 @@ impl WorkspaceView {
     }
 
     fn start_object_preview(&mut self, cx: &mut Context<Self>) {
-        if self.previewing {
-            return;
-        }
         let Some(key) = self
             .selected_cloud_object()
             .map(|object| object.key.clone())
@@ -1833,6 +1953,8 @@ impl WorkspaceView {
         let Some(bucket) = self.selected_bucket.clone() else {
             return;
         };
+        self.preview_gen += 1;
+        let generation = self.preview_gen;
         let name = display_name(&key).to_string();
         let mut path = std::env::temp_dir();
         path.push("CloudStorage");
@@ -1880,6 +2002,9 @@ impl WorkspaceView {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                if this.preview_gen != generation {
+                    return;
+                }
                 this.previewing = false;
                 match result {
                     Ok((path, text)) => {
@@ -2350,8 +2475,6 @@ impl WorkspaceView {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
-        // 直接用当前选中集合做基线（行点击不会触发空白清空钩子——几何
-        // 命中检测保证两者互斥，集合在行处理时是完整的点击前状态）
         let (baseline, baseline_anchor) =
             (self.selected_object_keys.clone(), self.selection_anchor);
         let ordered_keys = object_keys(&self.entries);
@@ -2366,14 +2489,12 @@ impl WorkspaceView {
             command: modifiers.platform,
             shift: modifiers.shift,
             select_all: false,
-            clicked_empty: false,
             clicked_index,
         };
         let (next, anchor, _) = apply_object_selection(
             intent,
             &ordered_keys,
             &baseline,
-            // ⇧ 基线锚点优先（capture 保留了旧锚点）；否则用当前
             if baseline_anchor.is_some() {
                 baseline_anchor
             } else {
@@ -2406,7 +2527,6 @@ impl WorkspaceView {
             command: false,
             shift: false,
             select_all: true,
-            clicked_empty: false,
             clicked_index: None,
         };
         let ordered_keys = object_keys(&self.entries);
@@ -2423,7 +2543,104 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Return：打开重命名弹窗。多选（≠1）时忽略——批量改名语义不明确，不做。
+    fn object_keyboard_nav_blocked(&self) -> bool {
+        self.palette.is_some()
+            || self.add_modal.is_some()
+            || self.settings_modal.is_some()
+            || self.renaming.is_some()
+            || self.renaming_busy
+            || self.path_input.is_some()
+            || self.create_folder_input.is_some()
+            || self.copy_move.is_some()
+            || self.about_overlay_open
+            || self.details_overlay_open
+            || self.selected_bucket.is_none()
+    }
+
+    fn handle_select_object_prev(
+        &mut self,
+        _: &SelectObjectPrev,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_object_selection(ObjectNavDirection::Prev, false, cx);
+    }
+
+    fn handle_select_object_next(
+        &mut self,
+        _: &SelectObjectNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_object_selection(ObjectNavDirection::Next, false, cx);
+    }
+
+    fn handle_select_object_prev_range(
+        &mut self,
+        _: &SelectObjectPrevRange,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_object_selection(ObjectNavDirection::Prev, true, cx);
+    }
+
+    fn handle_select_object_next_range(
+        &mut self,
+        _: &SelectObjectNextRange,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_object_selection(ObjectNavDirection::Next, true, cx);
+    }
+
+    /// ↑↓/←→ 按当前展示顺序移动主选；⇧ 扩选。预览打开时只换对象、不扩选，并重载预览。
+    fn move_object_selection(
+        &mut self,
+        direction: ObjectNavDirection,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.object_keyboard_nav_blocked() {
+            return;
+        }
+        let extend = extend && !self.preview_overlay_open;
+        let order =
+            display_entry_order(&self.entries, self.object_sort, self.filtered_ix.as_deref());
+        let keys = visible_object_keys(&self.entries, &order);
+        if keys.is_empty() {
+            return;
+        }
+        let display_anchor = self.selection_anchor.and_then(|index| {
+            object_keys(&self.entries)
+                .get(index)
+                .and_then(|key| keys.iter().position(|candidate| candidate == key))
+        });
+        let (next, next_anchor, target) = apply_object_keyboard_nav(
+            &keys,
+            &self.selected_object_keys,
+            self.selected_object_key.as_deref(),
+            display_anchor,
+            direction,
+            extend,
+        );
+        let next_primary = keys.get(target).cloned();
+        let changed = next != self.selected_object_keys || next_primary != self.selected_object_key;
+        self.selected_object_keys = next;
+        self.selected_object_key = next_primary;
+        self.selection_anchor = next_anchor.and_then(|index| {
+            keys.get(index)
+                .and_then(|key| object_selection_ix(&self.entries, key))
+        });
+        self.object_menu_open = None;
+        self.top_more_open = false;
+        if self.preview_overlay_open && changed {
+            self.start_object_preview(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Return：进入行内重命名。多选（≠1）时忽略——批量改名语义不明确，不做。
     fn handle_rename_object(
         &mut self,
         _: &RenameObject,
@@ -2477,7 +2694,7 @@ impl WorkspaceView {
         let new_name = editor.read(cx).value().to_string();
         // 无变化：直接退出编辑态（Finder 行为）
         if new_name == display_name(&old_key) {
-            cx.notify();
+            self.cancel_rename(cx);
             return;
         }
         if let Some(message) = rename_validation_message(&old_key, &new_name, &self.entries) {
@@ -3643,14 +3860,8 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -3662,7 +3873,8 @@ impl WorkspaceView {
                     }
                 }),
             )
-            .child(modal.clone())
+            .child(modal.clone());
+        overlay::fade_in("add-account-overlay", mask)
     }
 
     /// 设置模态遮罩（结构与添加账号一致）。
@@ -3672,14 +3884,8 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -3691,7 +3897,8 @@ impl WorkspaceView {
                     }
                 }),
             )
-            .child(modal.clone())
+            .child(modal.clone());
+        overlay::fade_in("settings-overlay", mask)
     }
 
     fn render_preview_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -3721,7 +3928,7 @@ impl WorkspaceView {
                 .child(Spinner::new())
                 .child(
                     div()
-                        .text_size(tokens::text(13.))
+                        .text_size(tokens::body())
                         .text_color(theme.muted_foreground)
                         .child("正在准备预览…"),
                 )
@@ -3734,11 +3941,22 @@ impl WorkspaceView {
                 .justify_center()
                 .gap_3()
                 .p_6()
-                .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .text_size(tokens::icon_sm())
+                        .text_color(theme.danger),
+                )
                 .child(
                     div()
-                        .max_w(px(520.))
-                        .text_size(tokens::text(13.))
+                        .text_size(tokens::heading())
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child("预览失败"),
+                )
+                .child(
+                    div()
+                        .max_w(tokens::text(520.))
+                        .text_size(tokens::label())
                         .text_color(theme.muted_foreground)
                         .child(error),
                 )
@@ -3750,7 +3968,7 @@ impl WorkspaceView {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(tokens::text(11.))
+                        .text_size(tokens::caption())
                         .text_color(theme.muted_foreground)
                         .child(format!("{} · 可编辑文本", syntax_language(&object.key))),
                 )
@@ -3763,7 +3981,7 @@ impl WorkspaceView {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(tokens::text(11.))
+                        .text_size(tokens::caption())
                         .text_color(theme.muted_foreground)
                         .child(format!("{} · UTF-8", syntax_language(&object.key))),
                 )
@@ -3772,7 +3990,7 @@ impl WorkspaceView {
                         .flex_1()
                         .w_full()
                         .overflow_y_scrollbar()
-                        .rounded(px(8.))
+                        .rounded(tokens::radius_lg())
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.sidebar)
@@ -3794,10 +4012,17 @@ impl WorkspaceView {
                         // 不用 size_full：img 布局阶段的 aspect_ratio/自然尺寸推导
                         // 会把元素撑出固定高容器、被 overflow 裁成"按宽裁切"。
                         // max 约束让元素始终 ≤ 容器，paint 阶段 Contain 兜底等比。
+                        // 元素尺寸即图像显示尺寸（元素按固有比例定尺寸，
+                        // Contain 不会在元素内再留白），所以描边贴在图像边缘。
+                        // 不加圆角：媒体容器本身是直角，img 只是居中在其内部，
+                        // 给 img 加圆角没有同心依据（容器那条 theme.border 是
+                        // 面板框架，不是图片描边，保留）。
                         img(path)
                             .max_w_full()
                             .max_h_full()
                             .object_fit(ObjectFit::Contain)
+                            .border_1()
+                            .border_color(crate::theme::image_outline(theme.mode))
                             .into_any_element(),
                     )
                     .into_any_element(),
@@ -3812,7 +4037,7 @@ impl WorkspaceView {
                             theme.muted_foreground,
                             theme.accent,
                         )
-                        .text_size(tokens::text(42.)),
+                        .text_size(tokens::icon_lg()),
                     )
                     .into_any_element(),
             }
@@ -3824,17 +4049,21 @@ impl WorkspaceView {
                 .justify_center()
                 .gap_3()
                 .p_6()
-                .child(Icon::new(IconName::Eye).text_color(theme.muted_foreground))
+                .child(
+                    Icon::new(IconName::Eye)
+                        .text_size(tokens::icon_sm())
+                        .text_color(theme.muted_foreground),
+                )
                 .child(
                     div()
-                        .text_size(tokens::text(15.))
+                        .text_size(tokens::heading())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("暂不支持应用内直接预览"),
                 )
                 .child(
                     div()
-                        .max_w(px(420.))
-                        .text_size(tokens::text(12.))
+                        .max_w(tokens::text(420.))
+                        .text_size(tokens::label())
                         .text_color(theme.muted_foreground)
                         .child("此文件可下载到本机后使用系统应用打开；PDF、Office、视频等格式建议使用系统 Quick Look。"),
                 )
@@ -3844,9 +4073,9 @@ impl WorkspaceView {
         let can_open_system = kind == PreviewKind::System && self.preview_path.is_some();
         let meta_label = |label: &'static str| {
             div()
-                .w(px(110.))
+                .w(tokens::text(110.))
                 .flex_shrink_0()
-                .text_size(tokens::text(12.))
+                .text_size(tokens::label())
                 .text_color(theme.muted_foreground)
                 .child(label)
         };
@@ -3855,22 +4084,18 @@ impl WorkspaceView {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(tokens::text(12.))
+                .text_size(tokens::label())
                 .child(value)
         };
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
             .key_context("Overlay")
             .track_focus(&self.overlay_focus)
             .on_action(cx.listener(|this, _: &UnifiedDismiss, window, cx| {
                 this.close_preview_overlay(window, cx)
             }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
+            .on_action(cx.listener(Self::handle_select_object_prev))
+            .on_action(cx.listener(Self::handle_select_object_next))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -3878,16 +4103,10 @@ impl WorkspaceView {
                 }),
             )
             .child(
-                v_flex()
-                    .w(px(800.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .shadow_lg()
+                overlay::surface(theme)
+                    .w_full()
+                    .max_w(px(800.))
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         h_flex()
                             .w_full()
@@ -3900,7 +4119,7 @@ impl WorkspaceView {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(tokens::text(16.))
+                                    .text_size(tokens::title())
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(name.clone()),
                             )
@@ -3968,7 +4187,7 @@ impl WorkspaceView {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(tokens::text(12.))
+                                    .text_size(tokens::label())
                                     .child(object.key.clone()),
                             )
                             .when(self.preview_text.is_some(), |row| {
@@ -4034,22 +4253,15 @@ impl WorkspaceView {
                                     ),
                             ),
                     ),
-            )
-            .into_any_element()
+            );
+        overlay::fade_in("preview-overlay", mask).into_any_element()
     }
 
     fn render_object_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mut menu = v_flex()
-            .w(px(154.))
+        let mut menu = overlay::surface(theme)
+            .w(tokens::text(154.))
             .py_2()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .occlude()
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            .occlude();
 
         for (item_ix, item) in object_menu_items().into_iter().enumerate() {
             let color = if item == ObjectMenuItem::Delete {
@@ -4064,8 +4276,9 @@ impl WorkspaceView {
                     .px_3()
                     .py_2()
                     .gap_2()
-                    .rounded(px(6.))
-                    .text_size(tokens::text(13.))
+                    // 同心圆角：卡片 radius_lg()=8 − mx_1 内缩 4 = 4
+                    .rounded(tokens::radius_nested(px(4.)))
+                    .text_size(tokens::body())
                     .text_color(color)
                     .hover(|row| row.bg(theme.list_hover))
                     .child(Icon::new(object_menu_item_icon(item)).text_color(color))
@@ -4075,29 +4288,28 @@ impl WorkspaceView {
                     })),
             );
         }
-        menu.into_any_element()
+        overlay::fade_in("object-context-menu", menu).into_any_element()
     }
 
     fn render_top_more_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let has_selection = !self.selected_object_keys_vec().is_empty();
-        let mut menu = v_flex()
-            .w(px(120.))
+        let has_bucket = self.selected_bucket.is_some();
+        let mut menu = overlay::surface(theme)
+            .w(tokens::text(154.))
             .py_2()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .occlude()
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            .occlude();
 
         for (item_ix, item) in top_more_menu_items().into_iter().enumerate() {
-            let disabled = !has_selection
-                && matches!(
-                    item,
-                    TopMoreMenuItem::CopyTo | TopMoreMenuItem::MoveTo | TopMoreMenuItem::Delete
-                );
+            if item_ix == 2 {
+                menu = menu.child(div().mx_2().my_1().h(px(1.)).bg(theme.border));
+            }
+            let disabled = match item {
+                TopMoreMenuItem::UploadFolder => !has_bucket || self.uploading,
+                TopMoreMenuItem::CreateFolder => !has_bucket || self.creating_folder,
+                TopMoreMenuItem::CopyTo | TopMoreMenuItem::MoveTo | TopMoreMenuItem::Delete => {
+                    !has_selection
+                }
+            };
             let color = if disabled {
                 theme.muted_foreground
             } else if item == TopMoreMenuItem::Delete {
@@ -4111,8 +4323,10 @@ impl WorkspaceView {
                     .mx_1()
                     .px_3()
                     .py_2()
-                    .rounded(px(6.))
-                    .text_size(tokens::text(13.))
+                    .gap_2()
+                    // 同心圆角：卡片 radius_lg()=8 − mx_1 内缩 4 = 4
+                    .rounded(tokens::radius_nested(px(4.)))
+                    .text_size(tokens::body())
                     .text_color(color)
                     .when(!disabled, |row| row.hover(|row| row.bg(theme.list_hover)))
                     .child(top_more_menu_item_label(item))
@@ -4123,7 +4337,7 @@ impl WorkspaceView {
                     }),
             );
         }
-        menu.into_any_element()
+        overlay::fade_in("top-more-menu", menu).into_any_element()
     }
 
     fn render_details_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -4155,7 +4369,7 @@ impl WorkspaceView {
             .mb_4()
             .border_1()
             .border_color(theme.border)
-            .rounded(px(8.));
+            .rounded(tokens::radius_lg());
         for (label, value, mono) in rows {
             let mut value_el = div().flex_1().min_w_0().truncate().child(value);
             if mono {
@@ -4169,11 +4383,11 @@ impl WorkspaceView {
                     .py_2()
                     .gap_4()
                     .border_b_1()
-                    .border_color(theme.border)
-                    .text_size(tokens::text(13.))
+                    .border_color(theme.table_row_border)
+                    .text_size(tokens::body())
                     .child(
                         div()
-                            .w(px(96.))
+                            .w(tokens::text(96.))
                             .flex_shrink_0()
                             .text_color(theme.muted_foreground)
                             .child(label),
@@ -4182,19 +4396,13 @@ impl WorkspaceView {
             );
         }
 
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
             .key_context("Overlay")
             .track_focus(&self.overlay_focus)
             .on_action(cx.listener(|this, _: &UnifiedDismiss, window, cx| {
                 this.close_details_overlay(window, cx)
             }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -4202,16 +4410,10 @@ impl WorkspaceView {
                 }),
             )
             .child(
-                v_flex()
-                    .w(px(560.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .shadow_lg()
+                overlay::surface(theme)
+                    .w_full()
+                    .max_w(px(560.))
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         h_flex()
                             .w_full()
@@ -4223,7 +4425,7 @@ impl WorkspaceView {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(tokens::text(16.))
+                                    .text_size(tokens::title())
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("对象详情"),
                             )
@@ -4239,26 +4441,20 @@ impl WorkspaceView {
                             ),
                     )
                     .child(content),
-            )
-            .into_any_element()
+            );
+        overlay::fade_in("details-overlay", mask).into_any_element()
     }
 
     /// 「关于」弹层：无输入框，按弹层规范走 Overlay context + UnifiedDismiss，
     /// 遮罩点击关，卡片阻断冒泡。
     fn render_about_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
             .key_context("Overlay")
             .track_focus(&self.overlay_focus)
             .on_action(cx.listener(|this, _: &UnifiedDismiss, window, cx| {
                 this.close_about_overlay(window, cx)
             }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -4266,16 +4462,10 @@ impl WorkspaceView {
                 }),
             )
             .child(
-                v_flex()
-                    .w(px(420.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .shadow_lg()
+                overlay::surface(theme)
+                    .w_full()
+                    .max_w(px(420.))
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     // 标题栏：标题 + 关闭按钮（规范：标题栏右侧 ✕）
                     .child(
                         h_flex()
@@ -4286,7 +4476,7 @@ impl WorkspaceView {
                             .py_3()
                             .child(
                                 div()
-                                    .text_size(tokens::text(16.))
+                                    .text_size(tokens::title())
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("关于 CloudStorage"),
                             )
@@ -4312,13 +4502,15 @@ impl WorkspaceView {
                                     .items_center()
                                     .gap_3()
                                     .child(
+                                        // 圆角与描边必须落在 img 本体上：overflow_hidden
+                                        // 只裁矩形（ContentMask 只有 bounds），圆角写在外层
+                                        // div 上对位图无效——位图仍是方角。外层 div 只负责
+                                        // 抬起感的 shadow_sm（阴影会跟随圆角）。
                                         div()
-                                            .size(px(56.))
-                                            .rounded(px(14.))
+                                            .rounded(tokens::radius_icon())
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .overflow_hidden()
                                             .shadow_sm()
                                             .child(
                                                 img(Arc::new(gpui::Image::from_bytes(
@@ -4326,7 +4518,15 @@ impl WorkspaceView {
                                                     crate::APP_ICON_PNG.to_vec(),
                                                 )))
                                                 .size(px(56.))
-                                                .object_fit(ObjectFit::Cover),
+                                                .rounded(tokens::radius_icon())
+                                                .object_fit(ObjectFit::Cover)
+                                                // 1px 内描边：img 是叶子节点，border 画在
+                                                // 位图之后的自身 bounds 内侧、不内缩位图，
+                                                // 等价 outline:1px + outline-offset:-1px。
+                                                .border_1()
+                                                .border_color(crate::theme::image_outline(
+                                                    theme.mode,
+                                                )),
                                             ),
                                     )
                                     .child(
@@ -4334,14 +4534,14 @@ impl WorkspaceView {
                                             .gap_0p5()
                                             .child(
                                                 div()
-                                                    .text_size(tokens::text(18.))
+                                                    .text_size(tokens::display())
                                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                                     .text_color(theme.foreground)
                                                     .child("CloudStorage"),
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(tokens::text(12.))
+                                                    .text_size(tokens::label())
                                                     .text_color(theme.muted_foreground)
                                                     .child(format!(
                                                         "版本 {} · macOS 14+",
@@ -4353,7 +4553,7 @@ impl WorkspaceView {
                             .child(
                                 div()
                                     .w_full()
-                                    .rounded(px(8.))
+                                    .rounded(tokens::radius_lg())
                                     .border_1()
                                     .border_color(theme.border)
                                     .bg(theme.sidebar)
@@ -4384,168 +4584,14 @@ impl WorkspaceView {
                                     ),
                             ),
                     ),
-            )
-            .into_any_element()
+            );
+        overlay::fade_in("about-overlay", mask).into_any_element()
     }
 
     fn close_about_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.about_overlay_open = false;
         window.focus(&self.focus_handle, cx);
         cx.notify();
-    }
-
-    fn render_rename_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let Some((old_key, editor)) = self.renaming.as_ref() else {
-            return div().into_any_element();
-        };
-        let current_name = editor.read(cx).value().to_string();
-        let validation_message = rename_validation_message(old_key, &current_name, &self.entries);
-        let can_confirm = !self.renaming_busy && validation_message.is_none();
-
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .key_context("Renaming")
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    if !this.renaming_busy {
-                        this.cancel_rename(cx);
-                    }
-                }),
-            )
-            .child(
-                v_flex()
-                    .w(px(480.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .gap_3()
-                            .px_4()
-                            .py_3()
-                            .child(
-                                div()
-                                    .text_size(tokens::text(16.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("重命名"),
-                            )
-                            .child(
-                                Button::new("close-rename-overlay")
-                                    .icon(Icon::new(IconName::Close))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("关闭")
-                                    .disabled(self.renaming_busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .px_4()
-                            .gap_3()
-                            .child(
-                                h_flex()
-                                    .gap_4()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w(px(74.))
-                                            .flex_shrink_0()
-                                            .text_size(tokens::text(13.))
-                                            .text_color(theme.foreground)
-                                            .child("原路径："),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(tokens::text(13.))
-                                            .child(old_key.clone()),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_4()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w(px(74.))
-                                            .flex_shrink_0()
-                                            .text_size(tokens::text(13.))
-                                            .text_color(theme.foreground)
-                                            .child("重命名："),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(Input::new(editor).small()),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_4()
-                                    .child(div().w(px(74.)).flex_shrink_0())
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(tokens::text(12.))
-                                            .text_color(theme.muted_foreground)
-                                            .line_height(px(20.))
-                                            .child("请注意，若您针对目录重命名则该目录下所有路径名称将一并修改"),
-                                    ),
-                            )
-                            .children(validation_message.map(|message| {
-                                h_flex()
-                                    .gap_4()
-                                    .child(div().w(px(74.)).flex_shrink_0())
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(tokens::text(12.))
-                                            .text_color(theme.danger)
-                                            .line_height(px(20.))
-                                            .child(message),
-                                    )
-                            })),
-                    )
-                    .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .px_4()
-                            .py_3()
-                            .child(
-                                Button::new("cancel-rename")
-                                    .label("取消")
-                                    .disabled(self.renaming_busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
-                            )
-                            .child(
-                                Button::new("confirm-rename")
-                                    .label("确认修改")
-                                    .primary()
-                                    .disabled(!can_confirm)
-                                    .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx))),
-                            ),
-                    ),
-            )
-            .into_any_element()
     }
 
     fn render_create_folder_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -4561,15 +4607,9 @@ impl WorkspaceView {
         let can_confirm = !self.creating_folder && validation_message.is_none();
         let parent = self.current_prefix.as_deref().unwrap_or("/").to_string();
 
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
             .key_context("Renaming")
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -4577,16 +4617,10 @@ impl WorkspaceView {
                 }),
             )
             .child(
-                v_flex()
-                    .w(px(480.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .shadow_lg()
+                overlay::surface(theme)
+                    .w_full()
+                    .max_w(px(480.))
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         h_flex()
                             .w_full()
@@ -4596,7 +4630,7 @@ impl WorkspaceView {
                             .py_3()
                             .child(
                                 div()
-                                    .text_size(tokens::text(16.))
+                                    .text_size(tokens::title())
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("新建目录"),
                             )
@@ -4622,9 +4656,9 @@ impl WorkspaceView {
                                     .items_center()
                                     .child(
                                         div()
-                                            .w(px(74.))
+                                            .w(tokens::text(74.))
                                             .flex_shrink_0()
-                                            .text_size(tokens::text(13.))
+                                            .text_size(tokens::body())
                                             .text_color(theme.foreground)
                                             .child("所在目录："),
                                     )
@@ -4633,7 +4667,7 @@ impl WorkspaceView {
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(tokens::text(13.))
+                                            .text_size(tokens::body())
                                             .child(parent),
                                     ),
                             )
@@ -4643,9 +4677,9 @@ impl WorkspaceView {
                                     .items_center()
                                     .child(
                                         div()
-                                            .w(px(74.))
+                                            .w(tokens::text(74.))
                                             .flex_shrink_0()
-                                            .text_size(tokens::text(13.))
+                                            .text_size(tokens::body())
                                             .text_color(theme.foreground)
                                             .child("目录名："),
                                     )
@@ -4656,11 +4690,11 @@ impl WorkspaceView {
                             .child(
                                 h_flex()
                                     .gap_4()
-                                    .child(div().w(px(74.)).flex_shrink_0())
+                                    .child(div().w(tokens::text(74.)).flex_shrink_0())
                                     .child(
                                         div()
                                             .flex_1()
-                                            .text_size(tokens::text(12.))
+                                            .text_size(tokens::label())
                                             .text_color(theme.muted_foreground)
                                             .line_height(px(20.))
                                             .child("对象存储目录会创建为以 / 结尾的占位对象。"),
@@ -4669,11 +4703,11 @@ impl WorkspaceView {
                             .children(validation_message.map(|message| {
                                 h_flex()
                                     .gap_4()
-                                    .child(div().w(px(74.)).flex_shrink_0())
+                                    .child(div().w(tokens::text(74.)).flex_shrink_0())
                                     .child(
                                         div()
                                             .flex_1()
-                                            .text_size(tokens::text(12.))
+                                            .text_size(tokens::label())
                                             .text_color(theme.danger)
                                             .line_height(px(20.))
                                             .child(message),
@@ -4708,8 +4742,8 @@ impl WorkspaceView {
                                     ),
                             ),
                     ),
-            )
-            .into_any_element()
+            );
+        overlay::fade_in("create-folder-overlay", mask).into_any_element()
     }
 
     fn render_copy_move_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -4782,7 +4816,7 @@ impl WorkspaceView {
                     .justify_center()
                     .gap_2()
                     .text_color(theme.muted_foreground)
-                    .text_size(tokens::text(13.))
+                    .text_size(tokens::body())
                     .child(Spinner::new())
                     .child("加载目录中…"),
             );
@@ -4795,7 +4829,7 @@ impl WorkspaceView {
                     .justify_center()
                     .gap_2()
                     .text_color(theme.danger)
-                    .text_size(tokens::text(13.))
+                    .text_size(tokens::body())
                     .child(Icon::new(IconName::TriangleAlert))
                     .child(message.clone()),
             );
@@ -4807,7 +4841,7 @@ impl WorkspaceView {
                     .items_center()
                     .justify_center()
                     .text_color(theme.muted_foreground)
-                    .text_size(tokens::text(13.))
+                    .text_size(tokens::body())
                     .child("没有可显示的目录，可直接输入目标目录"),
             );
         }
@@ -4820,8 +4854,8 @@ impl WorkspaceView {
                     .py_2()
                     .gap_2()
                     .border_b_1()
-                    .border_color(theme.border)
-                    .text_size(tokens::text(13.))
+                    .border_color(theme.table_row_border)
+                    .text_size(tokens::body())
                     .hover(|row| row.bg(theme.list_hover))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -4839,15 +4873,9 @@ impl WorkspaceView {
             );
         }
 
-        div()
-            .absolute()
-            .inset_0()
+        let mask = overlay::mask(theme)
             .occlude()
             .key_context("Renaming")
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -4855,17 +4883,11 @@ impl WorkspaceView {
                 }),
             )
             .child(
-                v_flex()
-                    .w(px(760.))
+                overlay::surface(theme)
+                    .w_full()
+                    .max_w(px(760.))
                     .h(px(560.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .shadow_lg()
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         h_flex()
                             .w_full()
@@ -4875,7 +4897,7 @@ impl WorkspaceView {
                             .py_3()
                             .child(
                                 div()
-                                    .text_size(tokens::text(16.))
+                                    .text_size(tokens::title())
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(title),
                             )
@@ -4897,9 +4919,9 @@ impl WorkspaceView {
                             .mb_3()
                             .px_3()
                             .py_2()
-                            .rounded(px(4.))
+                            .rounded(tokens::radius())
                             .bg(theme.sidebar)
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .text_color(theme.muted_foreground)
                             .child(location),
                     )
@@ -4912,7 +4934,7 @@ impl WorkspaceView {
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.sidebar)
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child("名称"),
                     )
@@ -4930,7 +4952,7 @@ impl WorkspaceView {
                         div()
                             .mx_6()
                             .mt_3()
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .text_color(theme.danger)
                             .child(message)
                     }))
@@ -4943,7 +4965,7 @@ impl WorkspaceView {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .text_size(tokens::text(12.))
+                                    .text_size(tokens::label())
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{} 个对象", state.source_keys.len()))
                                     .child("遇到同名文件：询问"),
@@ -4984,8 +5006,8 @@ impl WorkspaceView {
                                     ),
                             ),
                     ),
-            )
-            .into_any_element()
+            );
+        overlay::fade_in("copy-move-overlay", mask).into_any_element()
     }
 
     // ---- Action 处理（与菜单/快捷键共享） ----
@@ -5364,7 +5386,11 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
+        // 这里的遮罩**不能**用 `overlay::mask()`：命令面板卡片由 GPUI Kit `Command`
+        // 自行绝对定位（按窗口宽度算 left），而绝对定位子元素的包含块是这个遮罩的
+        // **padding box**——mask 自带 p_6，套上去会把卡片整体右移 24px 而偏心。
+        // 所以命令面板用无内边距的遮罩（其余 9 个浮层仍一律走 mask()）。
+        let scrim = div()
             .absolute()
             .inset_0()
             .occlude() // 挡住下层元素的鼠标交互
@@ -5377,31 +5403,182 @@ impl WorkspaceView {
                     }
                 }),
             )
-            .child(palette.clone())
+            .child(palette.clone());
+        overlay::fade_in("command-palette", scrim)
     }
 
-    fn render_title_bar(&self, _theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_icon = if self.sidebar_collapsed {
             IconName::PanelLeftOpen
         } else {
             IconName::PanelLeftClose
         };
+        let has_bucket = self.selected_bucket.is_some();
         TitleBar::new().child(
             h_flex()
                 .w_full()
-                .justify_between()
-                // 左：Sidebar 开关
+                .h_full()
+                .items_center()
+                .gap_1()
+                .pr_2()
                 .child(
                     Button::new("toggle-sidebar")
                         .icon(Icon::new(sidebar_icon))
                         .ghost()
                         .with_size(Size::Small)
+                        .tooltip(if self.sidebar_collapsed {
+                            "展开边栏 ⌘⌥S"
+                        } else {
+                            "折叠边栏 ⌘⌥S"
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
-                // 中：标题
-                .child("CloudStorage")
-                .child(div().w(px(32.))),
+                .child(
+                    Button::new("nav-back")
+                        .icon(Icon::new(IconName::ArrowLeft))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .tooltip("后退 ⌘[")
+                        .disabled(self.nav_back.is_empty())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
+                )
+                .child(
+                    Button::new("nav-forward")
+                        .icon(Icon::new(IconName::ArrowRight))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .tooltip("前进 ⌘]")
+                        .disabled(self.nav_forward.is_empty())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
+                )
+                .child(self.render_title_location(theme, cx))
+                .child(self.render_title_trailing(theme, has_bucket, cx)),
         )
+    }
+
+    /// Titlebar 中段：⌘L 路径框，否则当前 bucket / prefix 面包屑。
+    fn render_title_location(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(editor) = &self.path_input {
+            return h_flex()
+                .id("title-path")
+                .key_context("ObjectFilter")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .gap_2()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(tokens::caption())
+                        .text_color(theme.muted_foreground)
+                        .child("回车跳转"),
+                )
+                .into_any_element();
+        }
+        match self.selected_bucket.as_deref() {
+            Some(bucket) => self.render_breadcrumb(theme, bucket, cx).into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .text_size(tokens::body())
+                .text_color(theme.muted_foreground)
+                .child("CloudStorage")
+                .into_any_element(),
+        }
+    }
+
+    fn render_title_trailing(
+        &self,
+        theme: &Theme,
+        has_bucket: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .when(has_bucket, |row| {
+                row.child(self.render_title_filter(theme, cx))
+                    .child(
+                        Button::new("toolbar-upload-files")
+                            .icon(Icon::new(IconName::ArrowUp))
+                            .label(if self.uploading {
+                                "选择文件…"
+                            } else {
+                                "上传"
+                            })
+                            .with_size(Size::Small)
+                            .disabled(self.uploading)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                Button::new("toolbar-more")
+                                    .icon(Icon::new(IconName::Ellipsis))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("更多操作")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_top_more_menu(cx)),
+                                    ),
+                            )
+                            .when(self.top_more_open, |button| {
+                                button.child(deferred(
+                                    anchored()
+                                        .anchor(Anchor::TopRight)
+                                        .offset(point(px(0.), px(4.)))
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(self.render_top_more_menu(theme, cx)),
+                                ))
+                            }),
+                    )
+            })
+    }
+
+    fn render_title_filter(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(editor) = &self.object_filter {
+            return h_flex()
+                .id("title-filter")
+                .key_context("ObjectFilter")
+                .w(tokens::text(220.))
+                .items_center()
+                .gap_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
+                .child(
+                    Button::new("filter-close")
+                        .icon(Icon::new(IconName::Close))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_object_filter(window, cx);
+                        })),
+                )
+                .into_any_element();
+        }
+        let _ = theme;
+        Button::new("objects-filter")
+            .icon(Icon::new(IconName::Search))
+            .ghost()
+            .with_size(Size::Small)
+            .tooltip("过滤 ⌘F")
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.handle_toggle_object_filter(&ToggleObjectFilter, window, cx);
+            }))
+            .into_any_element()
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -5447,7 +5624,7 @@ impl WorkspaceView {
             .px_3()
             .pt_2()
             .pb_1()
-            .text_size(tokens::text(11.))
+            .text_size(tokens::caption())
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.muted_foreground)
             .child(label.to_string())
@@ -5455,7 +5632,7 @@ impl WorkspaceView {
 
     /// 展开态 Sidebar（自建，宽度由 Resizable 面板控制，内容 w_full 填充）。
     fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut sidebar = v_flex()
+        v_flex()
             .h_full()
             .w_full()
             .overflow_hidden()
@@ -5463,28 +5640,30 @@ impl WorkspaceView {
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
-            .child(self.sidebar_section_label(theme, "账户"))
-            .children(self.render_account_rows(theme, cx))
-            .child(self.render_add_account_row(theme, cx));
-
-        if self.selected_account_id.is_some() {
-            sidebar = sidebar
-                .child(self.sidebar_section_label(theme, "空间"))
-                .children(self.render_bucket_rows(theme, cx));
-        } else {
-            sidebar = sidebar
-                .child(self.sidebar_section_label(theme, "空间"))
-                .child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_size(tokens::text(12.))
-                        .text_color(theme.muted_foreground)
-                        .child("先选择一个账号"),
-                );
-        }
-
-        sidebar.child(div().flex_1())
+            .child(
+                v_flex()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.sidebar_section_label(theme, "账户"))
+                    .children(self.render_account_rows(theme, cx))
+                    .child(self.render_add_account_row(theme, cx))
+                    .child(self.sidebar_section_label(theme, "空间"))
+                    .children(if self.selected_account_id.is_some() {
+                        self.render_bucket_rows(theme, cx)
+                    } else {
+                        vec![
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_size(tokens::label())
+                                .text_color(theme.muted_foreground)
+                                .child("先选择一个账号")
+                                .into_any_element(),
+                        ]
+                    }),
+            )
     }
 
     /// 账户区：加载态 / 错误重试 / 真实账号行（点击选中并加载空间）。
@@ -5509,7 +5688,7 @@ impl WorkspaceView {
                         div()
                             .px_3()
                             .py_1()
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .text_color(theme.muted_foreground)
                             .child("还没有账号，点下方添加")
                             .into_any_element(),
@@ -5525,7 +5704,7 @@ impl WorkspaceView {
                         self.sidebar_row(
                             theme,
                             SharedString::from(format!("account-row-{ix}")),
-                            IconName::User,
+                            provider_icon(account.provider),
                             &account.name,
                             active,
                             cx.listener(move |this, _, _, cx| this.select_account(&id, cx)),
@@ -5544,17 +5723,14 @@ impl WorkspaceView {
             .mx_2()
             .mt_1()
             .px_2()
-            .py(px(5.))
-            .rounded(px(6.))
+            .py(tokens::row_pad_y_sidebar())
+            .rounded(tokens::radius())
             .flex()
             .items_center()
             .gap_2()
-            .text_size(tokens::text(13.))
+            .text_size(tokens::body())
             .text_color(theme.muted_foreground)
-            .hover(|row| {
-                row.bg(theme.sidebar_accent)
-                    .text_color(theme.sidebar_accent_foreground)
-            })
+            .hover(|row| row.bg(theme.list_hover).text_color(theme.foreground))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.handle_open_add_modal(&AddAccount, window, cx);
             }))
@@ -5588,7 +5764,7 @@ impl WorkspaceView {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(tokens::text(11.))
+                                        .text_size(tokens::caption())
                                         .text_color(theme.muted_foreground)
                                         .child("空间名称"),
                                 )
@@ -5614,7 +5790,6 @@ impl WorkspaceView {
                                 .child(
                                     Button::new("open-manual-bucket")
                                         .label("输入 Bucket 名称…")
-                                        .primary()
                                         .with_size(Size::Small)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.manual_bucket_input = Some(cx.new(|cx| {
@@ -5636,7 +5811,7 @@ impl WorkspaceView {
                         div()
                             .px_3()
                             .py_1()
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .text_color(theme.muted_foreground)
                             .child("（此账号没有空间）")
                             .into_any_element(),
@@ -5668,9 +5843,9 @@ impl WorkspaceView {
         h_flex()
             .mx_2()
             .px_2()
-            .py(px(5.))
+            .py(tokens::row_pad_y_sidebar())
             .gap_2()
-            .text_size(tokens::text(12.))
+            .text_size(tokens::label())
             .text_color(theme.muted_foreground)
             .child(Spinner::new().with_size(Size::Small))
             .child(label)
@@ -5687,30 +5862,34 @@ impl WorkspaceView {
     where
         F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     {
-        v_flex()
+        // 图标单独一列、文案（消息 + 「点击重试」）同列堆叠：对齐由结构
+        // 决定，不用手算图标宽度做 pl 偏移——那种偏移在图标尺寸或字距
+        // 变化后必然错位。
+        h_flex()
             .id(id)
             .mx_2()
             .px_2()
             .py_2()
-            .gap_1()
-            .rounded(px(6.))
-            .text_size(tokens::text(12.))
+            .gap_2()
+            .items_start()
+            .rounded(tokens::radius())
+            .text_size(tokens::label())
             .text_color(theme.danger)
-            .hover(|row| row.bg(theme.sidebar_accent))
+            .hover(|row| row.bg(theme.list_hover))
             .on_click(on_click)
+            .child(Icon::new(IconName::TriangleAlert))
             .child(
-                h_flex()
-                    .items_start()
-                    .gap_2()
-                    .child(Icon::new(IconName::TriangleAlert))
-                    .child(div().flex_1().min_w_0().child(msg.to_string())),
-            )
-            .child(
-                div()
-                    .pl(px(22.))
-                    .text_size(tokens::text(11.))
-                    .text_color(theme.muted_foreground)
-                    .child("点击重试"),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(msg.to_string())
+                    .child(
+                        div()
+                            .text_size(tokens::caption())
+                            .text_color(theme.muted_foreground)
+                            .child("点击重试"),
+                    ),
             )
     }
 
@@ -5731,32 +5910,34 @@ impl WorkspaceView {
             .id(id)
             .mx_2()
             .px_2()
-            .py(px(5.))
-            .rounded(px(6.))
+            .py(tokens::row_pad_y_sidebar())
+            .rounded(tokens::radius())
             .flex()
             .items_center()
             .gap_2()
-            .text_size(tokens::text(13.))
+            .text_size(tokens::body())
             .when(active, |row| {
                 row.bg(theme.sidebar_accent)
                     .text_color(theme.sidebar_accent_foreground)
             })
-            .hover(|row| row.bg(theme.sidebar_accent))
+            .when(!active, |row| row.hover(|row| row.bg(theme.list_hover)))
             .on_click(on_click)
             .child(Icon::new(icon))
             .child(div().truncate().child(label.to_string()))
     }
 
-    /// 折叠态 44px 图标栏（规范硬指标）。点击顶部按钮恢复展开。
+    /// 折叠态 44px 图标栏（规范硬指标）。顶部展开，下方账号/空间图标入口。
     fn render_sidebar_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        let mut rail = v_flex()
+            .id("sidebar-rail")
             .w(RAIL_WIDTH)
             .h_full()
             .flex_shrink_0()
             .items_center()
             .pt_2()
             .pb_2()
-            .gap_2()
+            .gap_1()
+            .overflow_y_scroll()
             .bg(theme.sidebar)
             .text_color(theme.sidebar_foreground)
             .border_r_1()
@@ -5768,12 +5949,53 @@ impl WorkspaceView {
                     .with_size(Size::Small)
                     .tooltip("展开边栏 ⌘⌥S")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-            )
+            );
+
+        for (ix, account) in self.accounts.iter().enumerate() {
+            let active = self.selected_account_id.as_deref() == Some(account.id.as_str());
+            let id = account.id.clone();
+            let name = account.name.clone();
+            rail = rail.child(
+                Button::new(("rail-account", ix))
+                    .icon(Icon::new(provider_icon(account.provider)))
+                    .ghost()
+                    .with_size(Size::Small)
+                    .tooltip(name)
+                    .when(active, |btn| {
+                        btn.bg(theme.sidebar_accent)
+                            .text_color(theme.sidebar_accent_foreground)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_account(&id, cx))),
+            );
+        }
+
+        if self.selected_account_id.is_some() && !self.buckets.is_empty() {
+            rail = rail.child(div().w(px(16.)).h(px(1.)).my_1().bg(theme.sidebar_border));
+            for (ix, bucket) in self.buckets.iter().enumerate() {
+                let active = self.selected_bucket.as_deref() == Some(bucket.name.as_str());
+                let name = bucket.name.clone();
+                let tooltip = name.clone();
+                rail = rail.child(
+                    Button::new(("rail-bucket", ix))
+                        .icon(Icon::new(IconName::Folder))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .tooltip(tooltip)
+                        .when(active, |btn| {
+                            btn.bg(theme.sidebar_accent)
+                                .text_color(theme.sidebar_accent_foreground)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_bucket(&name, cx))),
+                );
+            }
+        }
+
+        rail
     }
 
     /// 中间内容区：对象列表（选中桶后异步加载，含前缀导航与翻页）。
     fn render_content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(bucket) = self.selected_bucket.clone() else {
+        let Some(_bucket) = self.selected_bucket.clone() else {
             let (title, hint) = if self.selected_account_id.is_some() {
                 ("选择一个 Bucket", "从左侧列表选择空间，查看其中对象")
             } else {
@@ -5790,15 +6012,15 @@ impl WorkspaceView {
                         .gap_2()
                         .bg(theme.background)
                         .text_color(theme.muted_foreground)
-                        .child(Icon::new(IconName::Inbox).text_size(tokens::text(28.)))
+                        .child(Icon::new(IconName::Inbox).text_size(tokens::icon_sm()))
                         .child(
                             div()
-                                .text_size(tokens::text(15.))
+                                .text_size(tokens::heading())
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme.foreground)
                                 .child(title),
                         )
-                        .child(div().text_size(tokens::text(12.)).child(hint)),
+                        .child(div().text_size(tokens::label()).child(hint)),
                     cx,
                 )
                 .into_any_element();
@@ -5814,14 +6036,13 @@ impl WorkspaceView {
                 .min_h_0()
                 .h_full()
                 .overflow_hidden()
-                .bg(theme.background)
-                .child(self.render_content_toolbar(theme, &bucket, cx)),
+                .bg(theme.background),
             cx,
         );
-        // ⌘F 过滤条（开启时出现在 toolbar 与列表之间）
-        if let Some(bar) = self.render_filter_bar(theme, cx) {
-            content = content.child(bar);
-        }
+        // 选中信息与下载动作在底部状态条里就地展示（见
+        // render_object_status_bar）——不做独立于列表的选中条：那种
+        // 「选中才出现」的条会把表头与全部行整体下推，选中/取消时
+        // 内容跳动，Finder / Linear 都不这样做。
         if self.objects_state == AsyncState::Loading && self.entries.is_empty() {
             content = content.child(
                 div()
@@ -5849,8 +6070,24 @@ impl WorkspaceView {
                         .justify_center()
                         .gap_2()
                         .text_color(theme.muted_foreground)
-                        .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
-                        .child(div().max_w(px(480.)).child(msg.clone()))
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .text_size(tokens::icon_sm())
+                                .text_color(theme.danger),
+                        )
+                        .child(
+                            div()
+                                .text_size(tokens::heading())
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .child("加载对象列表失败"),
+                        )
+                        .child(
+                            div()
+                                .max_w(tokens::text(480.))
+                                .text_size(tokens::label())
+                                .child(msg.clone()),
+                        )
                         .child(
                             Button::new("objects-retry")
                                 .label("重试")
@@ -5868,460 +6105,137 @@ impl WorkspaceView {
                     .gap_2()
                     .px_2()
                     .py_1()
-                    .rounded(px(6.))
+                    .rounded(tokens::radius())
                     .text_color(theme.danger)
-                    .text_size(tokens::text(12.))
+                    .text_size(tokens::label())
                     .child(Icon::new(IconName::TriangleAlert))
                     .child(format!("加载更多失败：{msg}")),
             );
         }
 
         content = content
-            .child(self.render_object_list_header(theme))
+            .child(self.render_object_list_header(theme, cx))
             .child(
                 div()
-                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_object_list(theme, cx))
-                    // 空白清空层必须 absolute 覆盖（普通子元素无约束时高度
-                    // 为 0，content_bounds 恒零 → 命中检测永不生效）。
-                    .child(self.render_blank_clear_layer(cx).absolute().inset_0()),
+                    .child(self.render_object_list(theme, cx)),
             )
             .child(self.render_transfer_panel(theme, cx))
             .child(self.render_object_status_bar(theme, cx));
         content.into_any_element()
     }
 
-    /// 空白点击清空（Finder 语义）——canvas + window 级监听 + 几何命中检测。
-    /// 不依赖容器事件分发顺序：钩子只处理「坐标在内容区但不在任何行内」
-    /// 的点击（行点击由行自己的处理器负责，互不干扰，顺序无关）。
-    ///
-    /// B6 根因（此前三种方案失败的真正原因）：canvas 回调里
-    /// `window.root::<WorkspaceView>()` 的窗口根是 gpui-component 的 `Root`
-    /// 包装（main.rs `Root::new(workspace, …)`），downcast 永远返回
-    /// `Some(None)`，bounds 从未写入、钩子静默 return。修复：回调改用
-    /// `cx.weak_entity()` 升级实体取 self，不经过 window.root。
-    fn render_blank_clear_layer(&self, cx: &mut Context<Self>) -> gpui::Canvas<()> {
-        let weak = cx.weak_entity();
-        let weak_bounds = weak.clone();
-        gpui::canvas(
-            move |bounds, _window, _cx| {
-                // 每帧执行：记录内容区 bounds
-                if let Some(view) = weak_bounds.upgrade() {
-                    view.update(_cx, |this, _| {
-                        *this.content_bounds.borrow_mut() = Some(bounds);
-                    });
-                }
-            },
-            move |_bounds, _state, window, _cx| {
-                window.on_mouse_event({
-                    let weak = weak.clone();
-                    move |event: &MouseDownEvent, phase, _window, cx| {
-                        // 只在 bubble 阶段处理一次
-                        if phase != gpui::DispatchPhase::Bubble {
-                            return;
-                        }
-                        let Some(view) = weak.upgrade() else {
-                            return;
-                        };
-                        view.update(cx, |this, cx| {
-                            let Some(content) = *this.content_bounds.borrow() else {
-                                return;
-                            };
-                            if !content.contains(&event.position) {
-                                return;
-                            }
-                            if event.modifiers.platform || event.modifiers.shift {
-                                return;
-                            }
-                            let hit_row = this
-                                .row_bounds
-                                .borrow()
-                                .iter()
-                                .any(|b| b.contains(&event.position));
-                            if hit_row {
-                                return;
-                            }
-                            // 空白点击：有选择则清空（含修饰键——Finder 语义：
-                            // 空白点击永远清空，⌘ 只对行点击有意义）
-                            if this.selected_object_keys.is_empty()
-                                && this.selected_object_key.is_none()
-                            {
-                                return;
-                            }
-                            this.clear_object_selection();
-                            this.selection_before_capture = None;
-                            cx.notify();
-                        });
-                    }
-                });
-            },
-        )
-    }
-
-    /// 行 bounds 记录器：透明 canvas 包住一行，paint 阶段把自身 bounds
-    /// 写入 row_bounds（供空白点击命中检测）。不拦截任何事件。
-    /// 实体获取走 weak_entity（B6 根因：window.root 是 Root 包装，downcast 失败）。
-    fn row_bounds_recorder(&self, cx: &Context<Self>) -> gpui::Canvas<()> {
-        let weak = cx.weak_entity();
-        gpui::canvas(
-            move |bounds, _window, _cx| {
-                if let Some(view) = weak.upgrade() {
-                    view.update(_cx, |this, _| {
-                        this.row_bounds.borrow_mut().push(bounds);
-                    });
-                }
-            },
-            |_bounds, _state, _window, _cx| {},
-        )
-    }
-
-    /// ⌘F 过滤条：输入框 + 命中统计。context "ObjectFilter" 接 Esc 关闭。
-    fn render_filter_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let editor = self.object_filter.as_ref()?.clone();
-        let total = self.entries.len();
-        let matched = self.filtered_ix.as_ref().map(Vec::len).unwrap_or(total);
-        let stats = if matched == total {
-            format!("共 {total} 项")
-        } else {
-            format!("匹配 {matched} / 共 {total} 项")
-        };
-        Some(
-            h_flex()
-                .key_context("ObjectFilter")
-                .w_full()
-                .px_3()
-                .py_1()
-                .gap_2()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(div().flex_1().min_w_0().child(Input::new(&editor).small()))
-                .child(
-                    div()
-                        .text_size(tokens::text(12.))
-                        .text_color(theme.muted_foreground)
-                        .child(stats),
-                )
-                .child(
-                    Button::new("filter-close")
-                        .icon(Icon::new(IconName::Close))
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_object_filter(window, cx);
-                        })),
-                ),
-        )
-    }
-
-    /// 内容区工具行：桶名 + 当前前缀 + 返回上一级 / 刷新。
-    fn render_content_toolbar(
+    /// Titlebar 面包屑：bucket / prefix…（长路径折叠）。
+    fn render_breadcrumb(
         &self,
         theme: &Theme,
         bucket: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let has_selection = !self.selected_object_keys.is_empty();
-        // ⌘L 路径输入态：整条工具栏替换为输入框（Esc 关闭复用 DismissFilter）
-        if let Some(editor) = &self.path_input {
-            return v_flex()
-                .w_full()
-                .border_b_1()
-                .border_color(theme.border)
-                .key_context("ObjectFilter")
-                .child(
-                    h_flex()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .gap_2()
-                        .child(
-                            Button::new("path-cancel")
-                                .icon(Icon::new(IconName::Close))
-                                .ghost()
-                                .with_size(Size::Small)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.path_input = None;
-                                    this.focus_handle.focus(window, cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
-                        .child(
-                            div()
-                                .text_size(tokens::text(12.))
-                                .text_color(theme.muted_foreground)
-                                .child("回车跳转"),
-                        ),
-                );
-        }
-        v_flex()
-            .w_full()
-            .border_b_1()
-            .border_color(theme.border)
+        let mut path = h_flex()
+            .id("title-breadcrumb")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .items_center()
+            .gap_1()
+            .overflow_hidden()
+            .text_size(tokens::label())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                h_flex()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    .text_size(tokens::text(13.))
-                    .child(
-                        Button::new("toolbar-upload-files")
-                            .icon(Icon::new(IconName::ArrowUp))
-                            .label(if self.uploading {
-                                "选择文件…"
-                            } else {
-                                "上传"
-                            })
-                            .primary()
-                            .with_size(Size::Small)
-                            .disabled(self.uploading)
-                            .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
+                div()
+                    .px_1()
+                    .rounded(tokens::radius())
+                    .flex_shrink_0()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .hover(|el| el.bg(theme.list_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.open_bucket_root(cx)),
                     )
-                    .child(
-                        Button::new("toolbar-upload-folder")
-                            .label("上传文件夹")
-                            .with_size(Size::Small)
-                            .disabled(self.uploading)
-                            .on_click(cx.listener(|this, _, _, cx| this.start_folder_upload(cx))),
-                    )
-                    .child(
-                        Button::new("toolbar-create-folder")
-                            .label(if self.creating_folder {
-                                "创建中…"
-                            } else {
-                                "新建目录"
-                            })
-                            .with_size(Size::Small)
-                            .disabled(self.creating_folder)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_create_folder_overlay(window, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .child(
-                                Button::new("toolbar-more")
-                                    .icon(Icon::new(IconName::Ellipsis))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("更多操作")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_top_more_menu(cx)),
-                                    ),
-                            )
-                            .when(self.top_more_open, |button| {
-                                // gpui 浮层标准写法（对齐 gpui-component select/popup_menu）：
-                                // deferred 保证下一帧绘制在最上层；anchored 的 child 直接是
-                                // 菜单卡片。此前内嵌 div().absolute() 与 anchored 锚定机制
-                                // 冲突，菜单渲染不可见（点击 ⋯ 后无菜单弹出）。
-                                button.child(deferred(
-                                    anchored()
-                                        .anchor(Anchor::TopRight)
-                                        .offset(point(px(0.), px(4.)))
-                                        .snap_to_window_with_margin(px(8.))
-                                        .child(self.render_top_more_menu(theme, cx)),
-                                ))
-                            }),
-                    )
-                    .child(div().flex_1())
-                    .children(has_selection.then(|| {
-                        div()
-                            .flex_shrink_0()
-                            .text_size(tokens::text(12.))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("已选择 {} 个对象", self.selected_object_keys.len()))
-                    }))
-                    .child(
-                        Button::new("toolbar-download")
-                            .icon(Icon::new(IconName::ArrowDown))
-                            .label("下载")
-                            .with_size(Size::Small)
-                            .disabled(!has_selection || self.downloading)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.start_object_download(window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("toolbar-clear-selection")
-                            .label("取消选择")
-                            .ghost()
-                            .with_size(Size::Small)
-                            .disabled(!has_selection)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.clear_object_selection();
-                                cx.notify();
-                            })),
-                    )
-                    .children(self.current_prefix.is_some().then(|| {
-                        Button::new("objects-go-up")
-                            .icon(Icon::new(IconName::ArrowUp))
-                            .ghost()
-                            .with_size(Size::Small)
-                            .tooltip("上级 ⌘⇧[")
-                            .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
-                    }))
-                    .child(
-                        Button::new("nav-back")
-                            .icon(Icon::new(IconName::ArrowLeft))
-                            .ghost()
-                            .with_size(Size::Small)
-                            .tooltip("后退 ⌘[")
-                            .disabled(self.nav_back.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
-                    )
-                    .child(
-                        Button::new("nav-forward")
-                            .icon(Icon::new(IconName::ArrowRight))
-                            .ghost()
-                            .with_size(Size::Small)
-                            .tooltip("前进 ⌘]")
-                            .disabled(self.nav_forward.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
-                    )
-                    .child(
-                        Button::new("objects-focus-path")
-                            .icon(Icon::new(IconName::Search))
-                            .ghost()
-                            .with_size(Size::Small)
-                            .tooltip("跳转路径 ⌘L")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.handle_focus_path(&FocusPath, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("objects-sort")
-                            .icon(Icon::new(IconName::SortAscending))
-                            .label(self.object_sort.label())
-                            .ghost()
-                            .with_size(Size::Small)
-                            .tooltip("切换排序方式")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.object_sort = this.object_sort.next();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("objects-refresh")
-                            .label("刷新")
-                            .ghost()
-                            .with_size(Size::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.reload_objects(cx))),
-                    ),
-            )
-            .child({
-                let mut path = h_flex()
-                    .w_full()
-                    .px_3()
-                    .pb_2()
-                    .gap_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_size(tokens::text(12.))
+                    .child(bucket.to_string()),
+            );
+        let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
+        let (collapsed, segments) = match collapse_breadcrumb(&segments) {
+            Some((collapsed_prefix, tail)) => {
+                let first = segments[0].clone();
+                let first_target = first.1.clone();
+                path = path
+                    .child(div().text_color(theme.muted_foreground).child("/"))
                     .child(
                         div()
                             .px_1()
-                            .rounded(px(4.))
-                            .flex_shrink_0()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .hover(|el| el.bg(theme.list_hover))
+                            .rounded(tokens::radius())
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _, _, cx| this.open_bucket_root(cx)),
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_prefix(first_target.clone(), cx)
+                                }),
                             )
-                            .child(bucket.to_string()),
+                            .child(first.0),
+                    )
+                    .child(div().text_color(theme.muted_foreground).child("/"))
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded(tokens::radius())
+                            .text_color(theme.muted_foreground)
+                            .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_prefix(collapsed_prefix.clone(), cx)
+                                }),
+                            )
+                            .child("…"),
                     );
-                let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
-                // 长路径折叠：首段后插入 `…`（点击直达被收起的最后一层），
-                // 只保留首段 + 最后两段。空路径（仅省略号）不可能出现：
-                // 折叠要求段数 > BREADCRUMB_MAX_VISIBLE（≥ 5）。
-                let (collapsed, segments) = match collapse_breadcrumb(&segments) {
-                    Some((collapsed_prefix, tail)) => {
-                        let first = segments[0].clone();
-                        let first_target = first.1.clone();
-                        path = path
-                            .child(div().text_color(theme.muted_foreground).child("/"))
-                            .child(
-                                div()
-                                    .px_1()
-                                    .rounded(px(4.))
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.muted_foreground)
-                                    .hover(|el| {
-                                        el.bg(theme.list_hover).text_color(theme.foreground)
-                                    })
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.open_prefix(first_target.clone(), cx)
-                                        }),
-                                    )
-                                    .child(first.0),
-                            )
-                            .child(div().text_color(theme.muted_foreground).child("/"))
-                            .child(
-                                div()
-                                    .px_1()
-                                    .rounded(px(4.))
-                                    .text_color(theme.muted_foreground)
-                                    .hover(|el| {
-                                        el.bg(theme.list_hover).text_color(theme.foreground)
-                                    })
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.open_prefix(collapsed_prefix.clone(), cx)
-                                        }),
-                                    )
-                                    .child("…"),
-                            );
-                        (true, tail)
-                    }
-                    None => (false, segments),
-                };
-                let _ = collapsed;
-                for (label, prefix) in segments {
-                    let target_prefix = prefix.clone();
-                    path = path
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .flex_shrink_0()
-                                .child("/"),
+                (true, tail)
+            }
+            None => (false, segments),
+        };
+        let _ = collapsed;
+        for (label, prefix) in segments {
+            let target_prefix = prefix.clone();
+            path = path
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .flex_shrink_0()
+                        .child("/"),
+                )
+                .child(
+                    div()
+                        .px_1()
+                        .rounded(tokens::radius())
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.muted_foreground)
+                        .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.open_prefix(target_prefix.clone(), cx)
+                            }),
                         )
-                        .child(
-                            div()
-                                .px_1()
-                                .rounded(px(4.))
-                                .min_w_0()
-                                .truncate()
-                                .text_color(theme.muted_foreground)
-                                .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.open_prefix(target_prefix.clone(), cx)
-                                    }),
-                                )
-                                .child(label),
-                        );
-                }
-                path
-            })
+                        .child(label),
+                );
+        }
+        path
     }
 
     /// 对象列表本体：表格列布局 + 行级操作列。
-    /// 行 bounds 记入 row_bounds（paint 阶段），供空白点击命中检测。
+    ///
+    /// 空白点击清空选择（B6）挂在本滚动容器上：滚动容器带
+    /// `BlockMouseExceptScroll` hitbox，落在其空白处的点击只有它收得到
+    /// （历史上试过内容区容器的 capture 与 bubble 两版，都因这层 hitbox
+    /// 的覆盖范围不可靠而失败）。行处理器一律 `stop_propagation`，所以能
+    /// 冒泡到这里的一定没命中任何行 —— 判据不需要几何，也不依赖注册顺序。
     fn render_object_list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // 每帧重建（paint 阶段逐行写入）
-        self.row_bounds.borrow_mut().clear();
         let mut list = v_flex()
             .id("object-list")
             .relative()
@@ -6332,7 +6246,26 @@ impl WorkspaceView {
             .h_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(theme.background);
+            .bg(theme.background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    // 编辑中先提交重命名（Finder：点别处即提交）；未提交成功
+                    // （校验失败）则本次点击不当作空白处理。
+                    if this.renaming.is_some() {
+                        this.commit_rename(cx);
+                        if this.renaming.is_some() {
+                            return;
+                        }
+                    }
+                    if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
+                        return;
+                    }
+                    // clear_object_selection 一并关掉行内菜单/详情弹层
+                    this.clear_object_selection();
+                    cx.notify();
+                }),
+            );
 
         if self.entries.is_empty() && self.objects_state == AsyncState::Idle {
             list = list.child(
@@ -6344,17 +6277,17 @@ impl WorkspaceView {
                     .justify_center()
                     .gap_2()
                     .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Inbox).text_size(tokens::text(28.)))
+                    .child(Icon::new(IconName::Inbox).text_size(tokens::icon_sm()))
                     .child(
                         div()
-                            .text_size(tokens::text(15.))
+                            .text_size(tokens::heading())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("此目录为空"),
                     )
                     .child(
                         div()
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .child("拖入文件或文件夹即可上传"),
                     ),
             );
@@ -6362,17 +6295,8 @@ impl WorkspaceView {
 
         // ⌘F 过滤开启时只渲染命中项；命中为空给出明确空态。
         // 过滤与排序都只影响展示：entries 全集与选择集合不动（Finder 语义）。
-        // 展示顺序 = 排序全量顺序 ∩ 过滤命中（先按排序取全量，再保留命中行）。
-        let display_order: Vec<usize> = {
-            let sorted = sort_entries(&self.entries, self.object_sort);
-            match &self.filtered_ix {
-                Some(ix) => {
-                    let keep: std::collections::HashSet<usize> = ix.iter().copied().collect();
-                    sorted.into_iter().filter(|i| keep.contains(i)).collect()
-                }
-                None => sorted,
-            }
-        };
+        let display_order =
+            display_entry_order(&self.entries, self.object_sort, self.filtered_ix.as_deref());
         let visible: Vec<(usize, &ListingEntry)> = display_order
             .into_iter()
             .filter_map(|ix| self.entries.get(ix).map(|e| (ix, e)))
@@ -6387,17 +6311,17 @@ impl WorkspaceView {
                     .justify_center()
                     .gap_2()
                     .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Search).text_size(tokens::text(28.)))
+                    .child(Icon::new(IconName::Search).text_size(tokens::icon_sm()))
                     .child(
                         div()
-                            .text_size(tokens::text(15.))
+                            .text_size(tokens::heading())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("没有匹配的对象"),
                     )
                     .child(
                         div()
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .child("试试其他关键词，或按 Esc 清除过滤"),
                     ),
             );
@@ -6411,7 +6335,7 @@ impl WorkspaceView {
     }
 
     /// 表头（钉在滚动容器外，与状态条同级——滚动后仍在，Finder/Linear 语义）。
-    fn render_object_list_header(&self, theme: &Theme) -> impl IntoElement {
+    fn render_object_list_header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
             .flex_shrink_0()
@@ -6421,20 +6345,103 @@ impl WorkspaceView {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.list_head)
-            .text_size(tokens::text(12.))
+            .text_size(tokens::label())
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.muted_foreground)
             .child(
-                h_flex()
+                div()
+                    .id("header-name")
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().child("名称"))
-                    .child(div().w(px(96.)).flex_shrink_0().child("大小"))
-                    .child(div().w(px(104.)).flex_shrink_0().child("存储类型"))
-                    .child(div().w(px(148.)).flex_shrink_0().child("最新修改时间")),
+                    .hover(|el| el.text_color(theme.foreground))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.object_sort = this.object_sort.cycle_name();
+                            cx.notify();
+                        }),
+                    )
+                    .child(format!("名称{}", self.object_sort.name_mark())),
             )
-            .child(div().w(px(64.)).flex_shrink_0().child("操作"))
+            .child(
+                div()
+                    .id("header-size")
+                    .w(tokens::col_size_width())
+                    .flex_shrink_0()
+                    .hover(|el| el.text_color(theme.foreground))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.object_sort = this.object_sort.cycle_size();
+                            cx.notify();
+                        }),
+                    )
+                    .child(format!("大小{}", self.object_sort.size_mark())),
+            )
+            .child(
+                div()
+                    .id("header-time")
+                    .w(tokens::col_time_width())
+                    .flex_shrink_0()
+                    .hover(|el| el.text_color(theme.foreground))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.object_sort = this.object_sort.cycle_time();
+                            cx.notify();
+                        }),
+                    )
+                    .child(format!("最新修改时间{}", self.object_sort.time_mark())),
+            )
+    }
+
+    fn render_object_name_cell(
+        &self,
+        object: &CloudObject,
+        renaming: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let icon =
+            crate::file_type::file_type_icon(&object.key, theme.muted_foreground, theme.accent);
+        if renaming && let Some((old_key, editor)) = &self.renaming {
+            let current_name = editor.read(cx).value().to_string();
+            let validation = rename_validation_message(old_key, &current_name, &self.entries)
+                .filter(|message| message != "请输入一个不同的新名称");
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(icon)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .key_context("Renaming")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .child(Input::new(editor).small())
+                        .children(validation.map(|message| {
+                            div()
+                                .text_size(tokens::caption())
+                                .text_color(theme.danger)
+                                .child(message)
+                        })),
+                )
+                .into_any_element();
+        }
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .child(icon)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(display_name(&object.key).to_string()),
+            )
+            .into_any_element()
     }
 
     /// 对象行渲染（目录前缀 / 云对象），供滚动容器内循环。
@@ -6457,77 +6464,79 @@ impl WorkspaceView {
                             .relative()
                             .w_full()
                             .px_3()
-                            .py(px(6.))
+                            .py(tokens::row_pad_y())
                             .gap_2()
                             .border_b_1()
-                            .border_color(theme.border)
-                            .text_size(tokens::text(13.))
+                            .border_color(theme.table_row_border)
+                            .text_size(tokens::body())
                             .hover(|row| row.bg(theme.list_hover))
-                            .child(self.row_bounds_recorder(cx).absolute().inset_0())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                    // 命中行 = 不再是空白点击：拦在列表容器之前，
+                                    // 否则容器会把这次点击当成空白而清空刚做的选择
+                                    cx.stop_propagation();
+                                    if this.renaming.is_some() {
+                                        this.commit_rename(cx);
+                                        if this.renaming.is_some() {
+                                            return;
+                                        }
+                                    }
+                                    this.handle_object_row_click(
+                                        ix,
+                                        ClickedEntry::CommonPrefix(prefix_sel.clone()),
+                                        event.modifiers,
+                                        cx,
+                                    );
+                                }),
+                            )
+                            // 双击进入目录 —— 与对象行「双击整行预览」同一套 Finder 语义
+                            // （判据见纯函数 `row_activation`）：单击只做选择（含 ⌘/⇧
+                            // 语义），进入目录要双击。
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                                if !row_activation(event.click_count(), this.renaming.is_some()) {
+                                    return;
+                                }
+                                this.open_prefix(prefix_nav.clone(), cx);
+                            }))
                             .child(
                                 h_flex()
                                     .flex_1()
                                     .min_w_0()
                                     .gap_2()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            move |this, event: &MouseDownEvent, _window, cx| {
-                                                // 目录选择在下钻前应用（capture 清空之后）
-                                                this.handle_object_row_click(
-                                                    ix,
-                                                    ClickedEntry::CommonPrefix(prefix_sel.clone()),
-                                                    event.modifiers,
-                                                    cx,
-                                                );
-                                                this.open_prefix(prefix_nav.clone(), cx);
-                                            },
-                                        ),
-                                    )
                                     .child(
-                                        h_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_2()
-                                            .child(
-                                                Icon::new(IconName::Folder)
-                                                    .text_color(theme.accent_foreground),
-                                            )
-                                            .child(div().min_w_0().truncate().child(label)),
+                                        Icon::new(IconName::Folder)
+                                            .text_color(theme.accent_foreground),
                                     )
-                                    .child(
-                                        div()
-                                            .w(px(96.))
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .child("-"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(104.))
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .child("-"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(148.))
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .child("-"),
-                                    ),
+                                    .child(div().min_w_0().truncate().child(label)),
                             )
-                            // 操作列：目录行留空（下钻 = 点击行本身），仅保持列对齐
-                            .child(h_flex().w(px(64.)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .w(tokens::col_size_width())
+                                    .flex_shrink_0()
+                                    .text_color(theme.muted_foreground)
+                                    .child("-"),
+                            )
+                            .child(
+                                div()
+                                    .w(tokens::col_time_width())
+                                    .flex_shrink_0()
+                                    .text_color(theme.muted_foreground)
+                                    .child("-"),
+                            )
                             .into_any_element(),
                     );
                 }
                 ListingEntry::Object(object) => {
                     let selected = self.selected_object_keys.contains(&object.key);
+                    let renaming = self
+                        .renaming
+                        .as_ref()
+                        .is_some_and(|(key, _)| key == &object.key);
                     let key = object.key.clone();
-                    let name_key = object.key.clone();
-                    let menu_key = object.key.clone();
+                    let right_key = object.key.clone();
                     let menu_open_key = object.key.clone();
+                    let dbl_key = object.key.clone();
                     let size = format_size(object.size);
                     let time = format_time(object.put_time_millis);
                     rows.push(
@@ -6536,19 +6545,24 @@ impl WorkspaceView {
                             .relative()
                             .w_full()
                             .px_3()
-                            .py(px(6.))
+                            .py(tokens::row_pad_y())
                             .gap_2()
                             .border_b_1()
-                            .border_color(theme.border)
-                            .text_size(tokens::text(13.))
-                            // selection ≠ hover（agents.md §7）：选中用 list_active，
-                            // hover 是中性位置反馈（theme.rs row_hover）
-                            .when(selected, |row| row.bg(theme.list_active))
-                            .hover(|row| row.bg(theme.list_hover))
-                            .child(self.row_bounds_recorder(cx).absolute().inset_0())
+                            .border_color(theme.table_row_border)
+                            .text_size(tokens::body())
+                            .when(selected, |row| row.bg(theme.selection))
+                            .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    // 命中行 = 不再是空白点击（见列表容器的清空处理器）
+                                    cx.stop_propagation();
+                                    if this.renaming.is_some() {
+                                        this.commit_rename(cx);
+                                        if this.renaming.is_some() {
+                                            return;
+                                        }
+                                    }
                                     this.handle_object_row_click(
                                         ix,
                                         ClickedEntry::Object(key.clone()),
@@ -6557,98 +6571,74 @@ impl WorkspaceView {
                                     );
                                 }),
                             )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    // event.position 是窗口坐标，菜单以它为锚点
+                                    this.toggle_object_menu(&right_key, event.position, cx);
+                                }),
+                            )
+                            // 双击整行打开预览（Finder 语义；判据见纯函数
+                            // `row_activation`）。单击仍只做选择：双击的第一次单击已经
+                            // 把选中收敛到本行，这里再显式 scope 一次只为兜住「⌘/⇧ 双击」
+                            // 这类组合键下的选中集合。
+                            //
+                            // 注意行上的 `on_mouse_down` 里有 `stop_propagation()`，
+                            // 它不会吞掉本回调：gpui 在 capture 阶段就清掉了 pending
+                            // mouse_down，click 监听在 bubble 阶段照常触发
+                            // （elements/div.rs 的 mouse_up 处理器）。
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                if !row_activation(event.click_count(), this.renaming.is_some()) {
+                                    return;
+                                }
+                                this.select_object_for_row_action(&dbl_key);
+                                this.open_preview_overlay(window, cx);
+                            }))
+                            .child(self.render_object_name_cell(object, renaming, theme, cx))
                             .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_2()
-                                    .child(
-                                        h_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_2()
-                                            .child(crate::file_type::file_type_icon(
-                                                &object.key,
-                                                theme.muted_foreground,
-                                                theme.accent,
-                                            ))
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .hover(|name| name.text_color(theme.foreground))
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(move |this, _, window, cx| {
-                                                            this.select_object_for_row_action(
-                                                                &name_key,
-                                                            );
-                                                            this.open_preview_overlay(window, cx);
-                                                        }),
-                                                    )
-                                                    .child(display_name(&object.key).to_string()),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(96.))
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .text_size(tokens::text(12.))
-                                            .child(size),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(104.))
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .text_size(tokens::text(12.))
-                                            .child("标准存储"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(148.))
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .text_size(tokens::text(12.))
-                                            .child(time),
-                                    ),
+                                div()
+                                    .w(tokens::col_size_width())
+                                    .flex_shrink_0()
+                                    .text_color(theme.muted_foreground)
+                                    .text_size(tokens::label())
+                                    .child(size),
                             )
                             .child(
                                 div()
-                                    .relative()
-                                    .w(px(64.))
+                                    .w(tokens::col_time_width())
                                     .flex_shrink_0()
-                                    .child(
-                                        Button::new(("object-menu-row", ix))
-                                            .icon(Icon::new(IconName::EllipsisVertical))
-                                            .ghost()
-                                            .with_size(Size::Small)
-                                            .tooltip("更多操作")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.toggle_object_menu(&menu_key, cx);
-                                            })),
-                                    )
-                                    .when(
-                                        self.object_menu_open.as_deref()
-                                            == Some(menu_open_key.as_str()),
-                                        |el| {
-                                            // anchored 锚定到按钮容器（与 toolbar 菜单同
-                                            // 模式）：位置由 gpui 按锚点计算。替代手算行
-                                            // 偏移——行高随字号缩放/内容变化，手算 40px
-                                            // 会随行号线性错位。
-                                            el.child(deferred(
-                                                anchored()
-                                                    .anchor(Anchor::TopRight)
-                                                    .offset(point(px(0.), px(4.)))
-                                                    .snap_to_window_with_margin(px(8.))
-                                                    .child(self.render_object_menu(theme, cx)),
-                                            ))
-                                        },
-                                    ),
+                                    .text_color(theme.muted_foreground)
+                                    .text_size(tokens::label())
+                                    .child(time),
+                            )
+                            .child(
+                                // 菜单按**右键的窗口坐标**定位，不挂在行上做相对锚定。
+                                //
+                                // `anchored()` 的默认行为（`position_mode` = Window 且未给
+                                // `position`）是拿「锚定元素自身所在容器的原点」当锚点
+                                // （anchored.rs 的 prepaint：anchor 角 + bounds.origin），
+                                // 而行身处滚动容器内（列表 `overflow_y_scroll`），行的
+                                // layout bounds 与视口不在同一坐标系，锚出来会偏；挂在整行
+                                // 上时锚点还会落在行的**左端**，菜单直接越过行左边界压到
+                                // 侧栏上。显式 `position()` + Window 模式是唯一不依赖
+                                // 容器原点与滚动坐标系的锚法。
+                                div().relative().when(
+                                    self.object_menu_open.as_deref()
+                                        == Some(menu_open_key.as_str()),
+                                    |el| {
+                                        let at =
+                                            self.object_menu_at.unwrap_or(point(px(8.), px(8.)));
+                                        el.child(deferred(
+                                            anchored()
+                                                // 光标点 = 菜单左上角
+                                                .anchor(Anchor::TopLeft)
+                                                .position_mode(AnchoredPositionMode::Window)
+                                                .position(at)
+                                                .snap_to_window_with_margin(px(8.))
+                                                .child(self.render_object_menu(theme, cx)),
+                                        ))
+                                    },
+                                ),
                             )
                             .into_any_element(),
                     );
@@ -6686,8 +6676,11 @@ impl WorkspaceView {
         let summary = h_flex()
             .id("transfer-summary")
             .w_full()
-            .h(px(32.))
-            .px_3()
+            .h(tokens::text(32.))
+            // 右侧是尾部展开图标：图标侧内边距比文字侧小 2px，
+            // 否则对称内边距下箭头看起来被推得偏右（视觉对齐而非几何居中）
+            .pl_3()
+            .pr_2p5()
             .gap_2()
             .items_center()
             .border_t_1()
@@ -6703,7 +6696,7 @@ impl WorkspaceView {
             })
             .child(
                 div()
-                    .text_size(tokens::text(12.))
+                    .text_size(tokens::label())
                     .text_color(theme.foreground)
                     .child(if active_count > 0 {
                         format!("{active_count} 个传输中")
@@ -6721,7 +6714,7 @@ impl WorkspaceView {
             )
             .child(
                 div()
-                    .text_size(tokens::text(11.))
+                    .text_size(tokens::caption())
                     .text_color(theme.muted_foreground)
                     .child(if total_size > 0 {
                         format!("{} / {}", format_size(total_done), format_size(total_size))
@@ -6783,17 +6776,23 @@ impl WorkspaceView {
             _ => theme.muted_foreground,
         };
 
-        let mut row = h_flex()
+        // 分隔线与底色在外层容器上：失败原因要独占一行（规范：完整换行
+        // 展示、不 truncate），所以它不能是主行的兄弟节点——放主行里会和
+        // 按钮抢横向空间，被压成窄条逐字换行。
+        let mut block = v_flex()
             .id(("transfer-row", task.id.0))
             .w_full()
+            .border_t_1()
+            .border_color(theme.table_row_border)
+            .bg(theme.list_head);
+
+        let mut row = h_flex()
+            .w_full()
             .px_3()
-            .py(px(4.))
+            .py(tokens::row_pad_y_transfer())
             .gap_2()
             .items_center()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.list_head)
-            .text_size(tokens::text(12.))
+            .text_size(tokens::label())
             .child(
                 div()
                     .flex_1()
@@ -6807,14 +6806,15 @@ impl WorkspaceView {
                     .accessibility_label(format!("{} 的传输进度", task.display_name))
                     .h(px(4.))
                     .value(pct)
-                    .w(px(80.)),
+                    // 宽度随字号缩放（tokens::text 而非裸 px）：这条与左右文字同排
+                    .w(tokens::text(80.)),
             )
             .child(
                 div()
-                    .w(px(96.))
+                    .w(tokens::text(96.))
                     .flex_shrink_0()
                     .text_color(theme.muted_foreground)
-                    .text_size(tokens::text(11.))
+                    .text_size(tokens::caption())
                     .child(bytes_label),
             )
             .child(
@@ -6858,17 +6858,22 @@ impl WorkspaceView {
             TransferState::Completed | TransferState::Cancelled => {}
         }
 
+        // 主行在上，失败原因在下方独占一行（全宽换行，不 truncate）
+        block = block.child(row);
         if let Some(error) = &task.error {
-            row = row.child(
+            block = block.child(
                 div()
+                    .w_full()
+                    .px_3()
+                    .pb(tokens::row_pad_y_transfer())
                     .text_color(theme.danger)
-                    .text_size(tokens::text(11.))
+                    .text_size(tokens::caption())
                     .line_height(gpui::DefiniteLength::Fraction(1.4))
                     .child(error.clone()),
             );
         }
 
-        row
+        block
     }
 
     /// 对象区状态条：「共 N 项」+ 翻页。固定钉在内容区底部（Finder 语义），
@@ -6887,13 +6892,60 @@ impl WorkspaceView {
             .gap_3()
             .border_t_1()
             .border_color(theme.border)
-            .text_size(tokens::text(12.))
+            .text_size(tokens::label())
             .text_color(theme.muted_foreground)
             .child(if visible_count == self.entries.len() {
                 format!("共 {} 项", self.entries.len())
             } else {
                 format!("显示 {visible_count} / 共 {} 项", self.entries.len())
             });
+        if let Some(label) = self.object_sort.label() {
+            bar = bar.child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("· {label}")),
+            );
+        }
+        // 弹性槽：有反馈消息时占用（左对齐、超宽截断），否则空占位——
+        // 保证右侧的选中信息与翻页按钮始终贴右，不随消息出现而平移。
+        if let Some(message) = &self.download_message {
+            let color = if message.is_error {
+                theme.danger
+            } else {
+                theme.success
+            };
+            bar = bar.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(color)
+                    .child(message.text.clone()),
+            );
+        } else {
+            bar = bar.child(div().flex_1());
+        }
+        // 选中信息 + 主操作就地展示在状态条里：选中/取消只改变这一行的内容，
+        // 不会像独立选中条那样把表头与全部行整体推移。
+        if !self.selected_object_keys.is_empty() {
+            bar = bar
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(theme.foreground)
+                        .child(format!("已选择 {} 个对象", self.selected_object_keys.len())),
+                )
+                .child(
+                    Button::new("toolbar-download")
+                        .icon(Icon::new(IconName::ArrowDown))
+                        .label("下载")
+                        .with_size(Size::Small)
+                        .disabled(self.downloading)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.start_object_download(window, cx)
+                        })),
+                );
+        }
         if self.next_marker.is_some() {
             bar = bar.child(
                 Button::new("objects-load-more")
@@ -7168,13 +7220,13 @@ fn about_kv(label: &'static str, value: &'static str, theme: &Theme) -> gpui::Di
         .gap_0p5()
         .child(
             div()
-                .text_size(tokens::text(11.))
+                .text_size(tokens::caption())
                 .text_color(theme.muted_foreground)
                 .child(label),
         )
         .child(
             div()
-                .text_size(tokens::text(13.))
+                .text_size(tokens::body())
                 .text_color(theme.foreground)
                 .child(value),
         )
@@ -7199,8 +7251,9 @@ impl Render for WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    if this.top_more_open {
+                    if this.top_more_open || this.object_menu_open.is_some() {
                         this.top_more_open = false;
+                        this.object_menu_open = None;
                         cx.notify();
                     }
                 }),
@@ -7219,6 +7272,10 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_copy_object_url))
             .on_action(cx.listener(Self::handle_save_text_object))
             .on_action(cx.listener(Self::handle_select_all))
+            .on_action(cx.listener(Self::handle_select_object_prev))
+            .on_action(cx.listener(Self::handle_select_object_next))
+            .on_action(cx.listener(Self::handle_select_object_prev_range))
+            .on_action(cx.listener(Self::handle_select_object_next_range))
             .on_action(cx.listener(Self::handle_rename_object))
             .on_action(cx.listener(Self::handle_dismiss_rename))
             .on_action(cx.listener(Self::handle_toggle_object_filter))
@@ -7256,9 +7313,6 @@ impl Render for WorkspaceView {
                 window.focus(&self.overlay_focus, cx);
             }
             root = root.child(self.render_preview_overlay(&theme, cx));
-        }
-        if self.renaming.is_some() {
-            root = root.child(self.render_rename_overlay(&theme, cx));
         }
         if self.create_folder_input.is_some() {
             root = root.child(self.render_create_folder_overlay(&theme, cx));
@@ -7469,10 +7523,23 @@ mod tests {
     }
 
     #[test]
+    fn row_activation_requires_double_click() {
+        // 单击只选中、不打开（对象→预览 / 目录→进入）：这条一旦放松成 >=1，
+        // 单击就变成「选中 + 跳走」，与 Finder 语义和选中语义都冲突。
+        assert!(!row_activation(1, false), "单击不得激活行");
+        assert!(row_activation(2, false), "双击应激活行");
+        assert!(row_activation(3, false), "三击同样是激活（平台连击计数）");
+        // 行内重命名尚未收尾（校验失败残留 editor）时不激活，避免跳走丢编辑态
+        assert!(!row_activation(2, true), "重命名中不得激活行");
+    }
+
+    #[test]
     fn top_more_menu_items_keep_product_order() {
         assert_eq!(
             top_more_menu_items(),
             vec![
+                TopMoreMenuItem::UploadFolder,
+                TopMoreMenuItem::CreateFolder,
                 TopMoreMenuItem::CopyTo,
                 TopMoreMenuItem::MoveTo,
                 TopMoreMenuItem::Delete,
@@ -7654,22 +7721,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_scroll_dismisses_modal_requires_up_and_down_block() {
-        // 预览/复制移动等含滚动列表的弹层：必须同时阻断 down+up（不误关）
-        assert!(!overlay_scroll_dismisses_modal(false, true, true, true));
-        // 无滚动列表的简单弹层（重命名/新建目录）：阻断 down 即可
-        assert!(!overlay_scroll_dismisses_modal(false, true, false, false));
-        // 缺少 down 阻断 → 点卡片会误关（不合规）
-        assert!(overlay_scroll_dismisses_modal(false, false, true, true));
-        assert!(overlay_scroll_dismisses_modal(false, false, false, false));
-        // 有滚动列表但缺 up 阻断 → 误关（不合规）
-        assert!(overlay_scroll_dismisses_modal(false, true, false, true));
-        // busy 不改变阻断要求（busy 只由各 close handler 自行拒绝）
-        assert!(!overlay_scroll_dismisses_modal(true, true, true, true));
-        assert!(overlay_scroll_dismisses_modal(true, false, true, true));
-    }
-
-    #[test]
     fn copy_move_summary_lists_partial_failures() {
         assert_eq!(
             copy_move_summary(CopyMoveMode::Copy, 2, &[]),
@@ -7693,7 +7744,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(2),
         };
         let (next, anchor, preview) = apply_object_selection(
@@ -7719,7 +7769,6 @@ mod tests {
             command: true,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(1),
         };
         let (next, anchor, preview) = apply_object_selection(
@@ -7739,7 +7788,6 @@ mod tests {
             command: true,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(2),
         };
         let (next, _, preview) = apply_object_selection(
@@ -7762,7 +7810,6 @@ mod tests {
             command: false,
             shift: true,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(3),
         };
         let (next, anchor, preview) = apply_object_selection(
@@ -7782,7 +7829,6 @@ mod tests {
             command: true,
             shift: true,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(4),
         };
         let (next, _, _) = apply_object_selection(
@@ -7797,7 +7843,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_pure_logic_select_all_and_empty_click() {
+    fn selection_pure_logic_select_all_and_no_hit() {
         let keys = vec!["a".to_string(), "b".to_string()];
         let current: indexmap::IndexSet<String> = ["a".to_string()].into_iter().collect();
         // ⌘A 全选
@@ -7805,7 +7851,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: true,
-            clicked_empty: false,
             clicked_index: None,
         };
         let (next, _, preview) =
@@ -7813,12 +7858,13 @@ mod tests {
         assert_eq!(next.len(), 2);
         assert!(!preview);
 
-        // 点击空白清空
+        // 未命中任何条目（ClickedEntry::None）：清空集合与锚点。
+        // 列表空白点击不走这里——容器直接调 clear_object_selection，
+        // 它还要一并关掉行内菜单与详情弹层（纯函数表达不了）。
         let intent = ObjectSelectionIntent {
             command: false,
             shift: false,
             select_all: false,
-            clicked_empty: true,
             clicked_index: None,
         };
         let (next, anchor, _) =
@@ -7835,7 +7881,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(0),
         };
         // 点目录前缀：不改变选择、不触发预览（目录点击是下钻）
@@ -8088,7 +8133,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: true,
-            clicked_empty: false,
             clicked_index: None,
         };
         let empty = indexmap::IndexSet::new();
@@ -8111,7 +8155,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(b_ix),
         };
         let (single, anchor, preview) = apply_object_selection(
@@ -8163,7 +8206,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(b_ix),
         };
         let empty = indexmap::IndexSet::new();
@@ -8187,7 +8229,6 @@ mod tests {
             command: false,
             shift: true,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(d_ix),
         };
         let (range, anchor, preview) = apply_object_selection(
@@ -8211,7 +8252,6 @@ mod tests {
             command: true,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(c_ix),
         };
         let (toggled, anchor, preview) = apply_object_selection(
@@ -8248,7 +8288,6 @@ mod tests {
             command: false,
             shift: false,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(d_ix),
         };
         let empty = indexmap::IndexSet::new();
@@ -8272,7 +8311,6 @@ mod tests {
             command: false,
             shift: true,
             select_all: false,
-            clicked_empty: false,
             clicked_index: Some(b_ix),
         };
         let (range, anchor, preview) = apply_object_selection(
@@ -8388,21 +8426,212 @@ mod tests {
     }
 
     #[test]
-    fn object_sort_cycles_and_labels() {
-        let mut s = ObjectSort::default();
-        let labels = std::iter::from_fn(|| {
-            let label = s.label();
-            s = s.next();
-            Some(label)
-        })
-        .take(5)
-        .collect::<Vec<_>>();
+    fn object_sort_column_headers_cycle_independently() {
+        assert_eq!(ObjectSort::Natural.cycle_name(), ObjectSort::NameAsc);
+        assert_eq!(ObjectSort::NameAsc.cycle_name(), ObjectSort::NameDesc);
+        assert_eq!(ObjectSort::NameDesc.cycle_name(), ObjectSort::Natural);
+        assert_eq!(ObjectSort::SizeDesc.cycle_name(), ObjectSort::NameAsc);
+
+        assert_eq!(ObjectSort::Natural.cycle_size(), ObjectSort::SizeDesc);
+        assert_eq!(ObjectSort::SizeDesc.cycle_size(), ObjectSort::Natural);
+        assert_eq!(ObjectSort::NameAsc.cycle_size(), ObjectSort::SizeDesc);
+
+        assert_eq!(ObjectSort::Natural.cycle_time(), ObjectSort::TimeDesc);
+        assert_eq!(ObjectSort::TimeDesc.cycle_time(), ObjectSort::Natural);
+
+        assert_eq!(ObjectSort::NameAsc.name_mark(), " ↑");
+        assert_eq!(ObjectSort::NameDesc.name_mark(), " ↓");
+        assert_eq!(ObjectSort::Natural.name_mark(), "");
+        assert_eq!(ObjectSort::SizeDesc.size_mark(), " ↓");
+        assert_eq!(ObjectSort::TimeDesc.time_mark(), " ↓");
+        assert_eq!(ObjectSort::NameAsc.label(), Some("名称 A→Z"));
+        assert_eq!(ObjectSort::Natural.label(), None);
+    }
+
+    #[test]
+    fn visible_object_keys_skip_prefixes_and_follow_display_order() {
+        let entries = vec![
+            ListingEntry::CommonPrefix("photos/".into()),
+            entry_object("b.txt"),
+            entry_object("a.txt"),
+        ];
         assert_eq!(
-            labels,
-            vec!["默认", "名称 A→Z", "名称 Z→A", "最大", "最新"],
-            "循环一周回到默认"
+            visible_object_keys(&entries, &[0, 1, 2]),
+            vec!["b.txt".to_string(), "a.txt".to_string()]
         );
-        assert_eq!(s, ObjectSort::Natural, "第 5 次 next 应回到 Natural");
+        assert_eq!(
+            visible_object_keys(&entries, &[2, 0, 1]),
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn display_entry_order_intersects_sort_with_filter() {
+        let entries = vec![
+            entry_object("c.txt"),
+            ListingEntry::CommonPrefix("a/".into()),
+            entry_object("b.txt"),
+        ];
+        assert_eq!(
+            display_entry_order(&entries, ObjectSort::Natural, None),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            display_entry_order(&entries, ObjectSort::Natural, Some(&[0, 2])),
+            vec![0, 2]
+        );
+    }
+
+    #[test]
+    fn keyboard_nav_moves_primary_and_stops_at_ends() {
+        let keys = vec!["a".into(), "b".into(), "c".into()];
+        let selection: indexmap::IndexSet<String> = ["a".into()].into_iter().collect();
+        let (next, anchor, target) = apply_object_keyboard_nav(
+            &keys,
+            &selection,
+            Some("a"),
+            Some(0),
+            ObjectNavDirection::Next,
+            false,
+        );
+        assert_eq!(
+            next.iter().cloned().collect::<Vec<_>>(),
+            vec!["b".to_string()]
+        );
+        assert_eq!(anchor, Some(1));
+        assert_eq!(target, 1);
+
+        let (end, end_anchor, end_target) = apply_object_keyboard_nav(
+            &keys,
+            &next,
+            Some("b"),
+            Some(1),
+            ObjectNavDirection::Next,
+            false,
+        );
+        let (stay, stay_anchor, stay_target) = apply_object_keyboard_nav(
+            &keys,
+            &end,
+            Some("c"),
+            end_anchor,
+            ObjectNavDirection::Next,
+            false,
+        );
+        assert_eq!(
+            stay.iter().cloned().collect::<Vec<_>>(),
+            vec!["c".to_string()]
+        );
+        assert_eq!(stay_anchor, Some(2), "到末尾再按 ↓ 停住");
+        assert_eq!(end_target, 2);
+        assert_eq!(stay_target, 2);
+    }
+
+    #[test]
+    fn keyboard_nav_without_selection_picks_first_or_last() {
+        let keys = vec!["a".into(), "b".into(), "c".into()];
+        let empty = indexmap::IndexSet::new();
+        let (next, anchor, target) =
+            apply_object_keyboard_nav(&keys, &empty, None, None, ObjectNavDirection::Next, false);
+        assert_eq!(
+            next.iter().cloned().collect::<Vec<_>>(),
+            vec!["a".to_string()]
+        );
+        assert_eq!(anchor, Some(0));
+        assert_eq!(target, 0);
+
+        let (prev, prev_anchor, prev_target) =
+            apply_object_keyboard_nav(&keys, &empty, None, None, ObjectNavDirection::Prev, false);
+        assert_eq!(
+            prev.iter().cloned().collect::<Vec<_>>(),
+            vec!["c".to_string()]
+        );
+        assert_eq!(prev_anchor, Some(2));
+        assert_eq!(prev_target, 2);
+    }
+
+    #[test]
+    fn keyboard_nav_shift_extends_from_anchor() {
+        let keys = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        let selection: indexmap::IndexSet<String> = ["b".into()].into_iter().collect();
+        let (next, anchor, target) = apply_object_keyboard_nav(
+            &keys,
+            &selection,
+            Some("b"),
+            Some(1),
+            ObjectNavDirection::Next,
+            true,
+        );
+        assert_eq!(
+            next.iter().cloned().collect::<Vec<_>>(),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        assert_eq!(anchor, Some(1), "⇧ 不改锚点");
+        assert_eq!(target, 2);
+
+        let (next, anchor, target) = apply_object_keyboard_nav(
+            &keys,
+            &next,
+            Some("c"),
+            anchor,
+            ObjectNavDirection::Next,
+            true,
+        );
+        assert_eq!(
+            next.iter().cloned().collect::<Vec<_>>(),
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+        assert_eq!(anchor, Some(1));
+        assert_eq!(target, 3);
+    }
+
+    #[test]
+    fn keyboard_nav_shift_prev_uses_primary_not_set_last() {
+        let keys = vec!["a".into(), "b".into(), "c".into()];
+        let selection: indexmap::IndexSet<String> =
+            ["a".into(), "b".into(), "c".into()].into_iter().collect();
+        // 主选在 a（集合最后一项是 c）：⇧↑ 应从 a 再往前，停在 a
+        let (next, anchor, target) = apply_object_keyboard_nav(
+            &keys,
+            &selection,
+            Some("a"),
+            Some(0),
+            ObjectNavDirection::Prev,
+            true,
+        );
+        assert_eq!(target, 0);
+        assert_eq!(anchor, Some(0));
+        assert_eq!(
+            next.iter().cloned().collect::<Vec<_>>(),
+            vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn keyboard_nav_empty_keys_clears() {
+        let selection: indexmap::IndexSet<String> = ["ghost".into()].into_iter().collect();
+        let (next, anchor, target) = apply_object_keyboard_nav(
+            &[],
+            &selection,
+            Some("ghost"),
+            Some(0),
+            ObjectNavDirection::Next,
+            false,
+        );
+        assert!(next.is_empty());
+        assert_eq!(anchor, None);
+        assert_eq!(target, 0);
+    }
+
+    #[test]
+    fn provider_icon_distinguishes_vendors() {
+        assert!(matches!(
+            provider_icon(ProviderKind::Qiniu),
+            IconName::Globe
+        ));
+        assert!(matches!(
+            provider_icon(ProviderKind::Aliyun),
+            IconName::Building2
+        ));
     }
 
     #[test]

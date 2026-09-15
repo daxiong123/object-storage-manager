@@ -38,6 +38,11 @@ actions!(
         SaveTextObject,
         // 全选当前对象列表：⌘A（仅 Workspace 上下文，不吞文本输入的原生响应链）
         SelectObjectAll,
+        // 对象列表键盘导航：↑↓ / ←→ 移动主选；⇧ 扩选（仅 Workspace / Overlay）
+        SelectObjectPrev,
+        SelectObjectNext,
+        SelectObjectPrevRange,
+        SelectObjectNextRange,
         // 重命名：Return（仅 Workspace 上下文）
         RenameObject,
         // 过滤当前对象列表：⌘F（仅 Workspace 上下文；再按 ⌘F / Esc 关闭）
@@ -65,7 +70,7 @@ actions!(cloud_storage, [DismissModal]);
 // 命令面板必须一按 Esc 就关闭，覆盖 Command 默认的「有查询时先清空」。
 actions!(cloud_storage, [DismissCommandPalette]);
 
-// 重命名弹窗的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
+// 行内重命名的取消（Esc）：仅通过 context "Renaming" 生效。rename 输入框
 // 未设 clean_on_escape，Esc 由 Input escape() propagate 到这里。
 actions!(cloud_storage, [DismissRename]);
 
@@ -102,6 +107,24 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §7：⌘A 全选当前对象列表。绑定在 Workspace context（非全局），
         // 命令面板/输入框聚焦时按键由组件原生响应链处理，不会被吞。
         KeyBinding::new("cmd-a", SelectObjectAll, Some("Workspace")),
+        // 对象列表：↑↓/←→ 移动主选，⇧ 扩选。Workspace 上下文，避免抢 Input。
+        // Overlay 再绑一套：预览获得焦点后仍能切对象（⇧ 在预览里等同移动，不扩选）。
+        KeyBinding::new("up", SelectObjectPrev, Some("Workspace")),
+        KeyBinding::new("down", SelectObjectNext, Some("Workspace")),
+        KeyBinding::new("left", SelectObjectPrev, Some("Workspace")),
+        KeyBinding::new("right", SelectObjectNext, Some("Workspace")),
+        KeyBinding::new("shift-up", SelectObjectPrevRange, Some("Workspace")),
+        KeyBinding::new("shift-down", SelectObjectNextRange, Some("Workspace")),
+        KeyBinding::new("shift-left", SelectObjectPrevRange, Some("Workspace")),
+        KeyBinding::new("shift-right", SelectObjectNextRange, Some("Workspace")),
+        KeyBinding::new("up", SelectObjectPrev, Some("Overlay")),
+        KeyBinding::new("down", SelectObjectNext, Some("Overlay")),
+        KeyBinding::new("left", SelectObjectPrev, Some("Overlay")),
+        KeyBinding::new("right", SelectObjectNext, Some("Overlay")),
+        KeyBinding::new("shift-up", SelectObjectPrev, Some("Overlay")),
+        KeyBinding::new("shift-down", SelectObjectNext, Some("Overlay")),
+        KeyBinding::new("shift-left", SelectObjectPrev, Some("Overlay")),
+        KeyBinding::new("shift-right", SelectObjectNext, Some("Overlay")),
         // 规范 §42：Return 进重命名。绑定 Workspace context，
         // 命令面板输入框聚焦时 Return 由面板自己的 PressEnter 处理，不受影响。
         KeyBinding::new("enter", RenameObject, Some("Workspace")),

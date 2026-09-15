@@ -27,6 +27,7 @@ use object_storage_persistence::{
 };
 
 use crate::actions::DismissModal;
+use crate::overlay;
 use crate::tokens;
 
 fn optional_text(value: String) -> Option<String> {
@@ -479,25 +480,16 @@ impl Render for SettingsModal {
         let theme = cx.theme().clone();
         let active = self.active_section;
 
-        div()
+        // 卡片内含滚动列表（下方 overflow_y_scroll），两相冒泡阻断都必要：
+        // 由 overlay::surface 统一提供——此前只阻断 mouse_down，滚动手势的
+        // mouse-up 会冒到遮罩，表现为「滚动一下就关闭」。
+        overlay::surface(&theme)
             .key_context("SettingsModal")
-            .w(px(800.))
+            .w_full()
+            .max_w(px(800.))
             .h(px(560.))
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(8.))
-            .shadow_lg()
             .overflow_hidden()
             .on_action(cx.listener(Self::handle_dismiss))
-            .on_mouse_down(
-                MouseButton::Left,
-                |_event: &gpui::MouseDownEvent, _window, cx| {
-                    // 卡片内点击阻断冒泡：否则事件到达遮罩的空白关闭
-                    // handler，弹窗被误关（与 AddAccountModal 同机制）
-                    cx.stop_propagation();
-                },
-            )
             .child(
                 v_flex()
                     .size_full()
@@ -510,13 +502,16 @@ impl Render for SettingsModal {
                             .py_3()
                             .child(
                                 div()
-                                    .text_size(tokens::text(16.))
+                                    .text_size(tokens::title())
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("设置"),
                             )
                             .child(
                                 Button::new("settings-close")
-                                    .icon(Icon::new(IconName::Close).size_4())
+                                    // 不写死图标尺寸：Button 一律用自己的 size 覆盖
+                                    // 图标尺寸（button.rs 渲染时调 with_size(icon_size)），
+                                    // 这里写 .size_4() 是死代码。
+                                    .icon(Icon::new(IconName::Close))
                                     .ghost()
                                     .with_size(Size::Small)
                                     .disabled(self.saving)
@@ -553,7 +548,7 @@ impl SettingsModal {
     ) -> impl IntoElement {
         let active = self.active_section;
         v_flex()
-            .w(px(200.))
+            .w(tokens::text(200.))
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
@@ -567,7 +562,14 @@ impl SettingsModal {
                     .children(SettingsSection::ALL.map(|section| {
                         let selected = active == section;
                         let (text_color, bg) = if selected {
-                            (theme.sidebar_accent_foreground, theme.list_active)
+                            // 选中底用不透明的 sidebar_accent：本面板底色就是
+                            // theme.sidebar，语义属侧栏，与 workspace_view 的侧栏
+                            // 选中行逐字段一致。**不要用 list_active**：
+                            // gpui-component 的 apply_config 把它的 alpha 压到
+                            // ≤0.2（schema.rs:637），源色太淡，叠加后与底色只差
+                            // 约 1%，整块选中底色等于不画（theme.rs 有回归测试
+                            // 钉死这一点）。
+                            (theme.sidebar_accent_foreground, theme.sidebar_accent)
                         } else {
                             (theme.foreground, gpui::transparent_black())
                         };
@@ -582,11 +584,11 @@ impl SettingsModal {
                             .items_center()
                             .gap_2()
                             .px_2()
-                            .h(px(32.))
-                            .rounded(px(6.))
+                            .h(tokens::text(32.))
+                            .rounded(tokens::radius())
                             .bg(bg)
                             .text_color(text_color)
-                            .text_size(tokens::text(13.))
+                            .text_size(tokens::body())
                             .when(!selected, |el| {
                                 el.hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
                             })
@@ -598,7 +600,10 @@ impl SettingsModal {
                                     cx.notify();
                                 }),
                             )
-                            .child(Icon::new(section.icon()).size_4().text_color(if selected {
+                            // 不给图标写死尺寸：继承本行的 text_size（tokens::body()），
+                            // 随 0.85–1.40 字号缩放一起变。写 .size_4() 会在 140%
+                            // 档位下让图标（16px）比正文（18.2px）还小。
+                            .child(Icon::new(section.icon()).text_color(if selected {
                                 theme.sidebar_accent_foreground
                             } else {
                                 theme.muted_foreground
@@ -615,7 +620,7 @@ impl SettingsModal {
                     .child(
                         Button::new("settings-open-file")
                             .label("打开配置文件")
-                            .icon(Icon::new(IconName::FolderOpen).size_3())
+                            .icon(Icon::new(IconName::FolderOpen))
                             .ghost()
                             .with_size(Size::Small)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -648,13 +653,13 @@ impl SettingsModal {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(tokens::text(15.))
+                            .text_size(tokens::heading())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(section.title()),
                     )
                     .child(
                         div()
-                            .text_size(tokens::text(12.))
+                            .text_size(tokens::label())
                             .text_color(theme.muted_foreground)
                             .child(section.description()),
                     ),
@@ -723,7 +728,7 @@ impl SettingsModal {
                 )
                 .child(
                     div()
-                        .text_size(tokens::text(13.))
+                        .text_size(tokens::body())
                         .text_color(theme.foreground)
                         .child(label),
                 )
@@ -831,11 +836,11 @@ impl SettingsModal {
                                 .w_full()
                                 .px_2p5()
                                 .py_1p5()
-                                .rounded(px(6.))
+                                .rounded(tokens::radius())
                                 .bg(theme.sidebar)
                                 .border_1()
                                 .border_color(theme.border)
-                                .text_size(tokens::text(12.))
+                                .text_size(tokens::label())
                                 .text_color(theme.muted_foreground)
                                 .truncate()
                                 .child(download_dir),
@@ -887,7 +892,7 @@ impl SettingsModal {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(tokens::text(12.))
+                    .text_size(tokens::label())
                     .text_color(if self.error.is_some() {
                         theme.danger
                     } else {
@@ -947,18 +952,18 @@ fn field_row(
         .gap_4()
         .child(
             v_flex()
-                .w(px(180.))
+                .w(tokens::text(180.))
                 .flex_shrink_0()
                 .gap_0p5()
                 .child(
                     div()
-                        .text_size(tokens::text(13.))
+                        .text_size(tokens::body())
                         .text_color(theme.foreground)
                         .child(label_text),
                 )
                 .children(helper.map(|text| {
                     div()
-                        .text_size(tokens::text(11.))
+                        .text_size(tokens::caption())
                         .text_color(theme.muted_foreground)
                         .child(text)
                 })),
@@ -968,13 +973,16 @@ fn field_row(
 
 /// 控件簇统一宽度上限（对齐 OpenChamber `max-w-[24rem]`）。
 fn field_input(input: Input) -> gpui::AnyElement {
-    div().w(px(240.)).child(input.small()).into_any_element()
+    div()
+        .w(tokens::text(240.))
+        .child(input.small())
+        .into_any_element()
 }
 
 /// 数值输入（带 +/− 步进按钮；步进事件由 validate 兜底，范围校验在保存时）。
 fn number_field_input(state: &Entity<InputState>) -> gpui::AnyElement {
     div()
-        .w(px(140.))
+        .w(tokens::text(140.))
         .child(NumberInput::new(state).with_size(Size::Small))
         .into_any_element()
 }
@@ -986,7 +994,7 @@ fn font_select(
     _cx: &mut Context<SettingsModal>,
 ) -> gpui::AnyElement {
     div()
-        .w(px(240.))
+        .w(tokens::text(240.))
         .child(Select::new(state).with_size(Size::Small))
         .into_any_element()
 }

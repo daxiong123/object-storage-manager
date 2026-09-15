@@ -1,0 +1,13 @@
+{
+  "id": "object-storage-manager",
+  "name": "Object Storage Manager",
+  "author": "zhangweijian",
+  "description": "A native, keyboard-first macOS workspace for Qiniu Kodo and Aliyun OSS. Browse buckets and objects, move files with a resilient streaming engine, preview images and edit text — secured by Keychain and deeply integrated with macOS.",
+  "category": "work",
+  "platforms": ["macOS"],
+  "website": null,
+  "source": "https://github.com/zhangweijian/object-storage-manager",
+  "building": true,
+  "publishedAt": "2026-09-10T00:00:00Z",
+  "previews": ["preview0.png", "preview1.png"]
+}
