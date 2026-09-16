@@ -1,26 +1,16 @@
 //! Unified Titlebar：导航按钮、当前位置（路径输入 / 面包屑）、过滤与上传入口。
 //!
-//! **标题栏里的交互控件必须拦掉 click 冒泡**（用下面的 `stop_click`）。
+//! **标题栏里的交互控件必须保留 `on_mouse_down(stop_propagation)`**。
 //!
-//! 统一标题栏（gpui-component `TitleBar`）在 macOS 上把**双击**当窗口缩放：
-//! `on_double_click → window.titlebar_double_click()`；而 `on_double_click` 不过是
-//! `on_click` 加了 `click_count == 2` 过滤（gpui-base `event.rs`）。文本输入框依赖
-//! **双击选词**，事件冒泡上去就会顺手把窗口缩放掉——表现为「输入框里的文字选不中」。
-//!
-//! 为什么只拦 `on_mouse_down` 不够：它只在 **bubble 阶段**生效
-//! （gpui-pre `elements/div.rs`），而 Input 自己的 mouse_down 处理在更深一层，
-//! 且 Input 全模块都不拦 click（只有 `on_scroll_wheel` 里有 stop_propagation），
-//! 所以 click 会原样冒到 TitleBar。
-//!
-//! 拦 click 不会影响输入框选词：Input 的选词在它自己的 `on_mouse_down` 里按
-//! `event.click_count` 处理，不依赖 click 事件本身。
+//! 统一标题栏（gpui-component `TitleBar`）在 macOS 上把**双击**当窗口缩放
+//! （`on_double_click → window.titlebar_double_click()`）。要拦住它，靠的是
+//! mouse_down 的 stop 而**不是** click 的 stop：标题栏想触发双击，必须先在
+//! **它自己的** mouse_down（bubble 阶段）里置位，才能在 mouse_up 时合成 click；
+//! 控件在 mouse_down 就 `stop_propagation()` 之后，标题栏那一步永远不会发生。
+//! 见本文件测试 `click_reaches_the_titlebar_when_the_mouse_down_stop_is_removed`
+//! 与 `click_stops_at_the_filter_wrapper`。
 
 use super::*;
-
-/// click 来临时掐掉冒泡（配合 `.on_click(stop_click)` 使用），理由见模块注释。
-fn stop_click(_: &ClickEvent, _: &mut Window, cx: &mut App) {
-    cx.stop_propagation();
-}
 
 pub(super) fn breadcrumb_prefixes(prefix: Option<&str>) -> Vec<(String, String)> {
     let Some(prefix) = prefix else {
@@ -195,8 +185,6 @@ impl WorkspaceView {
                 .items_center()
                 .gap_2()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                // 双击选词不能被标题栏当成「缩放窗口」（见模块注释）
-                .on_click(stop_click)
                 .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
                 .child(
                     div()
@@ -226,16 +214,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
-            .id("title-trailing")
             .flex_shrink_0()
             .items_center()
             .gap_1()
-            // 这一组全是交互控件（过滤框 / 上传 / 更多）：双击它们不该被标题栏
-            // 当「缩放窗口」。放在容器上而不是逐个控件：容器在冒泡里**晚于**
-            // 所有后代，所以不会像加到 Button 上那样挤掉按钮自己的 on_click
-            // （Button 的 click 监听注册顺序我无法在此核实，加到 Button 上有
-            // 让按钮失灵的风险）。
-            .on_click(stop_click)
             .when(has_bucket, |row| {
                 row.child(self.render_title_filter(theme, cx))
                     .child(
@@ -289,8 +270,6 @@ impl WorkspaceView {
                 .items_center()
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                // 双击选词不能被标题栏当成「缩放窗口」（见模块注释）
-                .on_click(stop_click)
                 .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
                 .child(
                     Button::new("filter-close")
@@ -416,5 +395,94 @@ impl WorkspaceView {
                 );
         }
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// 复刻「文本输入框挂在统一标题栏里」的结构：把标题栏那个
+    /// 「双击 = 缩放窗口」的处理器换成一个可计数的祖先 click 处理器，
+    /// 用来断言输入框里的点击有没有漏到标题栏去。
+    struct Harness {
+        input: Entity<InputState>,
+        ancestor_clicks: Rc<Cell<usize>>,
+        /// 是否给包裹层保留 `on_mouse_down(stop_propagation)`——即真正的护栏。
+        stop_mouse_down: bool,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.ancestor_clicks.clone();
+            let input = self.input.clone();
+            let stop = self.stop_mouse_down;
+            div()
+                .id("titlebar")
+                .size_full()
+                // 祖先 = 统一标题栏
+                .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                .child(
+                    div()
+                        .id("title-filter")
+                        .size_full()
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            if stop {
+                                cx.stop_propagation();
+                            }
+                        })
+                        .child(Input::new(&input)),
+                )
+        }
+    }
+
+    /// 在输入框上点一下，返回「祖先（标题栏）收到的 click 次数」。
+    fn ancestor_clicks(cx: &mut TestAppContext, stop_mouse_down: bool) -> usize {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::init(cx);
+        });
+        let counter = Rc::new(Cell::new(0));
+        let counter_for_view = counter.clone();
+        let (_view, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx).default_value("hello world"));
+            input.update(cx, |state, cx| state.focus(window, cx));
+            Harness {
+                input,
+                ancestor_clicks: counter_for_view,
+                stop_mouse_down,
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let at = point(px(10.), px(10.));
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        counter.get()
+    }
+
+    /// 护栏的**必要性**：去掉 `on_mouse_down(stop_propagation)` 后，输入框里的
+    /// 点击会冒泡到标题栏，被它当成「双击 = 缩放窗口」。
+    #[gpui::test]
+    fn click_reaches_the_titlebar_when_the_mouse_down_stop_is_removed(cx: &mut TestAppContext) {
+        assert_eq!(ancestor_clicks(cx, false), 1);
+    }
+
+    /// 护栏的**有效性**：保留它，点击就止步于输入框的包裹层。
+    ///
+    /// 机制（实测确认过，别再按直觉改）：标题栏的 `on_double_click` 想触发，
+    /// 必须先在**它自己的** mouse_down（bubble 阶段）里置位，才能在 mouse_up
+    /// 时合成 click；而包裹层在 mouse_down 就 `stop_propagation()` 了，标题栏
+    /// 那一步永远不会发生。所以**不需要**额外再拦 click——
+    /// 「在输入框里双击选词把窗口缩放掉」这个猜想已被证伪（对照组就说明了这点：
+    /// 少了 mouse_down 的 stop 才会漏）。
+    #[gpui::test]
+    fn click_stops_at_the_filter_wrapper(cx: &mut TestAppContext) {
+        assert_eq!(ancestor_clicks(cx, true), 0);
     }
 }
