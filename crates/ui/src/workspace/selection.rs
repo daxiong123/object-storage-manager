@@ -305,6 +305,36 @@ impl WorkspaceView {
     }
 
     /// ↑↓/←→ 按当前展示顺序移动主选；⇧ 扩选。预览打开时只换对象、不扩选，并重载预览。
+    /// 行首复选框：切换单个对象的选中态（等同 ⌘Click）。
+    ///
+    /// 刻意复用 `apply_object_selection`，不在复选框里另写一份「加入/移出集合」：
+    /// 选择语义（主选、锚点、目录前缀不参与）只在一处定义，否则两处迟早不同步。
+    pub(super) fn toggle_object_key_selection(&mut self, key: &str, cx: &mut Context<Self>) {
+        let ordered_keys = object_keys(&self.entries);
+        let Some(clicked_index) = ordered_keys.iter().position(|candidate| candidate == key) else {
+            return;
+        };
+        let intent = ObjectSelectionIntent {
+            command: true,
+            shift: false,
+            select_all: false,
+            clicked_index: Some(clicked_index),
+        };
+        let (next, anchor, _) = apply_object_selection(
+            intent,
+            &ordered_keys,
+            &self.selected_object_keys,
+            self.selection_anchor,
+            ClickedEntry::Object(key.to_string()),
+        );
+        self.selected_object_keys = next;
+        self.selected_object_key = self.selected_object_keys.last().cloned();
+        self.selection_anchor = anchor;
+        self.object_menu_open = None;
+        self.top_more_open = false;
+        cx.notify();
+    }
+
     pub(super) fn move_object_selection(
         &mut self,
         direction: ObjectNavDirection,

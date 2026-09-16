@@ -116,6 +116,8 @@ impl WorkspaceView {
             .find(|b| b.name == bucket)
             .and_then(|b| b.region.clone());
         let prefix = self.current_prefix.clone();
+        // 在 spawn 之前取出：异步块按值捕获，直接在里面读 self 会让借用逃逸
+        let page_limit = self.page_limit;
         let services = Arc::clone(&self.services);
 
         cx.spawn(async move |this, cx| {
@@ -124,7 +126,7 @@ impl WorkspaceView {
                 prefix,
                 delimiter: Some("/".into()),
                 marker,
-                limit: OBJECTS_PAGE_LIMIT,
+                limit: page_limit,
                 region,
             };
             let result = cx

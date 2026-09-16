@@ -109,8 +109,9 @@ impl WorkspaceView {
         }
     }
 
-    pub(super) fn toggle_top_more_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_top_more_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         self.top_more_open = !self.top_more_open;
+        self.top_more_menu_at = Some(at);
         self.object_menu_open = None;
         cx.notify();
     }

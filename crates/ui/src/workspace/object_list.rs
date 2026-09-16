@@ -88,15 +88,21 @@ impl WorkspaceView {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_top_more_menu(cx)),
-                                    ),
+                                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                                        this.toggle_top_more_menu(event.position(), cx)
+                                    })),
                             )
                             .when(self.top_more_open, |button| {
+                                // 锚定用**触发点的窗口坐标**（与对象右键菜单同一写法）。
+                                // 不要用 `anchor(...) + offset(...)` 的相对定位：它锚的是
+                                // 「锚定元素所在容器的原点」，而这个按钮所在的容器会变
+                                // （从标题栏挪到内容区工具栏后菜单就整体偏移了）。
+                                let at = self.top_more_menu_at.unwrap_or(point(px(8.), px(8.)));
                                 button.child(deferred(
                                     anchored()
-                                        .anchor(Anchor::TopRight)
-                                        .offset(point(px(0.), px(4.)))
+                                        .anchor(Anchor::TopLeft)
+                                        .position_mode(AnchoredPositionMode::Window)
+                                        .position(at)
                                         .snap_to_window_with_margin(px(8.))
                                         .child(self.render_top_more_menu(theme, cx)),
                                 ))
@@ -105,6 +111,44 @@ impl WorkspaceView {
             )
             .child(self.render_object_filter(cx))
             .into_any_element()
+    }
+
+    /// 「每页条数」菜单（参照实现右下角）。选项来自 `PAGE_LIMIT_CHOICES`。
+    pub(super) fn render_page_limit_menu(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut menu = ui::menu::popup(theme);
+        for (ix, limit) in PAGE_LIMIT_CHOICES.into_iter().enumerate() {
+            let color = if limit == self.page_limit {
+                theme.primary
+            } else {
+                theme.foreground
+            };
+            menu = menu.child(
+                ui::menu::item(theme, ("page-limit-choice", ix), color, true)
+                    .child(format!("{limit} 条/页"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_page_limit(limit, cx))),
+            );
+        }
+        menu.into_any_element()
+    }
+
+    /// 切换每页条数：**丢弃选择并重载**。
+    ///
+    /// 为什么必须丢选择：换页大小会整体换掉可见集，而 ⌘⌫ / 批量下载取的是选择**全集**
+    /// （不含可见性判断）——留着旧选择就是「删掉看不见的对象」那个风险。
+    /// 与 ⌘F 过滤那边同一条纪律，见 agents.md 的 ⌘F 行。
+    pub(super) fn set_page_limit(&mut self, limit: u32, cx: &mut Context<Self>) {
+        self.page_limit_menu_open = false;
+        if limit == self.page_limit {
+            cx.notify();
+            return;
+        }
+        self.page_limit = limit;
+        // reload_objects 会清空 entries/选择并重新请求第一页
+        self.reload_objects(cx);
     }
 
     /// 工具栏右端：过滤输入框（展开时）或搜索图标按钮。
@@ -147,6 +191,10 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // 显示顺序在**表头之前**算好并存起来：表头要拿它判断「是否已全选」，
+        // 而表头先于列表渲染——放在 render_object_list 里会让表头读到上一帧的缓存。
+        self.display_order =
+            display_entry_order(&self.entries, self.object_sort, self.filtered_ix.as_deref());
         let Some(_bucket) = self.selected_bucket.clone() else {
             let (title, hint) = if self.selected_account_id.is_some() {
                 ("选择一个 Bucket", "从左侧列表选择空间，查看其中对象")
@@ -189,8 +237,10 @@ impl WorkspaceView {
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
-                // 工具栏在加载/失败分支之前就挂上：它是对象区的常驻 chrome，
-                // 不该随加载态出现/消失（否则表头会上下跳）。
+                // 地址栏与工具栏都在加载/失败分支之前挂上：它们是对象区的常驻
+                // chrome，不该随加载态出现/消失（否则表头会上下跳）。
+                // 顺序对齐参照实现：地址栏行 → 操作工具栏 → 表格
+                .child(self.render_address_bar(theme, cx))
                 .child(self.render_object_toolbar(theme, cx)),
             cx,
         );
@@ -303,10 +353,6 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 每帧只算一次「排序 × 过滤」，结果给行渲染闭包复用（见 display_order 注释）
-        self.display_order =
-            display_entry_order(&self.entries, self.object_sort, self.filtered_ix.as_deref());
-
         if self.entries.is_empty() && self.objects_state == AsyncState::Idle {
             return Self::object_list_placeholder(
                 theme,
@@ -408,6 +454,11 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let visible_keys = visible_object_keys(&self.entries, &self.display_order);
+        let all_visible_selected = !visible_keys.is_empty()
+            && visible_keys
+                .iter()
+                .all(|k| self.selected_object_keys.contains(k));
         // 表格规格照抄参照实现：单元格横向内边距 16px、表头与行同一高度
         // （36px，见 tokens::row_height）、表头底色 #fafafc、文字 12px。
         h_flex()
@@ -422,6 +473,26 @@ impl WorkspaceView {
             .text_size(tokens::label())
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.foreground)
+            .child(
+                // 全选框（参照实现的表格第一列）：勾上＝选中当前可见的全部对象，
+                // 取消＝清空；语义与 ⌘A 一致，走同一个 handler。
+                div()
+                    .w(tokens::col_check_width())
+                    .flex_shrink_0()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Checkbox::new("header-select-all")
+                            .checked(all_visible_selected)
+                            .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                                if *checked {
+                                    this.handle_select_all(&SelectObjectAll, window, cx);
+                                } else {
+                                    this.clear_object_selection();
+                                    cx.notify();
+                                }
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .id("header-name")
@@ -627,6 +698,8 @@ impl WorkspaceView {
                         }
                         this.open_prefix(prefix_nav.clone(), cx);
                     }))
+                    // 目录行不参与对象选择，但列要对齐：首尾留同宽占位
+                    .child(div().w(tokens::col_check_width()).flex_shrink_0())
                     .child(
                         h_flex()
                             .flex_1()
@@ -649,6 +722,7 @@ impl WorkspaceView {
                             .text_color(theme.muted_foreground)
                             .child("-"),
                     )
+                    .child(div().w(tokens::col_action_width()).flex_shrink_0())
                     .into_any_element()
             }
             ListingEntry::Object(object) => {
@@ -658,6 +732,8 @@ impl WorkspaceView {
                     .as_ref()
                     .is_some_and(|(key, _)| key == &object.key);
                 let key = object.key.clone();
+                let check_key = object.key.clone();
+                let actions_key = object.key.clone();
                 let right_key = object.key.clone();
                 let menu_open_key = object.key.clone();
                 let dbl_key = object.key.clone();
@@ -719,6 +795,19 @@ impl WorkspaceView {
                         this.select_object_for_row_action(&dbl_key);
                         this.open_preview_overlay(window, cx);
                     }))
+                    .child(
+                        div()
+                            .w(tokens::col_check_width())
+                            .flex_shrink_0()
+                            // 复选框自己吃掉 mouse_down，否则行处理器会把它当成
+                            // 「点行」而先做一次选择，再叠加一次切换
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(Checkbox::new(("row-check", ix)).checked(selected).on_click(
+                                cx.listener(move |this, _: &bool, _, cx| {
+                                    this.toggle_object_key_selection(&check_key.clone(), cx)
+                                }),
+                            )),
+                    )
                     .child(self.render_object_name_cell(object, renaming, theme))
                     .child(
                         div()
@@ -762,6 +851,36 @@ impl WorkspaceView {
                                 ))
                             },
                         ),
+                    )
+                    .child(
+                        // 「操作」列（参照实现的最后一列）：一个 ⋯ 入口打开整行菜单。
+                        // 与对象右键菜单共用同一个 `object_menu_*` 状态，所以只有
+                        // 一个菜单实体，位置按**点击点**的窗口坐标定位。
+                        div()
+                            .w(tokens::col_action_width())
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_end()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new(("row-actions", ix))
+                                    .icon(Icon::new(IconName::Ellipsis))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("更多操作")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(
+                                        move |this, event: &ClickEvent, _, cx| {
+                                            this.toggle_object_menu(
+                                                &actions_key,
+                                                event.position(),
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                            ),
                     )
                     .into_any_element()
             }
@@ -825,10 +944,33 @@ impl WorkspaceView {
         }
         bar = bar.child(middle);
         // 右段：已加载数量 + 翻页
+        // 右段：每页条数选择器（参照实现右下角那一项）。服务端列举本就是
+        // 「单页条数上限」语义，所以这是真值，不是装饰。
         bar = bar.child(
             div()
-                .flex_shrink_0()
-                .child(format!("已加载 {} 项", self.entries.len())),
+                .relative()
+                .child(
+                    Button::new("page-limit")
+                        .label(format!("{} 条/页", self.page_limit))
+                        .with_size(Size::Small)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                            this.page_limit_menu_open = !this.page_limit_menu_open;
+                            this.page_limit_menu_at = Some(event.position());
+                            cx.notify();
+                        })),
+                )
+                .when(self.page_limit_menu_open, |el| {
+                    let at = self.page_limit_menu_at.unwrap_or(point(px(8.), px(8.)));
+                    el.child(deferred(
+                        anchored()
+                            .anchor(Anchor::TopRight)
+                            .position_mode(AnchoredPositionMode::Window)
+                            .position(at)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(self.render_page_limit_menu(theme, cx)),
+                    ))
+                }),
         );
         if self.next_marker.is_some() {
             bar = bar.child(

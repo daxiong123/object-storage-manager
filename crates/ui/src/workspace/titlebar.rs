@@ -123,8 +123,9 @@ impl WorkspaceView {
         } else {
             IconName::PanelLeftClose
         };
-        // 标题栏两侧按参照实现布置：左侧是**应用身份**（图标 + 名称），右侧是
-        // **传输状态**摘要；中间仍是导航与当前位置。
+        // 标题栏按参照实现只放**窗口级身份信息**：左＝应用图标 + 名称，
+        // 右＝传输状态摘要。导航（后退/前进）与当前位置已移到标题栏下方的
+        // **地址栏行**（见 `render_address_bar`），与参照实现的层级一致。
         let transfer_summary = if self.transfers.is_empty() {
             "当前暂无传输任务".to_string()
         } else {
@@ -188,27 +189,7 @@ impl WorkspaceView {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
-                .child(
-                    Button::new("nav-back")
-                        .icon(Icon::new(IconName::ArrowLeft))
-                        .ghost()
-                        .with_size(Size::Small)
-                        .tooltip("后退 ⌘[")
-                        .disabled(self.nav_back.is_empty())
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
-                )
-                .child(
-                    Button::new("nav-forward")
-                        .icon(Icon::new(IconName::ArrowRight))
-                        .ghost()
-                        .with_size(Size::Small)
-                        .tooltip("前进 ⌘]")
-                        .disabled(self.nav_forward.is_empty())
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
-                )
-                .child(self.render_title_location(theme, cx))
+                .child(div().flex_1())
                 .child(
                     div()
                         .flex_shrink_0()
@@ -218,6 +199,53 @@ impl WorkspaceView {
                         .child(transfer_summary),
                 ),
         )
+    }
+
+    /// 标题栏**下方**的地址栏行（参照实现的层级：导航与当前位置独立成行）。
+    ///
+    /// 组成与参照一致：左＝后退/前进；中＝当前位置（⌘L 路径框，否则面包屑，
+    /// 参照实现里这里是 `oss://bucket/prefix` 形式）；参照右端还有一个收藏用的
+    /// 星标，那属于「收藏」功能（待定项 B），此处先不放无效按钮。
+    pub(super) fn render_address_bar(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                Button::new("nav-back")
+                    .icon(Icon::new(IconName::ArrowLeft))
+                    .ghost()
+                    .with_size(Size::Small)
+                    .tooltip("后退 ⌘[")
+                    .disabled(self.nav_back.is_empty())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
+            )
+            .child(
+                Button::new("nav-forward")
+                    .icon(Icon::new(IconName::ArrowRight))
+                    .ghost()
+                    .with_size(Size::Small)
+                    .tooltip("前进 ⌘]")
+                    .disabled(self.nav_forward.is_empty())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.render_title_location(theme, cx)),
+            )
     }
 
     /// Titlebar 中段：⌘L 路径框，否则当前 bucket / prefix 面包屑。

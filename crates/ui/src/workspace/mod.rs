@@ -33,8 +33,8 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
-    button::ButtonVariants as _, h_flex, input::Editor, input::EditorState, input::Input,
-    input::InputEvent, input::InputState, progress::Progress, resizable::h_resizable,
+    button::ButtonVariants as _, checkbox::Checkbox, h_flex, input::Editor, input::EditorState,
+    input::Input, input::InputEvent, input::InputState, progress::Progress, resizable::h_resizable,
     resizable::resizable_panel, scroll::ScrollableElement, spinner::Spinner, v_flex,
 };
 
@@ -116,6 +116,11 @@ pub(super) const SIDEBAR_MAX: Pixels = px(360.);
 /// 对象列表单页条数（七牛列举单页上限内）。列宽在 tokens.rs
 /// （`col_size_width` / `col_time_width`，随字号缩放；表头与行共用保证对齐）。
 pub(super) const OBJECTS_PAGE_LIMIT: u32 = 100;
+
+/// 「每页条数」可选档位（参照实现底栏右下角那个选择器）。服务端列举本来就是
+/// **单页条数上限**语义（`ListObjectsRequest::limit`），所以这一项做得到真值，
+/// 不像页码那样只能编。
+pub(super) const PAGE_LIMIT_CHOICES: [u32; 4] = [50, 100, 200, 500];
 
 // 签名链接 TTL / 剪贴板清除秒数不再用编译期常量：运行时取 self.settings
 // （settings.json，⌘, 可改；默认值见 object-storage-persistence）。
@@ -258,6 +263,11 @@ pub struct WorkspaceView {
     display_order: Vec<usize>,
     /// 对象列表的虚拟滚动句柄（`uniform_list` 绑定；键盘导航用它把选中行滚进视野）。
     object_list_scroll: UniformListScrollHandle,
+    /// 每页条数（底栏右下角选择器；默认 `OBJECTS_PAGE_LIMIT`）。
+    page_limit: u32,
+    /// 「每页条数」菜单是否展开，以及触发点的窗口坐标。
+    page_limit_menu_open: bool,
+    page_limit_menu_at: Option<Point<Pixels>>,
     /// 应用设置（settings.json 快照；⌘, 可改）。
     settings: object_storage_persistence::Settings,
     /// settings.json 路径（模态展示与保存用）。
@@ -295,6 +305,10 @@ pub struct WorkspaceView {
     object_menu_at: Option<Point<Pixels>>,
     /// 顶部「更多」菜单是否打开。
     top_more_open: bool,
+    /// 触发「更多」菜单时的**窗口坐标**（点击点）。锚定必须用它，不能靠
+    /// 「锚定元素所在容器的原点」——那个原点会随按钮所在的容器变化（按钮从
+    /// 标题栏挪到内容区工具栏后就偏了），而窗口坐标与容器无关。
+    top_more_menu_at: Option<Point<Pixels>>,
     /// 传输面板是否展开（显示每任务明细）。收起态仅显示一行汇总。
     transfers_expanded: bool,
     /// 当前是否显示对象详情弹层。
@@ -585,6 +599,9 @@ impl WorkspaceView {
             object_sort: ObjectSort::default(),
             display_order: Vec::new(),
             object_list_scroll: UniformListScrollHandle::new(),
+            page_limit: OBJECTS_PAGE_LIMIT,
+            page_limit_menu_open: false,
+            page_limit_menu_at: None,
             settings,
             settings_path,
             settings_modal: None,
@@ -601,6 +618,7 @@ impl WorkspaceView {
             object_menu_open: None,
             object_menu_at: None,
             top_more_open: false,
+            top_more_menu_at: None,
             transfers_expanded: false,
             details_overlay_open: false,
             about_overlay_open: false,

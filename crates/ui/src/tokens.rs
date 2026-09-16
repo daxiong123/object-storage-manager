@@ -183,6 +183,16 @@ pub fn col_time_width() -> Pixels {
     text(148.)
 }
 
+/// 对象列表行首**复选框**列宽（参照实现的表格第一列）。
+pub fn col_check_width() -> Pixels {
+    text(28.)
+}
+
+/// 对象列表行末**操作**列宽（参照实现的表格最后一列）。
+pub fn col_action_width() -> Pixels {
+    text(40.)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +236,8 @@ mod tests {
         assert_eq!(col_time_width(), base_time * 1.4);
         // 时间列必须容得下「最新修改时间」六个字 + 时间串
         assert!(col_time_width() > col_size_width());
+        assert_eq!(col_check_width(), text(28.));
+        assert_eq!(col_action_width(), text(40.));
         set_ui_font_scale(1.0);
     }
 
