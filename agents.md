@@ -170,7 +170,8 @@ crates/ui/src/
 
 ## 7. UX 硬标准
 
-- Unified Titlebar（Traffic Lights + 导航 + Toolbar 一体），Sidebar（180/220/360px，折叠 44px Icon Rail，⌘⌥S），Content 主列表占据剩余空间；主界面不再显示额外详情列。Resize 实时 60 FPS。
+- Unified Titlebar（Traffic Lights + **窗口级导航**一体：侧栏开关 / 后退前进 / 当前位置），Sidebar（180/220/360px，折叠 44px Icon Rail，⌘⌥S），Content 主列表占据剩余空间；主界面不再显示额外详情列。Resize 实时 60 FPS。
+  **对象区的操作不放标题栏**：上传 / 更多 / 过滤在表格**正上方**的工具栏里（`render_object_toolbar`，操作在左、搜索在右）。分工判据——作用于**窗口**的进 Titlebar，作用于**对象列表**的进内容区工具栏；标题栏属于窗口拖拽区，控件越多越容易和拖拽/双击缩放打架。
 - 快捷键一律 Command 系（⌘K/⌘L/⌘F/⌘U/⌘R/⌘,/⌘[/⌘]/⌘A/⌘W/⌘Q）；UI 中只显示 `⌘ ⌥ ⌃ ⇧` 符号，不显示 "Cmd+Shift+P" 文字。
 - **列表行一律「单击选择、双击打开」**（Finder 语义，判据为纯函数 `row_activation`，单测锁死）：对象行双击打开预览（先 `select_object_for_row_action` scope 再 `open_preview_overlay`），目录行双击进入（`open_prefix`）；单击只做选择（含 ⌘/⇧ 语义），文件名不是独立点击目标，行内重命名未收尾时不激活。Space 预览（再按 Space/Esc 关闭，方向键切换）；Return 进 Inline Rename（Finder 式，不弹 Dialog）；删除用 `⌘⌫` 且远端删除必须确认（`window.prompt`，无废纸篓）。命令面板/添加账号打开时 ⌘⌫ 不删对象。
 - Selection：Click / ⌘Click / ⇧Click / ⌘A，完整 macOS 语义。

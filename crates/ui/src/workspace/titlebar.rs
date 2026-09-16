@@ -123,7 +123,6 @@ impl WorkspaceView {
         } else {
             IconName::PanelLeftClose
         };
-        let has_bucket = self.selected_bucket.is_some();
         TitleBar::new().child(
             h_flex()
                 .w_full()
@@ -164,8 +163,7 @@ impl WorkspaceView {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
                 )
-                .child(self.render_title_location(theme, cx))
-                .child(self.render_title_trailing(theme, has_bucket, cx)),
+                .child(self.render_title_location(theme, cx)),
         )
     }
 
@@ -205,94 +203,6 @@ impl WorkspaceView {
                 .child("CloudStorage")
                 .into_any_element(),
         }
-    }
-
-    pub(super) fn render_title_trailing(
-        &self,
-        theme: &Theme,
-        has_bucket: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap_1()
-            .when(has_bucket, |row| {
-                row.child(self.render_title_filter(theme, cx))
-                    .child(
-                        Button::new("toolbar-upload-files")
-                            .icon(Icon::new(IconName::ArrowUp))
-                            .label(if self.uploading {
-                                "选择文件…"
-                            } else {
-                                "上传"
-                            })
-                            .with_size(Size::Small)
-                            .disabled(self.uploading)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .child(
-                                Button::new("toolbar-more")
-                                    .icon(Icon::new(IconName::Ellipsis))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("更多操作")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_top_more_menu(cx)),
-                                    ),
-                            )
-                            .when(self.top_more_open, |button| {
-                                button.child(deferred(
-                                    anchored()
-                                        .anchor(Anchor::TopRight)
-                                        .offset(point(px(0.), px(4.)))
-                                        .snap_to_window_with_margin(px(8.))
-                                        .child(self.render_top_more_menu(theme, cx)),
-                                ))
-                            }),
-                    )
-            })
-    }
-
-    pub(super) fn render_title_filter(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(editor) = &self.object_filter {
-            return h_flex()
-                .id("title-filter")
-                .key_context("ObjectFilter")
-                .w(tokens::text(220.))
-                .items_center()
-                .gap_1()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
-                .child(
-                    Button::new("filter-close")
-                        .icon(Icon::new(IconName::Close))
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_object_filter(window, cx);
-                        })),
-                )
-                .into_any_element();
-        }
-        let _ = theme;
-        Button::new("objects-filter")
-            .icon(Icon::new(IconName::Search))
-            .ghost()
-            .with_size(Size::Small)
-            .tooltip("过滤 ⌘F")
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.handle_toggle_object_filter(&ToggleObjectFilter, window, cx);
-            }))
-            .into_any_element()
     }
 
     /// Titlebar 面包屑：bucket / prefix…（长路径折叠）。

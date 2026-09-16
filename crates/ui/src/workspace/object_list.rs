@@ -3,6 +3,111 @@
 use super::*;
 
 impl WorkspaceView {
+    /// 表格上方的操作工具栏（对象区自己的 chrome）。
+    ///
+    /// 原先这些控件挤在统一标题栏右端；标题栏的职责是「窗口级导航」——
+    /// 侧栏开关、前进/后退、当前位置——上传/过滤/更多属于**对象区**，
+    /// 放在表格正上方更贴近它们作用的范围，也不再和窗口拖拽区抢位置。
+    /// 布局对齐参考实现：**操作在左、搜索在右**。
+    pub(super) fn render_object_toolbar(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .id("object-toolbar")
+            .w_full()
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("toolbar-upload-files")
+                            .icon(Icon::new(IconName::ArrowUp))
+                            .label(if self.uploading {
+                                "选择文件…"
+                            } else {
+                                "上传"
+                            })
+                            .with_size(Size::Small)
+                            .disabled(self.uploading)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                Button::new("toolbar-more")
+                                    .icon(Icon::new(IconName::Ellipsis))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("更多操作")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_top_more_menu(cx)),
+                                    ),
+                            )
+                            .when(self.top_more_open, |button| {
+                                button.child(deferred(
+                                    anchored()
+                                        .anchor(Anchor::TopRight)
+                                        .offset(point(px(0.), px(4.)))
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(self.render_top_more_menu(theme, cx)),
+                                ))
+                            }),
+                    ),
+            )
+            .child(self.render_object_filter(cx))
+            .into_any_element()
+    }
+
+    /// 工具栏右端：过滤输入框（展开时）或搜索图标按钮。
+    pub(super) fn render_object_filter(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(editor) = &self.object_filter {
+            return h_flex()
+                .id("object-filter")
+                .key_context("ObjectFilter")
+                .w(tokens::text(220.))
+                .items_center()
+                .gap_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
+                .child(
+                    Button::new("filter-close")
+                        .icon(Icon::new(IconName::Close))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_object_filter(window, cx);
+                        })),
+                )
+                .into_any_element();
+        }
+        Button::new("objects-filter")
+            .icon(Icon::new(IconName::Search))
+            .ghost()
+            .with_size(Size::Small)
+            .tooltip("过滤 ⌘F")
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.handle_toggle_object_filter(&ToggleObjectFilter, window, cx);
+            }))
+            .into_any_element()
+    }
+
     /// 中间内容区：对象列表（选中桶后异步加载，含前缀导航与翻页）。
     pub(super) fn render_content(
         &mut self,
@@ -50,7 +155,10 @@ impl WorkspaceView {
                 .min_h_0()
                 .h_full()
                 .overflow_hidden()
-                .bg(theme.background),
+                .bg(theme.background)
+                // 工具栏在加载/失败分支之前就挂上：它是对象区的常驻 chrome，
+                // 不该随加载态出现/消失（否则表头会上下跳）。
+                .child(self.render_object_toolbar(theme, cx)),
             cx,
         );
         // 选中信息与下载动作在底部状态条里就地展示（见

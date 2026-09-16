@@ -1,7 +1,10 @@
 //! 主窗口 Workspace。
 //!
 //! 结构（agents.md §7）：Unified Titlebar + Sidebar(180/220/360) + Content。
-//! - Titlebar 承载导航（后退/前进）、当前位置面包屑、过滤、上传；内容区不再堆工具栏。
+//! - Titlebar 只放**窗口级导航**：侧栏开关、后退/前进、当前位置（面包屑 / ⌘L 路径框）。
+//! - 对象区的操作（上传 / 更多 / 过滤）在**表格正上方**的工具栏里（`object_list.rs` 的
+//!   `render_object_toolbar`，操作在左、搜索在右）：它们作用于对象列表而非窗口，放在表格
+//!   正上方更贴近作用范围，也不必和标题栏的窗口拖拽区抢位置。
 //! - Sidebar 折叠为 44px 图标栏（规范硬指标；gpui-component 自带 Sidebar 固定 255px/48px，
 //!   无法满足，故自建，用其 Icon/主题 token 保持视觉一致）。
 //! - Sidebar 宽度用 gpui-component Resizable；折叠/展开切换布局变体（不同的 resizable group id），
