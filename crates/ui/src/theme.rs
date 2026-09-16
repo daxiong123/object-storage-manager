@@ -419,9 +419,12 @@ fn oss_browser_light_palette() -> Palette {
         muted: rgb(0xFAFAFC),
         muted_foreground: rgb(0x898989),
         border,
-        sidebar: rgb(0xFAFAFC),
+        // 侧栏底色与分隔线**实测自参照实现的运行实例**（截其窗口后采样像素）：
+        // 侧栏 `#F1F1F1`、与内容区之间一条 1px `#DFDFDF`。注意它比内容区**更深**
+        // （内容区实测 `#F7F7F7`），不是常见的「侧栏更亮」。
+        sidebar: rgb(0xF1F1F1),
         sidebar_foreground: rgb(0x333333),
-        sidebar_border: border,
+        sidebar_border: rgb(0xDFDFDF),
         popover: rgb(0xFFFFFF),
         secondary: rgb(0xFAFAFC),
         secondary_hover: rgb(0xF2F2F2),
@@ -504,7 +507,9 @@ fn oss_browser_dark_palette() -> Palette {
         muted: rgb(0x1F1F1F),
         muted_foreground: rgb(0x737373),
         border,
-        sidebar: rgb(0x1F1F1F),
+        // 深色无上游参照（其 CSS 只有亮色）：按亮色那组「侧栏与内容有明确层级差」
+        // 的关系镜像——亮色侧栏比内容更深，深色侧栏就比内容更亮，差值同量级。
+        sidebar: rgb(0x1A1A1A),
         sidebar_foreground: rgb(0xD9D9D9),
         sidebar_border: border,
         popover: rgb(0x262626),
