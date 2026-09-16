@@ -242,10 +242,9 @@ fn waku_light_palette() -> Palette {
         muted: raised,
         muted_foreground: rgb(0x666666),
         border,
-        // 侧栏**透明**：同上游在 macOS 上的 `transparent_black` 用法，让系统
-        // 材质（NSVisualEffectView）透出来。真正的材质由窗口层提供，见
-        // `sync_window_backdrop`。
-        sidebar: transparent_black(),
+        // 侧栏：**半透明染色**（不是全透明——见 `SIDEBAR_TINT_ALPHA` 的说明）。
+        // 系统材质由窗口层提供，见 `sync_window_backdrop`。
+        sidebar: sidebar_tint(0.925),
         sidebar_foreground: rgb(0x242424),
         sidebar_border: border,
         popover: canvas,
@@ -332,8 +331,8 @@ fn waku_dark_palette() -> Palette {
         muted: raised,
         muted_foreground: rgb(0xA3A3A3),
         border,
-        // 见亮色套的说明：侧栏透明，系统材质透出。
-        sidebar: transparent_black(),
+        // 见亮色套的说明：侧栏是半透明染色，不是全透明。
+        sidebar: sidebar_tint(0.135),
         sidebar_foreground: rgb(0xE2E2E2),
         sidebar_border: border,
         popover: raised,
@@ -553,9 +552,21 @@ fn dark_palette(style: ThemeStyle) -> Palette {
     }
 }
 
-/// 完全透明（保持 HSLA 分量形态，便于参与色板）。
-fn transparent_black() -> [f32; 4] {
-    [0., 0., 0., 0.]
+/// 侧栏染色的不透明度。
+///
+/// **踩过的坑**：一开始我把侧栏设成 `transparent_black()`（照搬上游「侧栏透明」的说法），
+/// 结果整块侧栏看起来**就是个洞**——因为 gpui 给 `Blurred` 用的材质是
+/// `NSVisualEffectMaterial::Selection`（gpui-pre-macos 注释自己写明是「无彩语义材质」），
+/// 它几乎没有存在感，只靠它撑不起一个面。
+///
+/// 真实的 macOS 侧栏 = **材质 + 一层染色**。这里补的就是染色那一半：材质仍在背后实时
+/// 采样（透光还在），但面板本身有明确的底色，读起来是「面」而不是「洞」。
+/// 0.62 是让「看得出透光」与「不糊成一片」都能成立的位置，改小会越来越像洞。
+const SIDEBAR_TINT_ALPHA: f32 = 0.62;
+
+/// 侧栏染色：中性灰 + 半透明（`lightness` 取该模式下接近 canvas 的亮度）。
+fn sidebar_tint(lightness: f32) -> [f32; 4] {
+    hsla(0., 0., lightness, SIDEBAR_TINT_ALPHA)
 }
 
 /// HSL（h: 0..360, s/l: 0..1）→ HSLA 分量数组（alpha = 1）。
