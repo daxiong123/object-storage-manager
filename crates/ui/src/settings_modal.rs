@@ -802,11 +802,16 @@ impl SettingsModal {
             section_divider(theme)
                 .child(field_row(
                     "视觉风格",
-                    Some("Linear：冷灰中性面 + 靛蓝；waku：无彩灰 + 珊瑚品牌色 + 蓝色选中。"),
+                    Some("Linear：冷灰 + 靛蓝；waku：无彩灰 + 珊瑚 + 蓝选中；OSS Browser：Ant 蓝 + 淡蓝选中。"),
                     v_flex()
                         .gap_2()
                         .child(style_radio("theme-style-linear", ThemeStyle::Linear, theme))
-                        .child(style_radio("theme-style-waku", ThemeStyle::Waku, theme)),
+                        .child(style_radio("theme-style-waku", ThemeStyle::Waku, theme))
+                        .child(style_radio(
+                            "theme-style-oss-browser",
+                            ThemeStyle::OssBrowser,
+                            theme,
+                        )),
                     theme,
                 ))
                 .into_any_element(),

@@ -41,6 +41,13 @@ pub enum ThemeStyle {
     /// waku 风格：无彩中性灰 + 珊瑚色 brand（只做品牌标记，不承载结构）
     /// + 蓝色 selection（选中态与品牌色分离）。
     Waku,
+    /// OSS Browser（阿里官方客户端）风格：Ant Design 蓝。
+    ///
+    /// 取值**逐项来自那个应用的 CSS**（`/Applications/oss-browser2.app` 里的
+    /// `.webpack/renderer/main.css`，其自定义属性 `--oss-*` 明列了主色/状态色/中性色）。
+    /// 它的深色态在 CSS 里没有覆盖，故深色取 **Ant Design 官方深色主题**的取值，
+    /// 不是凭空配的（见 theme.rs 的对应注释）。
+    OssBrowser,
 }
 
 impl ThemeStyle {
@@ -48,6 +55,7 @@ impl ThemeStyle {
         match self {
             Self::Linear => "Linear（靛蓝）",
             Self::Waku => "waku（珊瑚 + 蓝选中）",
+            Self::OssBrowser => "OSS Browser（Ant 蓝）",
         }
     }
 }

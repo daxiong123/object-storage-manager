@@ -17,9 +17,11 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 三套之间循环，便于在同一屏上反复对照
         let next = match self.settings.theme_style {
             ThemeStyle::Linear => ThemeStyle::Waku,
-            ThemeStyle::Waku => ThemeStyle::Linear,
+            ThemeStyle::Waku => ThemeStyle::OssBrowser,
+            ThemeStyle::OssBrowser => ThemeStyle::Linear,
         };
         let mut settings = self.settings.clone();
         settings.theme_style = next;

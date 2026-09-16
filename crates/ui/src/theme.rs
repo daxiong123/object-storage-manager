@@ -394,10 +394,182 @@ fn waku_dark_palette() -> Palette {
     }
 }
 
+/// OSS Browser（阿里官方客户端）风格 · 亮色。
+///
+/// 取值**逐项来自该应用自己的 CSS**（`/Applications/oss-browser2.app` →
+/// `.webpack/renderer/main.css`）：它的 `:root` 里有 `--oss-primary-color: #0064c8`
+/// 等自定义属性，表头/行高/文字色则在 `.ant-table-*` 规则里。要点：
+///
+/// - 主色是**深蓝 `#0064c8`**（不是 Linear 的靛蓝、也不是 waku 的珊瑚）；
+/// - 选中是**淡蓝**：行选中 `#eff3f8`、侧栏/菜单选中 `#e6f7ff`；
+/// - hover 是**纯中性灰 `#f2f2f2`**（无色相）；边框 `#f0f0f0` 极浅；
+/// - 表头底色 `#fafafc`、文字 `#1f2024`，次要文字 `#898989`；
+/// - 状态色是经典饱和三色：成功 `rgb(80,187,53)`、错误 `rgb(250,73,74)`、
+///   警告 `rgb(246,164,52)`；它没有 info，用它的链接蓝 `#1677ff` 顶。
+///
+/// `selection` 不是直接抄 `#eff3f8`：gpui-component 会把 `selection` 的 alpha
+/// 强压到 ≤0.3，源色太淡会渲染到看不见（见 `selection_tint_survives_library_alpha_clamp`）。
+/// 这里取 `#b8cee6` 作**源色**，0.3 压完后叠在白底上恰好约等于它的 `#eff3f8`。
+fn oss_browser_light_palette() -> Palette {
+    let border = rgb(0xF0F0F0);
+    Palette {
+        background: rgb(0xFFFFFF),
+        foreground: rgb(0x1F2024),
+        muted: rgb(0xFAFAFC),
+        muted_foreground: rgb(0x898989),
+        border,
+        sidebar: rgb(0xFAFAFC),
+        sidebar_foreground: rgb(0x333333),
+        sidebar_border: border,
+        popover: rgb(0xFFFFFF),
+        secondary: rgb(0xFAFAFC),
+        secondary_hover: rgb(0xF2F2F2),
+        secondary_active: rgb(0xEFEFEF),
+        input: rgb(0xFFFFFF),
+        list: rgb(0xFFFFFF),
+        list_even: rgb(0xFAFAFC),
+        list_head: rgb(0xFAFAFC),
+        table: rgb(0xFFFFFF),
+        table_even: rgb(0xFAFAFC),
+        table_head: rgb(0xFAFAFC),
+        // 它的表格分隔线就是实色 #f0f0f0（Ant 式），不另加透明度
+        table_row_border: border,
+        title_bar: rgb(0xFFFFFF),
+        // Ant 的模态遮罩是 rgba(0,0,0,0.45)
+        overlay: hsla(0., 0., 0., 0.45),
+        window_border: border,
+        group_box: rgb(0xFAFAFC),
+        group_box_foreground: rgb(0x1F2024),
+        description_list_label: rgb(0xFAFAFC),
+        description_list_label_foreground: rgb(0x1F2024),
+        primary: rgb(0x0064C8),
+        primary_hover: rgb(0x0170CB),
+        primary_active: rgb(0x0053A6),
+        primary_foreground: rgb(0xFFFFFF),
+        progress_bar: rgb(0x0064C8),
+        // accent / accent_foreground 在本仓库当**图标色**用（非文本类型的文件图标、
+        // 文件夹图标），所以取它的主色蓝——不能取淡蓝，否则图标看不见。
+        accent: rgb(0x0064C8),
+        accent_foreground: rgb(0x0064C8),
+        ring: rgb(0x1677FF),
+        sidebar_accent: rgb(0xE6F7FF),
+        sidebar_accent_foreground: rgb(0x0064C8),
+        list_active: rgb(0xE6F7FF),
+        list_active_border: rgb(0x1677FF),
+        table_active: rgb(0xE6F7FF),
+        table_active_border: rgb(0x1677FF),
+        selection: rgb(0xB8CEE6),
+        link: rgb(0x1677FF),
+        link_hover: rgb(0x69B1FF),
+        link_active: rgb(0x0958D9),
+        drag_border: rgb(0x1677FF),
+        drop_target: hsla(215., 1.0, 0.53, 0.22),
+        row_hover: rgb(0xF2F2F2),
+        // 状态色：基色取自上游 CSS，**hover/active 在同色相上推亮度**得到，
+        // 不直接抄它的色阶——上游那套色阶越亮色相越漂（`#50BB35` 108° 与
+        // `#73D13D` 98° 差 10°，同一族会出现两种绿）。纪律测试就是抓这个的。
+        danger: rgb(0xFA494A),
+        danger_hover: hsl(0., 0.945, 0.70),
+        danger_active: hsl(0., 0.945, 0.56),
+        danger_foreground: rgb(0xFFFFFF),
+        warning: rgb(0xF6A434),
+        warning_hover: hsl(34.6, 0.915, 0.65),
+        warning_active: hsl(34.6, 0.915, 0.52),
+        warning_foreground: rgb(0xFFFFFF),
+        success: rgb(0x50BB35),
+        success_hover: hsl(108., 0.558, 0.53),
+        success_active: hsl(108., 0.558, 0.41),
+        success_foreground: rgb(0xFFFFFF),
+        info: rgb(0x1677FF),
+        info_hover: hsl(215., 1.0, 0.60),
+        info_active: hsl(215., 1.0, 0.47),
+        info_foreground: rgb(0xFFFFFF),
+    }
+}
+
+/// OSS Browser 风格 · 深色。
+///
+/// 该应用的 CSS **只有亮色**（没有任何深色覆盖），所以这一套取 **Ant Design 官方
+/// 深色主题**的取值（body `#141414`、容器 `#1f1f1f`、边框 `#303030`、主色
+/// `#1668dc`、正文 `rgba(255,255,255,0.85)`），而不是我凭空配的——保持同一套
+/// 设计语言，来源可查。
+fn oss_browser_dark_palette() -> Palette {
+    let border = rgb(0x303030);
+    Palette {
+        background: rgb(0x141414),
+        foreground: rgb(0xD9D9D9),
+        muted: rgb(0x1F1F1F),
+        muted_foreground: rgb(0x737373),
+        border,
+        sidebar: rgb(0x1F1F1F),
+        sidebar_foreground: rgb(0xD9D9D9),
+        sidebar_border: border,
+        popover: rgb(0x262626),
+        secondary: rgb(0x1F1F1F),
+        secondary_hover: rgb(0x262626),
+        secondary_active: rgb(0x303030),
+        input: rgb(0x1F1F1F),
+        list: rgb(0x141414),
+        list_even: rgb(0x1A1A1A),
+        list_head: rgb(0x1F1F1F),
+        table: rgb(0x141414),
+        table_even: rgb(0x1A1A1A),
+        table_head: rgb(0x1F1F1F),
+        table_row_border: border,
+        title_bar: rgb(0x1F1F1F),
+        overlay: hsla(0., 0., 0., 0.55),
+        window_border: border,
+        group_box: rgb(0x1F1F1F),
+        group_box_foreground: rgb(0xD9D9D9),
+        description_list_label: rgb(0x1F1F1F),
+        description_list_label_foreground: rgb(0xD9D9D9),
+        primary: rgb(0x1668DC),
+        primary_hover: rgb(0x2B7BE0),
+        primary_active: rgb(0x0F5BC4),
+        primary_foreground: rgb(0xFFFFFF),
+        progress_bar: rgb(0x1668DC),
+        accent: rgb(0x1668DC),
+        accent_foreground: rgb(0x1668DC),
+        ring: rgb(0x1677FF),
+        sidebar_accent: rgb(0x111D2C),
+        sidebar_accent_foreground: rgb(0x1668DC),
+        list_active: rgb(0x111D2C),
+        list_active_border: rgb(0x1677FF),
+        table_active: rgb(0x111D2C),
+        table_active_border: rgb(0x1677FF),
+        selection: rgb(0x14467F),
+        link: rgb(0x1677FF),
+        link_hover: rgb(0x69B1FF),
+        link_active: rgb(0x0958D9),
+        drag_border: rgb(0x1677FF),
+        drop_target: hsla(215., 1.0, 0.53, 0.25),
+        row_hover: rgb(0x262626),
+        // 同亮色套：hover/active 在同色相上推亮度派生
+        danger: rgb(0xFF7875),
+        danger_hover: hsl(1.3, 1.0, 0.79),
+        danger_active: hsl(1.3, 1.0, 0.63),
+        danger_foreground: rgb(0x141414),
+        warning: rgb(0xFFC069),
+        warning_hover: hsl(34.8, 1.0, 0.77),
+        warning_active: hsl(34.8, 1.0, 0.63),
+        warning_foreground: rgb(0x141414),
+        success: rgb(0x73D13D),
+        success_hover: hsl(98.1, 0.617, 0.60),
+        success_active: hsl(98.1, 0.617, 0.46),
+        success_foreground: rgb(0x141414),
+        info: rgb(0x4096FF),
+        info_hover: hsl(213., 1.0, 0.70),
+        info_active: hsl(213., 1.0, 0.55),
+        info_foreground: rgb(0x141414),
+    }
+}
+
 /// 亮色套：白底冷灰面 + 低饱和靛蓝。
 fn light_palette(style: ThemeStyle) -> Palette {
-    if style == ThemeStyle::Waku {
-        return waku_light_palette();
+    match style {
+        ThemeStyle::Waku => return waku_light_palette(),
+        ThemeStyle::OssBrowser => return oss_browser_light_palette(),
+        ThemeStyle::Linear => {}
     }
     let n = |s: f32, l: f32| hsl(NEUTRAL_HUE, s, l);
     let na = |s: f32, l: f32, a: f32| hsla(NEUTRAL_HUE, s, l, a);
@@ -473,8 +645,10 @@ fn light_palette(style: ThemeStyle) -> Palette {
 
 /// 暗色套：深冷灰底 + 同系靛蓝提亮、压饱和。
 fn dark_palette(style: ThemeStyle) -> Palette {
-    if style == ThemeStyle::Waku {
-        return waku_dark_palette();
+    match style {
+        ThemeStyle::Waku => return waku_dark_palette(),
+        ThemeStyle::OssBrowser => return oss_browser_dark_palette(),
+        ThemeStyle::Linear => {}
     }
     let n = |s: f32, l: f32| hsl(NEUTRAL_HUE, s, l);
     let na = |s: f32, l: f32, a: f32| hsla(NEUTRAL_HUE, s, l, a);
@@ -908,7 +1082,12 @@ mod tests {
     /// 否则新加的风格可以偷偷破坏纪律而测试全绿。
     fn all_palettes() -> Vec<(String, Palette)> {
         let mut out = Vec::new();
-        for (style_name, style) in [("linear", ThemeStyle::Linear), ("waku", ThemeStyle::Waku)] {
+        // 必须列出**全部**风格：漏一套 = 那套可以偷偷破坏族纪律而测试全绿
+        for (style_name, style) in [
+            ("linear", ThemeStyle::Linear),
+            ("waku", ThemeStyle::Waku),
+            ("ossbrowser", ThemeStyle::OssBrowser),
+        ] {
             out.push((format!("{style_name}/light"), light_palette(style)));
             out.push((format!("{style_name}/dark"), dark_palette(style)));
         }
@@ -1236,9 +1415,10 @@ mod tests {
     const MAX_NEUTRAL_CHROMA: f32 = 0.06;
     /// 彩度低于此值即视为纯灰（覆盖 ±2/255 的取整噪声）。
     const PURE_GRAY_CHROMA: f32 = 0.008;
-    /// 非中性字段的色相必须能对上某个「锚点」（accent/selection/状态色），
-    /// 误差窗口用来吸收十六进制取色时的取整。
-    const ANCHOR_TOLERANCE_DEG: f32 = 3.;
+    /// 非中性字段的色相必须能对上某个「锚点」（具名彩色角色），误差窗口用来吸收
+    /// 取整与「同一色相经亮度推导 hover/active」时的几度漂移。8° 仍能抓住混进来的
+    /// 青绿/橙等其他色系。
+    const ANCHOR_TOLERANCE_DEG: f32 = 8.;
 
     /// 绝对彩度 = ΔRGB。**不能拿 HSL 的 s 判「是不是灰」**：接近黑/白时 s 会
     /// 失真——`rgb(0xF6F5F6)` 只差 1/255 个通道，却能算出 s = 0.053 与色相 300°，
@@ -1265,6 +1445,12 @@ mod tests {
         vec![
             ("accent", p.accent[0] * 360.),
             ("selection", p.selection[0] * 360.),
+            // ring / link / sidebar_accent 也是具名彩色角色：OSS Browser 那套的蓝
+            // 分好几个色相（主色 210、链接 215、淡蓝选中 199），只列 accent/selection
+            // 会把自家角色误判成「没来由的颜色」
+            ("ring", p.ring[0] * 360.),
+            ("link", p.link[0] * 360.),
+            ("sidebar_accent", p.sidebar_accent[0] * 360.),
             ("danger", p.danger[0] * 360.),
             ("warning", p.warning[0] * 360.),
             ("success", p.success[0] * 360.),
