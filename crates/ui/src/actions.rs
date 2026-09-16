@@ -60,6 +60,10 @@ actions!(
         OpenObject,
         // 在 Finder 中显示选中对象的本地副本（spec §16）
         RevealInFinder,
+        // 切换视觉风格（Linear ↔ waku）。**原型期动作**：为了在真实界面上
+        // 一键盘对照两套调色板（见 crates/persistence 的 ThemeStyle）。
+        // 两套风格共用同一份视图代码与语义字段，所以切换只改颜色、不动布局。
+        CycleThemeStyle,
     ]
 );
 
@@ -141,6 +145,9 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 ⌘O：用默认应用打开选中对象。
         KeyBinding::new("cmd-o", OpenObject, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
+        // 原型期：⌘⌥T 一键切换视觉风格，便于在同一屏上对照两套调色板。
+        // 绑定在 Workspace context，避免模态/输入框聚焦时误触。
+        KeyBinding::new("cmd-alt-t", CycleThemeStyle, Some("Workspace")),
         // ui::init 晚于 gpui_component::init，后注册的同 context 绑定优先。
         KeyBinding::new("escape", DismissCommandPalette, Some("Command")),
         KeyBinding::new("escape", DismissModal, Some("AccountModal")),
