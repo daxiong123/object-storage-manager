@@ -76,14 +76,21 @@ fn preferences() -> &'static RwLock<ThemePreferences> {
     PREFERENCES.get_or_init(|| RwLock::new(ThemePreferences::default()))
 }
 
-/// 一套完整的语义色板（四族映射，见模块注释）。
+/// 一套完整的语义色板（六族映射，见模块注释）。
 ///
 /// 与「逐字段 Option 覆盖」不同，这里一次给全 surface / primary /
-/// interactive 的定制值——Linear 风格的核心是中性面整体降温（hue 225），
+/// interactive / status 的定制值——Linear 风格的核心是中性面整体降温（hue 225），
 /// 只改个别字段会被库默认的纯灰（无色相）衬出不协调。
+///
+/// **族纪律（由 `tests` 里的断言把守，不是靠自觉）**：
+/// 1. surface / border / text 三族只允许冷灰（hue 225）或纯灰——界面主体不带色相；
+/// 2. brand 族（primary / selection / accent / link）只用低饱和靛蓝 hue 233；
+/// 3. status 族（danger / warning / success / info）是**唯一**允许外来色相的地方，
+///    因为它承载真实反馈：颜色在这里是信息，不是装饰；
+/// 4. hover 是中性位置反馈，选中才染色（hover ≠ selection）。
 #[derive(Debug, Clone, Copy)]
 struct Palette {
-    // ---- surface 族 ----
+    // ---- 族 1/6：surface（面）——背景、侧栏、卡片、列表/表格底色、遮罩 ----
     background: [f32; 4],
     foreground: [f32; 4],
     muted: [f32; 4],
@@ -111,13 +118,13 @@ struct Palette {
     group_box_foreground: [f32; 4],
     description_list_label: [f32; 4],
     description_list_label_foreground: [f32; 4],
-    // ---- primary 族：主 CTA（「执行动作」，非选中态） ----
+    // ---- 族 2/6：primary（主 CTA：「执行动作」，非选中态） ----
     primary: [f32; 4],
     primary_hover: [f32; 4],
     primary_active: [f32; 4],
     primary_foreground: [f32; 4],
     progress_bar: [f32; 4],
-    // ---- interactive / selection 族 ----
+    // ---- 族 3/6：interactive / selection（可交互与选中） ----
     accent: [f32; 4],
     accent_foreground: [f32; 4],
     ring: [f32; 4],
@@ -136,7 +143,40 @@ struct Palette {
     /// 列表/菜单行 hover：中性冷灰（≠ 选中态的 indigo 淡染色——
     /// Linear 语义：hover 是位置反馈，选中才染色）。
     row_hover: [f32; 4],
+    // ---- 族 6/6：status（真实反馈）——唯一允许外来色相的一族 ----
+    //
+    // 原先不设这四项，全部吃 gpui-component 的默认值；问题是库默认的 status
+    // 色与我们降温后的中性面（hue 225）不同源，同一个红色按钮在亮/暗两套里
+    // 与整体的冷暖关系不一致。显式给值后，亮/暗两套的 status 也由同一组
+    // 色相推导，并且「颜色只用于表意」这条纪律才有断言可写
+    // （见 `status_is_the_only_foreign_hue_family`）。
+    danger: [f32; 4],
+    danger_hover: [f32; 4],
+    danger_active: [f32; 4],
+    danger_foreground: [f32; 4],
+    warning: [f32; 4],
+    warning_hover: [f32; 4],
+    warning_active: [f32; 4],
+    warning_foreground: [f32; 4],
+    success: [f32; 4],
+    success_hover: [f32; 4],
+    success_active: [f32; 4],
+    success_foreground: [f32; 4],
+    info: [f32; 4],
+    info_hover: [f32; 4],
+    info_active: [f32; 4],
+    info_foreground: [f32; 4],
 }
+
+/// status 族色相：与中性面（225）和品牌靛蓝（233）都拉开距离，
+/// 且四者互相远离（最近的一对是 danger/warning，41°），靠颜色就能区分
+/// 「出错 / 留意 / 成功 / 提示」。warning 取 45 而非更常见的 38，正是为了让
+/// 它与 danger（4）拉开可辨距离——写成断言见
+/// `status_hues_are_mutually_distinguishable`。
+const HUE_DANGER: f32 = 4.;
+const HUE_WARNING: f32 = 45.;
+const HUE_SUCCESS: f32 = 148.;
+const HUE_INFO: f32 = 205.;
 
 /// 亮色套：白底冷灰面 + 低饱和靛蓝。
 fn light_palette() -> Palette {
@@ -192,6 +232,23 @@ fn light_palette() -> Palette {
         drag_border: hsl(HUE_DEG, 0.45, 0.60),
         drop_target: hsla(HUE_DEG, 0.45, 0.60, 0.22),
         row_hover: n(0.10, 0.94),
+        // status 族：亮色实底 + 白字，明度对齐 primary（0.55）以便同一排按钮等高观感。
+        danger: hsl(HUE_DANGER, 0.62, 0.50),
+        danger_hover: hsl(HUE_DANGER, 0.62, 0.44),
+        danger_active: hsl(HUE_DANGER, 0.62, 0.38),
+        danger_foreground: hsl(0., 0., 1.0),
+        warning: hsl(HUE_WARNING, 0.72, 0.42),
+        warning_hover: hsl(HUE_WARNING, 0.72, 0.36),
+        warning_active: hsl(HUE_WARNING, 0.72, 0.31),
+        warning_foreground: hsl(0., 0., 1.0),
+        success: hsl(HUE_SUCCESS, 0.52, 0.38),
+        success_hover: hsl(HUE_SUCCESS, 0.52, 0.33),
+        success_active: hsl(HUE_SUCCESS, 0.52, 0.28),
+        success_foreground: hsl(0., 0., 1.0),
+        info: hsl(HUE_INFO, 0.60, 0.44),
+        info_hover: hsl(HUE_INFO, 0.60, 0.38),
+        info_active: hsl(HUE_INFO, 0.60, 0.33),
+        info_foreground: hsl(0., 0., 1.0),
     }
 }
 
@@ -249,6 +306,24 @@ fn dark_palette() -> Palette {
         drag_border: hsl(HUE_DEG, 0.40, 0.60),
         drop_target: hsla(HUE_DEG, 0.40, 0.60, 0.25),
         row_hover: n(0.08, 0.13),
+        // status 族：暗色同样用「实底 + 白字」，明度对齐暗色 primary（0.58），
+        // 只把饱和度略压（暗底上高饱和会发荧光）。
+        danger: hsl(HUE_DANGER, 0.55, 0.56),
+        danger_hover: hsl(HUE_DANGER, 0.55, 0.62),
+        danger_active: hsl(HUE_DANGER, 0.55, 0.68),
+        danger_foreground: hsl(0., 0., 1.0),
+        warning: hsl(HUE_WARNING, 0.62, 0.52),
+        warning_hover: hsl(HUE_WARNING, 0.62, 0.58),
+        warning_active: hsl(HUE_WARNING, 0.62, 0.64),
+        warning_foreground: hsl(0., 0., 1.0),
+        success: hsl(HUE_SUCCESS, 0.45, 0.48),
+        success_hover: hsl(HUE_SUCCESS, 0.45, 0.54),
+        success_active: hsl(HUE_SUCCESS, 0.45, 0.60),
+        success_foreground: hsl(0., 0., 1.0),
+        info: hsl(HUE_INFO, 0.52, 0.54),
+        info_hover: hsl(HUE_INFO, 0.52, 0.60),
+        info_active: hsl(HUE_INFO, 0.52, 0.66),
+        info_foreground: hsl(0., 0., 1.0),
     }
 }
 
@@ -413,6 +488,23 @@ fn config(
         c.link_active = Some(hex(p.link_active));
         c.drag_border = Some(hex(p.drag_border));
         c.drop_target = Some(hex(p.drop_target));
+        // status：唯一允许外来色相的一族，用来承载真实反馈。
+        c.danger = Some(hex(p.danger));
+        c.danger_hover = Some(hex(p.danger_hover));
+        c.danger_active = Some(hex(p.danger_active));
+        c.danger_foreground = Some(hex(p.danger_foreground));
+        c.warning = Some(hex(p.warning));
+        c.warning_hover = Some(hex(p.warning_hover));
+        c.warning_active = Some(hex(p.warning_active));
+        c.warning_foreground = Some(hex(p.warning_foreground));
+        c.success = Some(hex(p.success));
+        c.success_hover = Some(hex(p.success_hover));
+        c.success_active = Some(hex(p.success_active));
+        c.success_foreground = Some(hex(p.success_foreground));
+        c.info = Some(hex(p.info));
+        c.info_hover = Some(hex(p.info_hover));
+        c.info_active = Some(hex(p.info_active));
+        c.info_foreground = Some(hex(p.info_foreground));
         cfg
     }
     build(mode, name, p, prefs)
@@ -583,6 +675,94 @@ fn effective_theme_mode(preference: AppearanceMode, system_mode: ThemeMode) -> T
 mod tests {
     use super::*;
     use gpui::WindowAppearance;
+
+    impl Palette {
+        /// 中性族 = surface + border + text + 纯白前景色（`*_foreground` 里
+        /// 只有 status/primary 用纯白；accent 系前景是靛蓝，归 brand 族）。
+        fn neutral_family(&self) -> Vec<(&'static str, [f32; 4])> {
+            vec![
+                ("background", self.background),
+                ("foreground", self.foreground),
+                ("muted", self.muted),
+                ("muted_foreground", self.muted_foreground),
+                ("border", self.border),
+                ("sidebar", self.sidebar),
+                ("sidebar_foreground", self.sidebar_foreground),
+                ("sidebar_border", self.sidebar_border),
+                ("popover", self.popover),
+                ("secondary", self.secondary),
+                ("secondary_hover", self.secondary_hover),
+                ("secondary_active", self.secondary_active),
+                ("input", self.input),
+                ("list", self.list),
+                ("list_even", self.list_even),
+                ("list_head", self.list_head),
+                ("table", self.table),
+                ("table_even", self.table_even),
+                ("table_head", self.table_head),
+                ("table_row_border", self.table_row_border),
+                ("title_bar", self.title_bar),
+                ("overlay", self.overlay),
+                ("window_border", self.window_border),
+                ("group_box", self.group_box),
+                ("group_box_foreground", self.group_box_foreground),
+                ("description_list_label", self.description_list_label),
+                (
+                    "description_list_label_foreground",
+                    self.description_list_label_foreground,
+                ),
+                ("row_hover", self.row_hover),
+                ("primary_foreground", self.primary_foreground),
+                ("danger_foreground", self.danger_foreground),
+                ("warning_foreground", self.warning_foreground),
+                ("success_foreground", self.success_foreground),
+                ("info_foreground", self.info_foreground),
+            ]
+        }
+
+        /// brand 族 = primary + selection/accent/link 及它们的靛蓝前景色。
+        fn brand_family(&self) -> Vec<(&'static str, [f32; 4])> {
+            vec![
+                ("primary", self.primary),
+                ("primary_hover", self.primary_hover),
+                ("primary_active", self.primary_active),
+                ("progress_bar", self.progress_bar),
+                ("accent", self.accent),
+                ("accent_foreground", self.accent_foreground),
+                ("ring", self.ring),
+                ("sidebar_accent", self.sidebar_accent),
+                ("sidebar_accent_foreground", self.sidebar_accent_foreground),
+                ("list_active", self.list_active),
+                ("list_active_border", self.list_active_border),
+                ("table_active", self.table_active),
+                ("table_active_border", self.table_active_border),
+                ("selection", self.selection),
+                ("link", self.link),
+                ("link_hover", self.link_hover),
+                ("link_active", self.link_active),
+                ("drag_border", self.drag_border),
+                ("drop_target", self.drop_target),
+            ]
+        }
+
+        /// status 族 = 实底（前景色是纯白，归中性族）。
+        fn status_family(&self) -> Vec<(&'static str, [f32; 4])> {
+            vec![
+                ("danger", self.danger),
+                ("danger_hover", self.danger_hover),
+                ("danger_active", self.danger_active),
+                ("warning", self.warning),
+                ("warning_hover", self.warning_hover),
+                ("warning_active", self.warning_active),
+                ("success", self.success),
+                ("success_hover", self.success_hover),
+                ("success_active", self.success_active),
+                ("info", self.info),
+                ("info_hover", self.info_hover),
+                ("info_active", self.info_active),
+            ]
+        }
+    }
 
     #[test]
     fn hex_round_trip_anchors() {
@@ -795,5 +975,97 @@ mod tests {
         assert_eq!(dark.s, 0., "暗色描边不得有饱和度");
         assert_eq!(dark.l, 1., "暗色描边必须是纯白");
         assert!((dark.a - 0.10).abs() < 1e-6, "alpha 应为 0.10");
+    }
+
+    // ---- 族纪律：把「颜色只用于表意」写成断言，而不是靠自觉 ----
+    //
+    // 这几条测试的作用不是验证某次改动，而是**挡住以后的顺手改动**：
+    // 「统一色族」时最容易发生的事，就是把状态色摊到中性面上，或反过来
+    // 给选中态塞一个更鲜艳的颜色。
+
+    /// 假设两色板都满足 `check`，失败时报出具体字段名。
+    fn for_each_palette(check: impl Fn(&str, &str, [f32; 4])) {
+        for (mode, p) in [("light", light_palette()), ("dark", dark_palette())] {
+            for (field, value) in p.neutral_family() {
+                check(mode, field, value);
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_families_carry_no_hue() {
+        // surface / border / text 是界面主体，只允许冷灰（hue 225）或纯灰
+        // （饱和度为 0，例如 popover/input 的纯白）。任何外来色相都会让整片
+        // 界面「花」起来，并且和 status 族抢「颜色 = 信息」的语义。
+        for_each_palette(|mode, field, [h, s, _, _]| {
+            let is_pure_gray = s <= 0.02;
+            let is_cool_gray = (h - NEUTRAL_HUE / 360.).abs() < 1e-6;
+            assert!(
+                is_pure_gray || is_cool_gray,
+                "{mode}: 中性族字段 {field} 带了外来色相（h={:.0}, s={s}）——\
+                 中性面只允许冷灰或纯灰",
+                h * 360.
+            );
+        });
+    }
+
+    #[test]
+    fn brand_family_uses_only_the_brand_hue() {
+        // primary / selection / accent / link 只用低饱和靛蓝，且不得高饱和
+        // （高饱和会变成「强调色滥用」，与 Linear 基调冲突）。
+        for (mode, p) in [("light", light_palette()), ("dark", dark_palette())] {
+            for (field, [h, s, _, _]) in p.brand_family() {
+                assert!(
+                    (h - HUE_DEG / 360.).abs() < 1e-6,
+                    "{mode}: {field} 不在品牌色相上（h={:.0}，应为 {HUE_DEG:.0}）",
+                    h * 360.
+                );
+                assert!(s <= 0.5, "{mode}: {field} 饱和度过高（s={s}）");
+            }
+        }
+    }
+
+    #[test]
+    fn status_is_the_only_foreign_hue_family() {
+        // status 是唯一允许外来色相的一族；并且必须真的带色（s ≥ 0.35）——
+        // 灰掉的状态色等于把「出错」和普通文字混为一谈。
+        for (mode, p) in [("light", light_palette()), ("dark", dark_palette())] {
+            for (field, [h, s, _, _]) in p.status_family() {
+                assert!(
+                    s >= 0.35,
+                    "{mode}: 状态色 {field} 饱和度过低（s={s}），无法承载「这是反馈」的信息"
+                );
+                let hue_deg = h * 360.;
+                let on_brand = (hue_deg - HUE_DEG).abs() < 1.;
+                let on_neutral = (hue_deg - NEUTRAL_HUE).abs() < 1.;
+                assert!(
+                    !on_brand && !on_neutral,
+                    "{mode}: 状态色 {field} 与品牌/中性色相撞（h={hue_deg:.0}）——\
+                     状态色必须一眼能和界面主体区分开"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn status_hues_are_mutually_distinguishable() {
+        // 四个状态之间色相至少差 40°：靠颜色就能区分「出错 / 留意 / 成功 / 提示」，
+        // 而不是要用户去读文字（无障碍要求：不能只靠颜色，但颜色也不能没用）。
+        let hues = [
+            ("danger", HUE_DANGER),
+            ("warning", HUE_WARNING),
+            ("success", HUE_SUCCESS),
+            ("info", HUE_INFO),
+        ];
+        for (i, (a_name, a)) in hues.iter().enumerate() {
+            for (b_name, b) in hues.iter().skip(i + 1) {
+                let raw = (a - b).abs();
+                let diff = raw.min(360. - raw);
+                assert!(
+                    diff >= 40.,
+                    "{a_name} 与 {b_name} 色相仅差 {diff:.0}°，肉眼难以区分"
+                );
+            }
+        }
     }
 }
