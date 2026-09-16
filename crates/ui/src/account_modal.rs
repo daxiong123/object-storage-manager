@@ -16,9 +16,9 @@ use gpui::{
     Render, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable as _, Icon, IconName, Sizable as _, Size, Theme, button::Button,
-    button::ButtonVariant, button::ButtonVariants as _, h_flex, input::Input, input::InputState,
-    v_flex,
+    ActiveTheme, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size, Theme,
+    button::Button, button::ButtonCustomVariant, button::ButtonGroup, button::ButtonVariants as _,
+    h_flex, input::Input, input::InputState, v_flex,
 };
 
 use object_storage_app::AppServices;
@@ -182,6 +182,91 @@ impl AddAccountModal {
             }))
     }
 
+    /// 服务商选择：一条分段控件（两个互斥选项）。
+    ///
+    /// 选中态必须**一眼看得出来**，这里是三处刻意决定：
+    ///
+    /// - 用库自带的 `ButtonGroup` 而不是两个各自独立的 `Button`：它把两段并成一条
+    ///   分段控件，并给每个子按钮打 `.toggled(bool)` 无障碍标记（"这段是按下的"）。
+    /// - 选中底色走 `ButtonVariant::Custom` 的 **`active`** 色 = `sidebar_accent`
+    ///   （与侧栏、设置左导航选中行同一个 token）。`ButtonGroup` 的选中样式取
+    ///   variant 的 `active`，所以 accent 必须放在 `active` 上，不能放 `color`。
+    ///   **不要退回 `Secondary` + `ghost` 的组合**：`Secondary` 的底是
+    ///   `tokens.button_secondary`（≈ 弹层底色），与 ghost 的差别只有百分之一量级，
+    ///   于是「选了 Kodo 还是 OSS」肉眼分不出——这正是它原先不显眼的原因。
+    /// - 选中项**另加对勾图标 + accent 文字色**：颜色不是唯一信号（不得只靠颜色表意）。
+    ///
+    /// 宽度给固定档位（`tokens::text`，随字号缩放）而不是让内容撑开：两段等宽才像
+    /// 一条分段控件，而且切换时不会因为多了个对勾图标把另一段挤动。
+    fn render_provider_picker(&self, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let variant = ButtonCustomVariant::new(cx)
+            // 非选中段：不填色也不描边（Custom 变体的填充与边框同色，给透明即两者皆无），
+            // 露出弹层底色——选中段的 accent 实底因此是整条控件里唯一的色块。
+            .color(gpui::transparent_black())
+            // 选中段（Custom 的 selected 样式取这一格）
+            .active(theme.sidebar_accent)
+            .foreground(theme.foreground)
+            .hover(theme.list_hover);
+
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(tokens::label())
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.muted_foreground)
+                    .child("服务商"),
+            )
+            .child(
+                ButtonGroup::new("provider-group")
+                    .custom(variant)
+                    .with_size(Size::Small)
+                    // 必须在 child() 之前：child() 用这里的值设置各子按钮的 disabled
+                    .disabled(self.saving)
+                    .child(self.provider_option(
+                        theme,
+                        cx,
+                        "provider-qiniu",
+                        "七牛 Kodo",
+                        ProviderKind::Qiniu,
+                    ))
+                    .child(self.provider_option(
+                        theme,
+                        cx,
+                        "provider-aliyun",
+                        "阿里云 OSS",
+                        ProviderKind::Aliyun,
+                    )),
+            )
+    }
+
+    fn provider_option(
+        &self,
+        theme: &Theme,
+        cx: &Context<Self>,
+        id: &'static str,
+        label: &'static str,
+        provider: ProviderKind,
+    ) -> Button {
+        let selected = self.provider == provider;
+        Button::new(id)
+            .label(label)
+            .with_size(Size::Small)
+            .w(tokens::text(120.))
+            .selected(selected)
+            .when(selected, |button| {
+                button
+                    .icon(Icon::new(IconName::Check))
+                    .text_color(theme.sidebar_accent_foreground)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.provider != provider {
+                    this.provider = provider;
+                    cx.notify();
+                }
+            }))
+    }
+
     fn render_error(&self, theme: &Theme) -> impl IntoElement {
         let Some(error) = &self.error else {
             return div().into_any_element();
@@ -263,40 +348,7 @@ impl Render for AddAccountModal {
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     ),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        // 分段控件：选中 = secondary 实底（中性），非选中 = ghost。
-                        // 不用 primary 实心——primary 留给底部主 CTA（selection ≠ primary）。
-                        Button::new("provider-qiniu")
-                            .label("七牛 Kodo")
-                            .when(self.provider == ProviderKind::Qiniu, |b| {
-                                b.with_variant(ButtonVariant::Secondary)
-                            })
-                            .when(self.provider != ProviderKind::Qiniu, |b| b.ghost())
-                            .with_size(Size::Small)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.provider = ProviderKind::Qiniu;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("provider-aliyun")
-                            .label("阿里云 OSS")
-                            .when(self.provider == ProviderKind::Aliyun, |b| {
-                                b.with_variant(ButtonVariant::Secondary)
-                            })
-                            .when(self.provider != ProviderKind::Aliyun, |b| b.ghost())
-                            .with_size(Size::Small)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.provider = ProviderKind::Aliyun;
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(self.render_provider_picker(&theme, cx))
             .child(self.render_field(&theme, "名称", &self.name, Some("显示名，可随时修改")))
             .child(self.render_field(
                 &theme,

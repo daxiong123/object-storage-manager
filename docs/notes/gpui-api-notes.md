@@ -388,3 +388,36 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
   `self.size` 分支在后覆盖；`Icon::data(&[u8])` 在 `:136`）；
   alpha clamp `theme/schema.rs:1039-1056`（list/table ≤0.2、selection ≤0.3，
   库自带断言在 `:1300`）。
+
+## 离屏预览 + 截图验收（已实测可用）
+
+gpui 不建 AX 树，UI 内部交互没法脚本化；但**单个视图的视觉**可以脚本化验收，
+不必人肉看、也不必抢用户焦点：
+
+```bash
+# 1) 例子程序把视图放进一个 focus:false 的窗口（crates/desktop/examples/*_preview.rs）
+nohup ./target/debug/examples/provider_picker_preview > /tmp/preview.log 2>&1 &
+# 2) 按 pid 取该窗口的 CGWindowNumber（swift/CGWindowListCopyWindowInfo）
+# 3) 按窗口号抓图——离屏窗口也能抓到内容
+screencapture -x -o -l <CGWindowNumber> /tmp/view.png
+```
+
+踩过的点：
+
+- **窗口坐标会被系统夹回来**：`Bounds { origin: (-10000, -10000) }` 实际得到
+  `X=-480`（macOS 不允许窗口完全移出屏幕，会夹到留一条边可抓）。所以不能靠
+  「位置 -10000」判断自己的窗口，**按 pid + CGWindowNumber 找**才可靠。
+- `focus: false` 生效：预览窗口不会成为前台应用（实测前台仍是用户原应用）。
+  绝不要调 `app.activate(true)`（`crates/desktop/src/main.rs:119` 是主程序为
+  `cargo run` 直启补的激活，预览里不能抄）。
+- **不要用合成鼠标/键盘去「打开」视图**（CGEvent / System Events keystroke）：
+  前台是谁不由你决定，实测两次落到用户正在用的应用上（微信被激活、ChaGPT 被误判）。
+  AX 菜单项在非前台时 `enabled=false`，也点不动。
+- gpui 自带 `VisualTestContext::capture_screenshot`（Metal 纹理直接读回，不需要窗口可见），
+  但它要 `Rc<dyn Platform>` 构造 `VisualTestAppContext`，而本工作区的 `gpui-platform`
+  是路径依赖、没有对外暴露 platform 构造入口，`TestPlatform` 又是 CPU-only（截图不支持）。
+  所以实际可行的是上面这条「外部窗口 + screencapture -l」。
+
+**颜色不要靠肉眼读，要采样**：gpui 渲染出的 RGB 与 token 原值不完全相等
+（`#E6F7FF` → 实测 `#E3F6FE`），直接按 token 值搜像素会一无所获。用直方图找实际色值，
+再量包围盒拿几何（本次据此确认两段各 120px、无缝接合）。

@@ -863,6 +863,33 @@ mod tests {
     }
 
     #[test]
+    fn selection_tint_is_visible_against_the_surface() {
+        // 选中底色必须与它所在的底面**看得出差别**。这条不是审美偏好：
+        // 「添加账号」的服务商分段控件曾拿 `ButtonVariant::Secondary` 当选中态，
+        // 而它的底是 ≈ 面板底色的 `tokens.button_secondary`，与 ghost 只差约 1%，
+        // 于是「选了 Kodo 还是 OSS」肉眼分不出（用户报的就是这个）。
+        //
+        // `sidebar_accent` 是侧栏、设置左导航与上述分段控件共用的选中底，
+        // 与背景的实测差别：亮色 #E6F7FF vs #FFFFFF 明度差约 0.05；
+        // 暗色 #111D2C vs #141414 明度差约 0.04（暗底上另有明显的蓝调）。
+        // 判据取「明度差够」或「饱和度差够」二者之一——暗色的差别主要落在色相/饱和度上。
+        const MIN_LIGHTNESS_DELTA: f32 = 0.03;
+        const MIN_SATURATION_DELTA: f32 = 0.15;
+
+        for (name, p) in all_palettes() {
+            let [_, s_accent, l_accent, _] = p.sidebar_accent;
+            let [_, s_bg, l_bg, _] = p.background;
+            let d_l = (l_accent - l_bg).abs();
+            let d_s = (s_accent - s_bg).abs();
+            assert!(
+                d_l >= MIN_LIGHTNESS_DELTA || d_s >= MIN_SATURATION_DELTA,
+                "{name}: sidebar_accent 与背景太接近（明度差 {d_l:.3}、饱和度差 {d_s:.3}），\
+                 选中态会看不见——要么把选中的底调开，要么别拿它做选中态"
+            );
+        }
+    }
+
+    #[test]
     fn primary_is_the_reference_blue_in_both_modes() {
         // 主色取自参照实现的 `--oss-primary-color`（`#0064c8`）与其深色对应档。
         // 断言它确实是**蓝色系**且饱和足够（主 CTA 要一眼可辨）——旧的低饱和靛蓝调色板
