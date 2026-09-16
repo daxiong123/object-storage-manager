@@ -231,9 +231,13 @@ mod tests {
         let path = dir.join("settings.json");
         std::fs::write(
             &path,
+            // `theme_style` 是已删除的字段（视觉风格切换）。留在这里不是笔误：
+            // serde 默认忽略未知字段，所以删字段不会让老用户的 settings.json 解析失败，
+            // 这条断言把该兜底变成可证伪的——真加了 `deny_unknown_fields` 就会红。
             r#"{
   "signed_url_ttl_secs": 900,
-  "clipboard_clear_secs": 0
+  "clipboard_clear_secs": 0,
+  "theme_style": "Waku"
 }"#,
         )
         .unwrap();
@@ -242,8 +246,6 @@ mod tests {
         assert_eq!(loaded.signed_url_ttl_secs, 900);
         assert_eq!(loaded.clipboard_clear_secs, 0);
         assert_eq!(loaded.appearance_mode, AppearanceMode::System);
-        // 旧配置里可能残留已删除的字段（如 `theme_style`）：serde 默认忽略未知字段，
-        // 所以「字段被删掉」不会让老用户的 settings.json 解析失败。
         assert_eq!(loaded.ui_font_family, None);
         assert_eq!(loaded.ui_font_scale, UI_FONT_SCALE_DEFAULT);
         assert_eq!(loaded.code_font_family, None);
