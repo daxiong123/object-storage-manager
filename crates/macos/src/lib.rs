@@ -8,11 +8,13 @@
 //! 会在事件处理器内重入 gpui 借用而闪退，见 docs/notes/gpui-api-notes.md），
 //! macOS Framework 负责系统级能力（agents.md §3/§5）。
 
+pub mod about;
 pub mod clipboard;
 pub mod keychain;
 pub mod quicklook;
 pub mod system_events;
 
+pub use about::show_about_panel;
 pub use clipboard::{clear_if_equals as clear_clipboard_if_equals, copy_text as copy_to_clipboard};
 pub use keychain::{KEYCHAIN_SERVICE, KeychainCredentialStore, KeychainError};
 pub use quicklook::quick_look;

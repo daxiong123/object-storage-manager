@@ -263,7 +263,6 @@ impl WorkspaceView {
             || self.path_input.is_some()
             || self.create_folder_input.is_some()
             || self.copy_move.is_some()
-            || self.about_overlay_open
             || self.details_overlay_open
             || self.selected_bucket.is_none()
     }

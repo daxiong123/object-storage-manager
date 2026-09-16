@@ -316,7 +316,6 @@ pub struct WorkspaceView {
     /// 当前是否显示对象详情弹层。
     details_overlay_open: bool,
     /// 当前是否显示「关于」弹层（独立于设置模态）。
-    about_overlay_open: bool,
     /// 删除确认 sheet 已弹出（gpui 禁止重入 prompt）
     delete_prompt_open: bool,
     /// 文本保存覆盖确认 sheet 已弹出
@@ -468,9 +467,6 @@ impl Render for WorkspaceView {
         }
         if let Some(modal) = self.settings_modal.clone() {
             root = root.child(self.render_settings_modal_overlay(&modal, &theme, cx));
-        }
-        if self.about_overlay_open {
-            root = root.child(self.render_about_overlay(&theme, cx));
         }
         if self.details_overlay_open {
             root = root.child(self.render_details_overlay(&theme, cx));
@@ -624,7 +620,6 @@ impl WorkspaceView {
             object_menu_targets: Vec::new(),
             transfers_expanded: false,
             details_overlay_open: false,
-            about_overlay_open: false,
             delete_prompt_open: false,
             save_prompt_open: false,
             copying_url: false,
