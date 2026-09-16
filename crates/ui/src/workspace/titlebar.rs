@@ -123,6 +123,27 @@ impl WorkspaceView {
         } else {
             IconName::PanelLeftClose
         };
+        // 标题栏两侧按参照实现布置：左侧是**应用身份**（图标 + 名称），右侧是
+        // **传输状态**摘要；中间仍是导航与当前位置。
+        let transfer_summary = if self.transfers.is_empty() {
+            "当前暂无传输任务".to_string()
+        } else {
+            let active = self
+                .transfers
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.state,
+                        TransferState::Running | TransferState::Waiting | TransferState::Paused
+                    )
+                })
+                .count();
+            if active == 0 {
+                format!("{} 项传输已完成", self.transfers.len())
+            } else {
+                format!("{active} 项传输中")
+            }
+        };
         TitleBar::new().child(
             h_flex()
                 .w_full()
@@ -130,6 +151,30 @@ impl WorkspaceView {
                 .items_center()
                 .gap_1()
                 .pr_2()
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap_2()
+                        .pl_2()
+                        .pr_1()
+                        .child(
+                            img(Arc::new(gpui::Image::from_bytes(
+                                gpui::ImageFormat::Png,
+                                crate::APP_ICON_PNG.to_vec(),
+                            )))
+                            .size(px(16.))
+                            .rounded(tokens::radius_lg())
+                            .object_fit(ObjectFit::Cover),
+                        )
+                        .child(
+                            div()
+                                .text_size(tokens::label())
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .child("CloudStorage"),
+                        ),
+                )
                 .child(
                     Button::new("toggle-sidebar")
                         .icon(Icon::new(sidebar_icon))
@@ -163,7 +208,15 @@ impl WorkspaceView {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
                 )
-                .child(self.render_title_location(theme, cx)),
+                .child(self.render_title_location(theme, cx))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .pr_2()
+                        .text_size(tokens::label())
+                        .text_color(theme.muted_foreground)
+                        .child(transfer_summary),
+                ),
         )
     }
 

@@ -813,10 +813,11 @@ fn config(
         cfg.font_family = prefs.ui_font_family.clone().map(SharedString::from);
         cfg.mono_font_size = Some(prefs.code_font_size as f32);
         cfg.mono_font_family = prefs.code_font_family.clone().map(SharedString::from);
-        // Linear 风格小圆角：库组件（Button/Input/List/Table/Dialog…）经
-        // Theme.radius 统一继承，视图层自绘卡片用 radius_lg 对齐。
-        cfg.radius = Some(5);
-        cfg.radius_lg = Some(8);
+        // 小圆角：库组件（Button/Input/List/Table/Dialog…）经 Theme.radius 统一继承，
+        // 视图层自绘卡片用 radius_lg 对齐。取值与 tokens.rs 的 radius()/radius_lg()
+        // 必须一致（有测试钉住），参照实现是 Ant 系的小圆角（2 / 4）。
+        cfg.radius = Some(2);
+        cfg.radius_lg = Some(4);
         // 代码编辑器（code_editor 文本预览/编辑）高亮配色：跟随亮/暗模式，
         // 中性底色与 surface 族同冷灰系。
         cfg.highlight = Some(highlight_theme_style(mode));
@@ -1324,8 +1325,12 @@ mod tests {
                 .expect("primary 必须设置");
             assert_eq!(primary.len(), 9, "8 位 hex + #：{primary}");
             assert!(theme.colors.background.is_some(), "background 必须设置");
-            assert_eq!(theme.radius, Some(5), "Linear 风格小圆角");
-            assert_eq!(theme.radius_lg, Some(8));
+            assert_eq!(
+                theme.radius,
+                Some(2),
+                "小圆角（与 tokens.rs 的 radius() 同刻度）"
+            );
+            assert_eq!(theme.radius_lg, Some(4));
             assert_eq!(theme.shadow, Some(false), "Linear 纯平：组件无阴影");
         }
     }

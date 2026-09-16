@@ -31,18 +31,24 @@ pub fn text(base: f32) -> Pixels {
 
 // ---- 字号阶梯（基准像素；实际渲染值 = 基准 × 字号缩放） ----
 
-/// 分组标题、次要说明、键位提示。
+// 尺度参照 OSS Browser（Ant Design 系）：它 CSS 里 12px 出现 14 次、是列表/表格/
+// 标签的绝对主力，标题用 14px，应用名 20px。所以是把**正文档位压到 12**、标题压到 14，
+// 而不是我们原先偏大的 13/15/16。
+//
+// 阶梯允许**相等**（12 同时用于元数据与正文、14 同时用于空态标题与弹层标题）——
+// 参考设计本来就有并列档位，为此把「严格递增」的测试放宽成「非递减」。
+/// 分组标题、键位提示。
 pub const CAPTION: f32 = 11.;
-/// 元数据：大小/时间列、状态条、面包屑。
+/// 元数据：大小/时间列、状态条、面包屑，以及**列表/表格正文**。
 pub const LABEL: f32 = 12.;
-/// 正文、列表行文本、输入框。
-pub const BODY: f32 = 13.;
+/// 正文、列表行文本、输入框（与 LABEL 同档，参照实现如此）。
+pub const BODY: f32 = 12.;
 /// 空态标题。
-pub const HEADING: f32 = 15.;
-/// 弹层标题。
-pub const TITLE: f32 = 16.;
+pub const HEADING: f32 = 14.;
+/// 弹层标题（参照实现的 modal 标题就是 14px）。
+pub const TITLE: f32 = 14.;
 /// 关于弹层的应用名。
-pub const DISPLAY: f32 = 18.;
+pub const DISPLAY: f32 = 20.;
 /// 空态图标。
 pub const ICON_SM: f32 = 28.;
 /// 预览弹层大图标。
@@ -90,15 +96,18 @@ pub fn icon_lg() -> Pixels {
 
 // ---- 几何 ----
 
-/// 圆角：chip / 列表行 / 横幅等小元素。与 theme.rs 写入组件的
-/// `Theme.radius` 同一刻度——不要再出现第三种值。
+/// 圆角：chip / 列表行 / 横幅等小元素。
+///
+/// 参照实现是 Ant Design v4 系（CSS 里用 `--ant-color-link` 这个 v4 命名），
+/// 基础圆角 **2px**，整屏观感方正——截图里按钮与输入框的角接近直角。
+/// 与 theme.rs 写入组件的 `Theme.radius` 同一刻度，不要再出现第三种值。
 pub fn radius() -> Pixels {
-    px(5.)
+    px(2.)
 }
 
-/// 圆角：弹层卡片（= theme.rs 的 `Theme.radius_lg`）。
+/// 圆角：弹层卡片（= theme.rs 的 `Theme.radius_lg`）。取 Ant 的 lg 档 4px。
 pub fn radius_lg() -> Pixels {
-    px(8.)
+    px(4.)
 }
 
 /// 圆角：应用图标容器（近似 macOS squircle，不参与上面两档）。
@@ -143,10 +152,10 @@ pub fn row_pad_y_transfer() -> Pixels {
 /// 那样由内容撑开——原先「行高由内容撑开，不另设固定行高」的约定只适用于
 /// 非虚拟列表。
 ///
-/// 取 22 是为了**对齐改造前实测的行高 34pt**（22 + 上下内边距 12；见 agents.md
-/// 「B6 复验要点」里按行高估算空白区的记法），换虚拟列表不应该顺带改变行距密度。
-/// 22 也明显大于行内 `Input::small()` 的 24px 高度与正文行盒，留量充足。
-const ROW_BOX: f32 = 22.;
+/// 取 24 是为了对上参照实现的**表格行高 36px**（其 CSS 把 `.ant-table-thead` 与行
+/// 都固定成 36px）：24 + 上下内边距 12 = 36。也明显大于行内 `Input::small()` 的
+/// 24px 高度，留量充足。
+const ROW_BOX: f32 = 24.;
 
 /// 对象列表行高 = 行盒 + 上下内边距。
 ///
@@ -222,35 +231,36 @@ mod tests {
 
     #[test]
     fn radius_scale_matches_theme_scale() {
-        // 与 theme.rs 的 Theme.radius / radius_lg 对齐（5 / 8），
+        // 与 theme.rs 的 Theme.radius / radius_lg 对齐（2 / 4），
         // 图标容器是唯一的例外档位。
-        assert_eq!(radius(), px(5.));
-        assert_eq!(radius_lg(), px(8.));
+        assert_eq!(radius(), px(2.));
+        assert_eq!(radius_lg(), px(4.));
         assert!(radius_icon() > radius_lg());
     }
 
     #[test]
     fn nested_radius_is_concentric_with_card_radius() {
-        // 同心圆角：外圆角 = 内圆角 + 内缩。浮层行是 mx_1（4px）内缩，
-        // 所以行圆角必须是 radius_lg() - 4px，而不是直接复用 radius()。
-        let row_inset = px(4.);
-        assert_eq!(radius_nested(row_inset), px(4.));
-        // 恒等式成立：内圆角 + 内缩 == 外圆角
-        assert_eq!(radius_nested(row_inset) + row_inset, radius_lg());
-        // 记录旧写法差多少：radius() 比同心值大 1px
-        assert_eq!(radius() - radius_nested(row_inset), px(1.));
-        // 内缩达到外圆角量级时不再是紧贴嵌套，取 0 而不是负数
+        // 同心圆角：外圆角 = 内圆角 + 内缩。内缩到外圆角量级时不再是紧贴嵌套，
+        // 取 0 而不是负数。
         assert_eq!(radius_nested(px(16.)), px(0.));
+        assert_eq!(radius_nested(px(0.)), radius_lg());
+        // 恒等式：内圆角 + 内缩 == 外圆角（在还能推导出正值的范围内）
+        for inset in [1., 2., 3.] {
+            let inset = px(inset);
+            assert_eq!(radius_nested(inset) + inset, radius_lg());
+        }
     }
 
     #[test]
-    fn font_ramp_is_strictly_ascending() {
+    fn font_ramp_is_non_decreasing() {
+        // 允许相等：参照设计里 12 同时用于元数据与正文、14 同时用于空态标题与弹层标题。
+        // 仍然禁止「倒退」——档位必须随语义变重而单调不减。
         let ramp = [
             CAPTION, LABEL, BODY, HEADING, TITLE, DISPLAY, ICON_SM, ICON_LG,
         ];
         assert!(
-            ramp.windows(2).all(|pair| pair[0] < pair[1]),
-            "字号阶梯必须严格递增：{ramp:?}"
+            ramp.windows(2).all(|pair| pair[0] <= pair[1]),
+            "字号阶梯不得倒退：{ramp:?}"
         );
     }
 

@@ -30,6 +30,7 @@ impl WorkspaceView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
+                    // 操作组顺序与参照实现一致：上传（主色）· 新建目录 · 下载 · 更多
                     .child(
                         Button::new("toolbar-upload-files")
                             .icon(Icon::new(IconName::ArrowUp))
@@ -38,20 +39,52 @@ impl WorkspaceView {
                             } else {
                                 "上传"
                             })
+                            .primary()
                             .with_size(Size::Small)
                             .disabled(self.uploading)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
                     )
                     .child(
+                        Button::new("toolbar-create-folder")
+                            .label("新建目录")
+                            .with_size(Size::Small)
+                            .disabled(self.creating_folder)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_create_folder_overlay(window, cx)
+                            })),
+                    )
+                    // 下载放在工具栏（参照实现如此），不再占底栏位置
+                    .child(
+                        Button::new("toolbar-download")
+                            .label("下载")
+                            .with_size(Size::Small)
+                            .disabled(
+                                self.downloading || self.selected_object_keys_vec().is_empty(),
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_object_download(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("toolbar-refresh")
+                            .label("刷新")
+                            .with_size(Size::Small)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.handle_refresh(&Refresh, window, cx)
+                            })),
+                    )
+                    .child(
                         div()
                             .relative()
                             .child(
                                 Button::new("toolbar-more")
-                                    .icon(Icon::new(IconName::Ellipsis))
-                                    .ghost()
+                                    .icon(Icon::new(IconName::ChevronDown))
+                                    .label("更多")
                                     .with_size(Size::Small)
-                                    .tooltip("更多操作")
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
@@ -375,18 +408,20 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // 表格规格照抄参照实现：单元格横向内边距 16px、表头与行同一高度
+        // （36px，见 tokens::row_height）、表头底色 #fafafc、文字 12px。
         h_flex()
             .w_full()
             .flex_shrink_0()
-            .px_3()
-            .py_2()
+            .h(tokens::row_height())
+            .px_4()
             .gap_2()
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.list_head)
             .text_size(tokens::label())
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.muted_foreground)
+            .text_color(theme.foreground)
             .child(
                 div()
                     .id("header-name")
@@ -556,7 +591,7 @@ impl WorkspaceView {
                     .w_full()
                     .h(tokens::row_height())
                     .items_center()
-                    .px_3()
+                    .px_4()
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.table_row_border)
@@ -634,7 +669,7 @@ impl WorkspaceView {
                     .w_full()
                     .h(tokens::row_height())
                     .items_center()
-                    .px_3()
+                    .px_4()
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.table_row_border)
@@ -755,6 +790,8 @@ impl WorkspaceView {
             .border_color(theme.border)
             .text_size(tokens::label())
             .text_color(theme.muted_foreground)
+            // 左段：条目计数（+ 当前排序）。参照实现左段是页码，我们的分页是
+            // marker 式（没有真实页码），所以这里放真实计数，不编造页码。
             .child(if visible_count == self.entries.len() {
                 format!("共 {} 项", self.entries.len())
             } else {
@@ -767,46 +804,32 @@ impl WorkspaceView {
                     .child(format!("· {label}")),
             );
         }
-        // 弹性槽：有反馈消息时占用（左对齐、超宽截断），否则空占位——
-        // 保证右侧的选中信息与翻页按钮始终贴右，不随消息出现而平移。
-        if let Some(message) = &self.download_message {
-            let color = if message.is_error {
-                theme.danger
-            } else {
-                theme.success
-            };
-            bar = bar.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(color)
-                    .child(message.text.clone()),
-            );
-        } else {
-            bar = bar.child(div().flex_1());
+        // 中段（弹性槽）：反馈消息优先，否则显示选中数量。
+        // 中段占满剩余宽度，右段才始终贴右、不随消息出现而平移。
+        let mut middle = div().flex_1().min_w_0().truncate();
+        match &self.download_message {
+            Some(message) => {
+                middle = middle.text_color(if message.is_error {
+                    theme.danger
+                } else {
+                    theme.success
+                });
+                middle = middle.child(message.text.clone());
+            }
+            None if !self.selected_object_keys.is_empty() => {
+                middle = middle
+                    .text_color(theme.foreground)
+                    .child(format!("已选择 {} 个对象", self.selected_object_keys.len()));
+            }
+            None => {}
         }
-        // 选中信息 + 主操作就地展示在状态条里：选中/取消只改变这一行的内容，
-        // 不会像独立选中条那样把表头与全部行整体推移。
-        if !self.selected_object_keys.is_empty() {
-            bar = bar
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme.foreground)
-                        .child(format!("已选择 {} 个对象", self.selected_object_keys.len())),
-                )
-                .child(
-                    Button::new("toolbar-download")
-                        .icon(Icon::new(IconName::ArrowDown))
-                        .label("下载")
-                        .with_size(Size::Small)
-                        .disabled(self.downloading)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.start_object_download(window, cx)
-                        })),
-                );
-        }
+        bar = bar.child(middle);
+        // 右段：已加载数量 + 翻页
+        bar = bar.child(
+            div()
+                .flex_shrink_0()
+                .child(format!("已加载 {} 项", self.entries.len())),
+        );
         if self.next_marker.is_some() {
             bar = bar.child(
                 Button::new("objects-load-more")
