@@ -217,15 +217,15 @@ impl WorkspaceView {
                                     .child("新建目录"),
                             )
                             .child(
-                                Button::new("close-create-folder-overlay")
-                                    .icon(Icon::new(IconName::Close))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("关闭")
-                                    .disabled(self.creating_folder)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_create_folder_overlay(cx)
-                                    })),
+                                ui::icon_button(
+                                    "close-create-folder-overlay",
+                                    Icon::new(IconName::Close),
+                                    "关闭",
+                                )
+                                .disabled(self.creating_folder)
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.close_create_folder_overlay(cx),
+                                )),
                             ),
                     )
                     .child(

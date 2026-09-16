@@ -25,8 +25,9 @@ use object_storage_app::AppServices;
 use object_storage_domain::ProviderKind;
 
 use crate::actions::DismissModal;
-use crate::overlay;
 use crate::tokens;
+use crate::ui;
+use crate::ui::overlay;
 
 pub struct AddAccountModal {
     services: Arc<AppServices>,
@@ -257,11 +258,7 @@ impl Render for AddAccountModal {
                             .child("添加账号"),
                     )
                     .child(
-                        Button::new("close-account-modal")
-                            .icon(Icon::new(IconName::Close))
-                            .ghost()
-                            .with_size(Size::Small)
-                            .tooltip("关闭")
+                        ui::icon_button("close-account-modal", Icon::new(IconName::Close), "关闭")
                             .disabled(self.saving)
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     ),

@@ -27,8 +27,8 @@ use object_storage_persistence::{
 };
 
 use crate::actions::DismissModal;
-use crate::overlay;
 use crate::tokens;
+use crate::ui::overlay;
 
 fn optional_text(value: String) -> Option<String> {
     let trimmed = value.trim();

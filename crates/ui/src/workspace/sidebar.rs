@@ -373,12 +373,12 @@ impl WorkspaceView {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(
-                Button::new("rail-expand-sidebar")
-                    .icon(Icon::new(IconName::PanelLeftOpen))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .tooltip("展开边栏 ⌘⌥S")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                ui::icon_button(
+                    "rail-expand-sidebar",
+                    Icon::new(IconName::PanelLeftOpen),
+                    "展开边栏 ⌘⌥S",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             );
 
         for (ix, account) in self.accounts.iter().enumerate() {
@@ -386,16 +386,16 @@ impl WorkspaceView {
             let id = account.id.clone();
             let name = account.name.clone();
             rail = rail.child(
-                Button::new(("rail-account", ix))
-                    .icon(Icon::new(provider_icon(account.provider)))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .tooltip(name)
-                    .when(active, |btn| {
-                        btn.bg(theme.sidebar_accent)
-                            .text_color(theme.sidebar_accent_foreground)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_account(&id, cx))),
+                ui::icon_button(
+                    ("rail-account", ix),
+                    Icon::new(provider_icon(account.provider)),
+                    name,
+                )
+                .when(active, |btn| {
+                    btn.bg(theme.sidebar_accent)
+                        .text_color(theme.sidebar_accent_foreground)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.select_account(&id, cx))),
             );
         }
 
@@ -406,11 +406,7 @@ impl WorkspaceView {
                 let name = bucket.name.clone();
                 let tooltip = name.clone();
                 rail = rail.child(
-                    Button::new(("rail-bucket", ix))
-                        .icon(Icon::new(IconName::Folder))
-                        .ghost()
-                        .with_size(Size::Small)
-                        .tooltip(tooltip)
+                    ui::icon_button(("rail-bucket", ix), Icon::new(IconName::Folder), tooltip)
                         .when(active, |btn| {
                             btn.bg(theme.sidebar_accent)
                                 .text_color(theme.sidebar_accent_foreground)

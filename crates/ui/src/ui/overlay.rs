@@ -11,15 +11,14 @@
 //!
 //! 两相阻断都在 `surface()` 里做掉，调用方不必再记。
 
-use std::time::Duration;
-
 use gpui::{
-    Animation, AnimationExt as _, Div, ElementId, InteractiveElement as _, IntoElement,
-    MouseButton, Styled as _,
+    AnimationExt as _, Div, ElementId, InteractiveElement as _, IntoElement, MouseButton,
+    Styled as _,
 };
-use gpui_component::{Theme, animation::cubic_bezier, v_flex};
+use gpui_component::{Theme, v_flex};
 
 use crate::tokens;
+use crate::ui::motion;
 
 /// 浮层遮罩：铺满父容器（父容器需 `relative`）、居中承载卡片、统一遮罩色。
 ///
@@ -57,9 +56,6 @@ pub(crate) fn surface(theme: &Theme) -> Div {
         .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-/// 浮层进场动画时长。退场时长应更短，但当前不做退场（见 `fade_in`）。
-const ENTER_MILLIS: u64 = 180;
-
 /// 给**已装配完成**的浮层加进场淡入，遮罩与卡片一起淡入。
 ///
 /// **必须在链式装配的最后一步调用**：`with_animation` 返回 `AnimationElement`，
@@ -74,21 +70,19 @@ const ENTER_MILLIS: u64 = 180;
 /// 本帧访问过的 state），因此每次打开浮层都会重放进场——这正是想要的行为。
 /// 不要把 id 改成随状态变化的值，否则每次重渲染都会重放。
 ///
-/// 只做进场，是 gpui 0.2.2 能力所限，不是遗漏：
+/// 时长与曲线见 `motion::overlay_enter()`；`reduce_motion` 由 gpui 的
+/// `with_animation` 自行尊重，这里不必再判。
+///
+/// 只做进场，不是遗漏：
 /// - div 没有 `transform`/`scale`（`Transformation` 只存在于 SVG），所以既做不了
-///   技能的 `translateY` 位移进场，也做不了 `scale(0.96)` 按下反馈；
+///   位移进场，也做不了 `scale(0.96)` 按下反馈；
 /// - 没有元素级 blur（只有阴影的 `blur_radius`），所以没有 `blur(4px)`；
 /// - `Animation` 没有完成回调，退场需要「先播动画、再由定时器真正卸载」的延迟
 ///   机制，会把 focus 归还与实体丢弃推迟上百毫秒，而 preview / details /
 ///   copy_move 三个渲染器在状态被清空后会自塌为空元素，不能简单「置空但保持
 ///   挂载」。故退场仍即时。
 pub(crate) fn fade_in(id: impl Into<ElementId>, el: Div) -> impl IntoElement {
-    el.with_animation(
-        id,
-        Animation::new(Duration::from_millis(ENTER_MILLIS))
-            // 技能规定的精确曲线 cubic-bezier(0.2, 0, 0, 1)；gpui 本体没有
-            // cubic-bezier，用 gpui-component 的实现。
-            .with_easing(cubic_bezier(0.2, 0.0, 0.0, 1.0)),
-        |this, delta| this.opacity(delta),
-    )
+    el.with_animation(id, motion::overlay_enter(), |this, delta| {
+        this.opacity(delta)
+    })
 }

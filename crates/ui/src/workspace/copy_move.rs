@@ -546,15 +546,15 @@ impl WorkspaceView {
                                     .child(title),
                             )
                             .child(
-                                Button::new("close-copy-move-overlay")
-                                    .icon(Icon::new(IconName::Close))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("关闭")
-                                    .disabled(self.copy_move_busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_copy_move_overlay(cx)
-                                    })),
+                                ui::icon_button(
+                                    "close-copy-move-overlay",
+                                    Icon::new(IconName::Close),
+                                    "关闭",
+                                )
+                                .disabled(self.copy_move_busy)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.close_copy_move_overlay(cx)),
+                                ),
                             ),
                     )
                     .child(

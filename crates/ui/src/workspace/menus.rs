@@ -175,10 +175,7 @@ impl WorkspaceView {
     }
 
     pub(super) fn render_object_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mut menu = overlay::surface(theme)
-            .w(tokens::text(154.))
-            .py_2()
-            .occlude();
+        let mut menu = ui::menu::popup(theme);
 
         for (item_ix, item) in object_menu_items().into_iter().enumerate() {
             let color = if item == ObjectMenuItem::Delete {
@@ -187,17 +184,7 @@ impl WorkspaceView {
                 theme.foreground
             };
             menu = menu.child(
-                h_flex()
-                    .id(("object-menu-item", item_ix))
-                    .mx_1()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    // 同心圆角：卡片 radius_lg()=8 − mx_1 内缩 4 = 4
-                    .rounded(tokens::radius_nested(px(4.)))
-                    .text_size(tokens::body())
-                    .text_color(color)
-                    .hover(|row| row.bg(theme.list_hover))
+                ui::menu::item(theme, ("object-menu-item", item_ix), color, true)
                     .child(Icon::new(object_menu_item_icon(item)).text_color(color))
                     .child(object_menu_item_label(item))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -211,14 +198,11 @@ impl WorkspaceView {
     pub(super) fn render_top_more_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let has_selection = !self.selected_object_keys_vec().is_empty();
         let has_bucket = self.selected_bucket.is_some();
-        let mut menu = overlay::surface(theme)
-            .w(tokens::text(154.))
-            .py_2()
-            .occlude();
+        let mut menu = ui::menu::popup(theme);
 
         for (item_ix, item) in top_more_menu_items().into_iter().enumerate() {
             if item_ix == 2 {
-                menu = menu.child(div().mx_2().my_1().h(px(1.)).bg(theme.border));
+                menu = menu.child(ui::menu::separator(theme));
             }
             let disabled = match item {
                 TopMoreMenuItem::UploadFolder => !has_bucket || self.uploading,
@@ -235,17 +219,7 @@ impl WorkspaceView {
                 theme.foreground
             };
             menu = menu.child(
-                h_flex()
-                    .id(("top-more-menu-item", item_ix))
-                    .mx_1()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    // 同心圆角：卡片 radius_lg()=8 − mx_1 内缩 4 = 4
-                    .rounded(tokens::radius_nested(px(4.)))
-                    .text_size(tokens::body())
-                    .text_color(color)
-                    .when(!disabled, |row| row.hover(|row| row.bg(theme.list_hover)))
+                ui::menu::item(theme, ("top-more-menu-item", item_ix), color, !disabled)
                     .child(top_more_menu_item_label(item))
                     .when(!disabled, |row| {
                         row.on_click(cx.listener(move |this, _, window, cx| {
@@ -351,14 +325,14 @@ impl WorkspaceView {
                                     .child("对象详情"),
                             )
                             .child(
-                                Button::new("close-details-overlay")
-                                    .icon(Icon::new(IconName::Close))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("关闭")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_details_overlay(window, cx)
-                                    })),
+                                ui::icon_button(
+                                    "close-details-overlay",
+                                    Icon::new(IconName::Close),
+                                    "关闭",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.close_details_overlay(window, cx),
+                                )),
                             ),
                     )
                     .child(content),
@@ -402,14 +376,14 @@ impl WorkspaceView {
                                     .child("关于 CloudStorage"),
                             )
                             .child(
-                                Button::new("close-about-overlay")
-                                    .icon(Icon::new(IconName::Close))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("关闭")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_about_overlay(window, cx)
-                                    })),
+                                ui::icon_button(
+                                    "close-about-overlay",
+                                    Icon::new(IconName::Close),
+                                    "关闭",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.close_about_overlay(window, cx),
+                                )),
                             ),
                     )
                     .child(

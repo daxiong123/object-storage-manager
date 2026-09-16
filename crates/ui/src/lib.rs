@@ -2,10 +2,10 @@ pub mod account_modal;
 pub mod actions;
 pub mod command_palette;
 pub mod file_type;
-mod overlay;
 pub mod settings_modal;
 pub mod theme;
 pub mod tokens;
+mod ui;
 mod workspace;
 
 use gpui::{Bounds, Pixels, WindowOptions};

@@ -910,14 +910,14 @@ impl WorkspaceView {
                                     .child(name.clone()),
                             )
                             .child(
-                                Button::new("close-preview-overlay")
-                                    .icon(Icon::new(IconName::Close))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("关闭")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_preview_overlay(window, cx)
-                                    })),
+                                ui::icon_button(
+                                    "close-preview-overlay",
+                                    Icon::new(IconName::Close),
+                                    "关闭",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.close_preview_overlay(window, cx),
+                                )),
                             ),
                     )
                     .child(

@@ -54,9 +54,10 @@ use crate::actions::{
     UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
-use crate::overlay;
 use crate::settings_modal::SettingsModal;
 use crate::tokens;
+use crate::ui;
+use crate::ui::overlay;
 
 // 各 feature 模块（对齐 waku 的 src/app/* 分层）。子模块以 `use super::*;` 取用
 // 本模块的类型与 import；这里把它们的条目 glob 回来，使整棵模块树看到的名称与拆分前
