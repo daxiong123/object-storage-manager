@@ -62,16 +62,6 @@ impl FileIconKind {
             }
         }
     }
-
-    /// 语义色（hsla）。文本/代码走 muted，其余类型用主题的低饱和 accent
-    /// 提供轻微区分度。
-    pub fn color(self, muted: gpui::Hsla, accent: gpui::Hsla) -> gpui::Hsla {
-        match self {
-            FileIconKind::Generic | FileIconKind::Text | FileIconKind::Code => muted,
-            // 直接取主题 accent，不硬编码 hex/hsla。
-            _ => accent,
-        }
-    }
 }
 
 /// 扩展名 → 文件类型分组。`key` 是 Cloud Object Key（`/` 分隔，取最后段
@@ -122,9 +112,15 @@ pub(crate) fn file_icon_kind(key: &str) -> FileIconKind {
 
 /// 行图标渲染：按 Object Key 的扩展名选 Lucide SVG，muted/accent 语义着色。
 /// 目录行不经过这里（目录恒用 IconName::Folder）。
-pub(crate) fn file_type_icon(key: &str, muted: gpui::Hsla, accent: gpui::Hsla) -> Icon {
-    let kind = file_icon_kind(key);
-    kind.icon().text_color(kind.color(muted, accent))
+/// 文件图标：**所有类型同一个颜色**（取自 `theme::file_icon_color`），
+/// 只靠字形区分类型——与参照实现一致（实测它每行图标的最饱和像素都是同一个金色）。
+///
+/// 之前是按类型分色（文本/代码取 muted、其余取 accent），那样在 Linear 风格下非文本
+/// 图标用的是近白的 `accent`，实际几乎看不见；统一取色后这个既有缺陷也一并消失。
+pub(crate) fn file_type_icon(key: &str, mode: gpui_component::ThemeMode) -> Icon {
+    file_icon_kind(key)
+        .icon()
+        .text_color(crate::theme::file_icon_color(mode))
 }
 
 #[cfg(test)]

@@ -153,6 +153,12 @@ struct Palette {
     // 与整体的冷暖关系不一致。显式给值后，亮/暗两套的 status 也由同一组
     // 色相推导，并且「颜色只用于表意」这条纪律才有断言可写
     // （见 `status_is_the_only_foreign_hue_family`）。
+    /// 文件类型图标的**统一**色（目录与文件同色）。
+    ///
+    /// 参照实现（oss-browser2）就是这么做的：它每行图标的最饱和像素实测都是同一个
+    /// 金色 `(255,189,60)`，目录与文件只靠**字形**区分，不按类型分色。
+    /// `ThemeConfig` 没有这一位，所以经 `theme::file_icon_color()` 下发（同 `image_outline`）。
+    file_icon: [f32; 4],
     danger: [f32; 4],
     danger_hover: [f32; 4],
     danger_active: [f32; 4],
@@ -296,6 +302,7 @@ fn waku_light_palette() -> Palette {
         row_hover: hsla(WAKU_HUE_NEUTRAL, 0.03, 0.30, 0.06),
         // status：上游原值 warning #A66B20 / success #2F8F52 / danger #C64A42；
         // info 上游没有，取它的选中蓝同系以保持一致。
+        file_icon: rgb(0xC85F44),
         danger: rgb(0xC64A42),
         danger_hover: rgb(0xB04039),
         danger_active: rgb(0x9A3730),
@@ -376,6 +383,7 @@ fn waku_dark_palette() -> Palette {
         drop_target: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 0.25),
         row_hover: hsla(WAKU_HUE_NEUTRAL, 0.03, 0.90, 0.06),
         // status：上游原值 warning #E0B36A / success #62C987 / danger #E2726A
+        file_icon: rgb(0xE2795B),
         danger: rgb(0xE2726A),
         danger_hover: rgb(0xE8867F),
         danger_active: rgb(0xEE9A94),
@@ -419,12 +427,11 @@ fn oss_browser_light_palette() -> Palette {
         muted: rgb(0xFAFAFC),
         muted_foreground: rgb(0x898989),
         border,
-        // 侧栏底色与分隔线**实测自参照实现的运行实例**（截其窗口后采样像素）：
-        // 侧栏 `#F1F1F1`、与内容区之间一条 1px `#DFDFDF`。注意它比内容区**更深**
-        // （内容区实测 `#F7F7F7`），不是常见的「侧栏更亮」。
-        sidebar: rgb(0xF1F1F1),
+        // 侧栏与内容**同色**（实测其运行实例：侧栏与内容区都是纯白 255,255,255），
+        // 两者只靠一条极淡的界线分开（实测 245,245,245）。不要给它加更深的底色。
+        sidebar: rgb(0xFFFFFF),
         sidebar_foreground: rgb(0x333333),
-        sidebar_border: rgb(0xDFDFDF),
+        sidebar_border: rgb(0xF5F5F5),
         popover: rgb(0xFFFFFF),
         secondary: rgb(0xFAFAFC),
         secondary_hover: rgb(0xF2F2F2),
@@ -474,6 +481,8 @@ fn oss_browser_light_palette() -> Palette {
         // 状态色：基色取自上游 CSS，**hover/active 在同色相上推亮度**得到，
         // 不直接抄它的色阶——上游那套色阶越亮色相越漂（`#50BB35` 108° 与
         // `#73D13D` 98° 差 10°，同一族会出现两种绿）。纪律测试就是抓这个的。
+        // Ant 金（gold-4 `#FFC53D`；实测参照实现渲染为 (255,189,60)）
+        file_icon: rgb(0xFFC53D),
         danger: rgb(0xFA494A),
         danger_hover: hsl(0., 0.945, 0.70),
         danger_active: hsl(0., 0.945, 0.56),
@@ -507,9 +516,8 @@ fn oss_browser_dark_palette() -> Palette {
         muted: rgb(0x1F1F1F),
         muted_foreground: rgb(0x737373),
         border,
-        // 深色无上游参照（其 CSS 只有亮色）：按亮色那组「侧栏与内容有明确层级差」
-        // 的关系镜像——亮色侧栏比内容更深，深色侧栏就比内容更亮，差值同量级。
-        sidebar: rgb(0x1A1A1A),
+        // 深色无上游参照（其 CSS 只有亮色）：亮色下侧栏与内容同色，深色也保持同色。
+        sidebar: rgb(0x141414),
         sidebar_foreground: rgb(0xD9D9D9),
         sidebar_border: border,
         popover: rgb(0x262626),
@@ -553,6 +561,7 @@ fn oss_browser_dark_palette() -> Palette {
         drop_target: hsla(215., 1.0, 0.53, 0.25),
         row_hover: rgb(0x262626),
         // 同亮色套：hover/active 在同色相上推亮度派生
+        file_icon: rgb(0xFFC53D),
         danger: rgb(0xFF7875),
         danger_hover: hsl(1.3, 1.0, 0.79),
         danger_active: hsl(1.3, 1.0, 0.63),
@@ -634,6 +643,9 @@ fn light_palette(style: ThemeStyle) -> Palette {
         drop_target: hsla(HUE_DEG, 0.45, 0.60, 0.22),
         row_hover: n(0.10, 0.94),
         // status 族：亮色实底 + 白字，明度对齐 primary（0.55）以便同一排按钮等高观感。
+        // 取本风格的靛蓝：原先非文本图标直接用 `accent`（近白，几乎不可见），
+        // 统一 icon 色后这个既有缺陷一并消失。
+        file_icon: hsl(HUE_DEG, 0.40, 0.30),
         danger: hsl(HUE_DANGER, 0.62, 0.50),
         danger_hover: hsl(HUE_DANGER, 0.62, 0.44),
         danger_active: hsl(HUE_DANGER, 0.62, 0.38),
@@ -714,6 +726,7 @@ fn dark_palette(style: ThemeStyle) -> Palette {
         row_hover: n(0.08, 0.13),
         // status 族：暗色同样用「实底 + 白字」，明度对齐暗色 primary（0.58），
         // 只把饱和度略压（暗底上高饱和会发荧光）。
+        file_icon: hsl(HUE_DEG, 0.30, 0.88),
         danger: hsl(HUE_DANGER, 0.55, 0.56),
         danger_hover: hsl(HUE_DANGER, 0.55, 0.62),
         danger_active: hsl(HUE_DANGER, 0.55, 0.68),
@@ -774,6 +787,20 @@ fn hsla_to_hex([h, s, l, a]: [f32; 4]) -> String {
         channel(h - 1.0 / 3.0),
         (a * 255.0).round().clamp(0.0, 255.0) as u8
     )
+}
+
+/// 文件类型图标的统一色（`ThemeConfig` 没有这一位，故走模块函数，同 `image_outline`）。
+///
+/// 取当前**视觉风格**对应的色板值：参照实现对所有类型用同一个金色。
+pub fn file_icon_color(mode: ThemeMode) -> Hsla {
+    let style = preferences().read().expect("主题偏好锁被毒化").theme_style;
+    let palette = if mode.is_dark() {
+        dark_palette(style)
+    } else {
+        light_palette(style)
+    };
+    let [h, s, l, a] = palette.file_icon;
+    gpui::hsla(h * 360., s, l, a)
 }
 
 /// 亮/暗两套主题配置。
@@ -1291,6 +1318,21 @@ mod tests {
     }
 
     #[test]
+    fn file_icon_color_is_a_real_color_not_gray() {
+        // 参照实现（oss-browser2）对**所有**文件类型用同一个金色（实测其每行图标的
+        // 最饱和像素都是 (255,189,60)），目录与文件只靠字形区分。我们照做，所以这一位
+        // 必须是**有色**的：设成灰会让文件类型一眼难辨（Linear 原先非文本图标取近白的
+        // `accent`，实际就看不见，是同一个毛病的另一面）。
+        for (name, p) in all_palettes() {
+            let chroma = chroma(p.file_icon);
+            assert!(
+                chroma > 0.05,
+                "{name}: file_icon 彩度过低（{chroma:.3}）——文件图标会退化成灰色"
+            );
+        }
+    }
+
+    #[test]
     fn control_border_is_visible_against_the_input_background() {
         // `theme.input` 是**控件边框**色，不是输入框底色：
         // gpui-component 用 `cx.theme().input` 画复选框的未选中边框
@@ -1487,6 +1529,7 @@ mod tests {
     fn anchor_hues(p: &Palette) -> Vec<(&'static str, f32)> {
         vec![
             ("accent", p.accent[0] * 360.),
+            ("file_icon", p.file_icon[0] * 360.),
             ("selection", p.selection[0] * 360.),
             // ring / link / sidebar_accent 也是具名彩色角色：OSS Browser 那套的蓝
             // 分好几个色相（主色 210、链接 215、淡蓝选中 199），只列 accent/selection

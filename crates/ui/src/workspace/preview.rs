@@ -818,12 +818,8 @@ impl WorkspaceView {
                     .items_center()
                     .justify_center()
                     .child(
-                        crate::file_type::file_type_icon(
-                            &object.key,
-                            theme.muted_foreground,
-                            theme.accent,
-                        )
-                        .text_size(tokens::icon_lg()),
+                        crate::file_type::file_type_icon(&object.key, theme.mode)
+                            .text_size(tokens::icon_lg()),
                     )
                     .into_any_element(),
             }

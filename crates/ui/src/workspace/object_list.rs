@@ -569,8 +569,7 @@ impl WorkspaceView {
         renaming: bool,
         theme: &Theme,
     ) -> AnyElement {
-        let icon =
-            crate::file_type::file_type_icon(&object.key, theme.muted_foreground, theme.accent);
+        let icon = crate::file_type::file_type_icon(&object.key, theme.mode);
         if renaming && let Some((_, editor)) = &self.renaming {
             return h_flex()
                 .flex_1()
@@ -728,7 +727,10 @@ impl WorkspaceView {
                             .flex_1()
                             .min_w_0()
                             .gap_2()
-                            .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
+                            .child(
+                                Icon::new(IconName::Folder)
+                                    .text_color(crate::theme::file_icon_color(theme.mode)),
+                            )
                             .child(div().min_w_0().truncate().child(label)),
                     )
                     .child(

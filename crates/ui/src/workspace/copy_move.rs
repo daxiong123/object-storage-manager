@@ -507,7 +507,10 @@ impl WorkspaceView {
                             this.enter_copy_move_prefix(target.clone(), window, cx)
                         }),
                     )
-                    .child(Icon::new(IconName::Folder).text_color(theme.accent_foreground))
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .text_color(crate::theme::file_icon_color(theme.mode)),
+                    )
                     .child(
                         div()
                             .min_w_0()
