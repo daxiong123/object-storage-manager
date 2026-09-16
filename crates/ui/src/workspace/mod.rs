@@ -51,12 +51,12 @@ use object_storage_transfer::{
 use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
-    AddAccount, CloseWindow, CopyObjectUrl, CycleThemeStyle, DeleteObject, DismissFilter,
-    DismissRename, DownloadObject, FocusObjectSearch, FocusPath, NavigateBack, NavigateForward,
-    OpenAbout, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh,
-    RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
-    SelectObjectNext, SelectObjectNextRange, SelectObjectPrev, SelectObjectPrevRange,
-    ToggleSidebar, UnifiedDismiss, UploadFiles, UploadFolder,
+    AddAccount, CloseWindow, CopyObjectUrl, DeleteObject, DismissFilter, DismissRename,
+    DownloadObject, FocusObjectSearch, FocusPath, NavigateBack, NavigateForward, OpenAbout,
+    OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh, RenameObject,
+    RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll, SelectObjectNext,
+    SelectObjectNextRange, SelectObjectPrev, SelectObjectPrevRange, ToggleSidebar, UnifiedDismiss,
+    UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
 use crate::settings_modal::SettingsModal;
@@ -449,7 +449,6 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_dismiss_filter))
             .on_action(cx.listener(Self::handle_select_bucket_by_name))
             .on_action(cx.listener(Self::handle_open_settings))
-            .on_action(cx.listener(Self::handle_cycle_theme_style))
             .on_action(cx.listener(Self::handle_open_about))
             .on_action(cx.listener(Self::handle_open_object))
             .on_action(cx.listener(Self::handle_reveal_in_finder))

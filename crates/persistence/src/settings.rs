@@ -27,39 +27,6 @@ pub enum AppearanceMode {
     Dark,
 }
 
-/// 视觉风格：同一套语义 token 的两种取值。
-///
-/// 存在的意义是**可对照**：两套风格共用同一份视图代码与同一组语义字段，
-/// 只换调色板，所以切换是即时的、且不涉及任何布局差异——比较的确实只是
-/// 「颜色与中性面」，不会混入结构变化。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ThemeStyle {
-    /// Linear 风格：冷灰中性面（hue 225）+ 低饱和靛蓝品牌色，选中态为靛蓝淡染。
-    #[default]
-    Linear,
-    /// waku 风格：无彩中性灰 + 珊瑚色 brand（只做品牌标记，不承载结构）
-    /// + 蓝色 selection（选中态与品牌色分离）。
-    Waku,
-    /// OSS Browser（阿里官方客户端）风格：Ant Design 蓝。
-    ///
-    /// 取值**逐项来自那个应用的 CSS**（`/Applications/oss-browser2.app` 里的
-    /// `.webpack/renderer/main.css`，其自定义属性 `--oss-*` 明列了主色/状态色/中性色）。
-    /// 它的深色态在 CSS 里没有覆盖，故深色取 **Ant Design 官方深色主题**的取值，
-    /// 不是凭空配的（见 theme.rs 的对应注释）。
-    OssBrowser,
-}
-
-impl ThemeStyle {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Linear => "Linear（靛蓝）",
-            Self::Waku => "waku（珊瑚 + 蓝选中）",
-            Self::OssBrowser => "OSS Browser（Ant 蓝）",
-        }
-    }
-}
-
 fn default_transfer_concurrency() -> u32 {
     TRANSFER_CONCURRENCY_DEFAULT
 }
@@ -81,9 +48,6 @@ pub struct Settings {
     /// 外观模式：默认跟随系统，可手动固定浅色/深色。
     #[serde(default)]
     pub appearance_mode: AppearanceMode,
-    /// 视觉风格（调色板）。默认 Linear，旧配置缺该字段时补默认。
-    #[serde(default)]
-    pub theme_style: ThemeStyle,
     /// 界面字体族。None = 系统 UI 字体。
     #[serde(default)]
     pub ui_font_family: Option<String>,
@@ -110,7 +74,6 @@ impl Default for Settings {
             signed_url_ttl_secs: SIGNED_URL_TTL_DEFAULT,
             clipboard_clear_secs: CLIPBOARD_CLEAR_DEFAULT,
             appearance_mode: AppearanceMode::System,
-            theme_style: ThemeStyle::Linear,
             ui_font_family: None,
             ui_font_scale: UI_FONT_SCALE_DEFAULT,
             code_font_family: None,
@@ -233,7 +196,6 @@ mod tests {
             signed_url_ttl_secs: 600,
             clipboard_clear_secs: 0,
             appearance_mode: AppearanceMode::Dark,
-            theme_style: ThemeStyle::Waku,
             ui_font_family: Some("PingFang SC".into()),
             ui_font_scale: 1.15,
             code_font_family: Some("SF Mono".into()),
@@ -246,7 +208,6 @@ mod tests {
         assert_eq!(loaded.signed_url_ttl_secs, 600);
         assert_eq!(loaded.clipboard_clear_secs, 0);
         assert_eq!(loaded.appearance_mode, AppearanceMode::Dark);
-        assert_eq!(loaded.theme_style, ThemeStyle::Waku);
         assert_eq!(loaded.ui_font_family.as_deref(), Some("PingFang SC"));
         assert_eq!(loaded.ui_font_scale, 1.15);
         assert_eq!(loaded.code_font_family.as_deref(), Some("SF Mono"));
@@ -281,9 +242,8 @@ mod tests {
         assert_eq!(loaded.signed_url_ttl_secs, 900);
         assert_eq!(loaded.clipboard_clear_secs, 0);
         assert_eq!(loaded.appearance_mode, AppearanceMode::System);
-        // 新增字段必须能从缺字段的旧配置补默认值（agents.md：新增字段一律
-        // serde default），否则老用户升级后设置文件直接解析失败。
-        assert_eq!(loaded.theme_style, ThemeStyle::Linear);
+        // 旧配置里可能残留已删除的字段（如 `theme_style`）：serde 默认忽略未知字段，
+        // 所以「字段被删掉」不会让老用户的 settings.json 解析失败。
         assert_eq!(loaded.ui_font_family, None);
         assert_eq!(loaded.ui_font_scale, UI_FONT_SCALE_DEFAULT);
         assert_eq!(loaded.code_font_family, None);

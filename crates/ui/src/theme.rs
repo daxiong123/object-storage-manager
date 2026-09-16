@@ -29,19 +29,18 @@ use std::sync::{OnceLock, RwLock};
 
 use gpui::{App, Hsla, SharedString};
 use gpui_component::{Theme, ThemeConfig, ThemeMode, highlighter::HighlightThemeStyle};
-use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings, ThemeStyle};
+use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings};
 
 use crate::tokens;
 
-/// 主色 hue：低饱和靛蓝（Linear indigo `#5E6AD2` 基底）。
-const HUE_DEG: f32 = 233.0;
-/// 中性面色族 hue：统一冷灰（Linear 的低对比中性面）。
+/// 主色 hue：与色板 primary（`#0064c8`）同族，供只按 hue 生成的语法/高亮色使用。
+const HUE_DEG: f32 = 210.0;
+/// 中性面色族 hue：统一冷灰，供代码高亮的中性层使用。
 const NEUTRAL_HUE: f32 = 225.0;
 
 #[derive(Debug, Clone)]
 struct ThemePreferences {
     appearance_mode: AppearanceMode,
-    theme_style: ThemeStyle,
     ui_font_family: Option<String>,
     ui_font_scale: f32,
     code_font_family: Option<String>,
@@ -52,7 +51,6 @@ impl Default for ThemePreferences {
     fn default() -> Self {
         Self {
             appearance_mode: AppearanceMode::System,
-            theme_style: ThemeStyle::Linear,
             ui_font_family: None,
             ui_font_scale: 1.0,
             code_font_family: None,
@@ -65,7 +63,6 @@ impl ThemePreferences {
     fn from_settings(settings: &Settings) -> Self {
         Self {
             appearance_mode: settings.appearance_mode,
-            theme_style: settings.theme_style,
             ui_font_family: settings.ui_font_family.clone(),
             ui_font_scale: settings.ui_font_scale,
             code_font_family: settings.code_font_family.clone(),
@@ -177,16 +174,6 @@ struct Palette {
     info_foreground: [f32; 4],
 }
 
-/// status 族色相：与中性面（225）和品牌靛蓝（233）都拉开距离，
-/// 且四者互相远离（最近的一对是 danger/warning，41°），靠颜色就能区分
-/// 「出错 / 留意 / 成功 / 提示」。warning 取 45 而非更常见的 38，正是为了让
-/// 它与 danger（4）拉开可辨距离——写成断言见
-/// `status_hues_are_mutually_distinguishable`。
-const HUE_DANGER: f32 = 4.;
-const HUE_WARNING: f32 = 45.;
-const HUE_SUCCESS: f32 = 148.;
-const HUE_INFO: f32 = 205.;
-
 /// sRGB 十六进制 → HSLA 分量数组。
 ///
 /// waku 风格那两套直接引用上游 `src/theme.rs` 里的 `rgb(0x……)` 字面值，走这个
@@ -218,191 +205,6 @@ fn rgb(hex: u32) -> [f32; 4] {
     [(h / 6.).rem_euclid(1.), s, l, 1.]
 }
 
-/// waku 风格的选中色相（上游 `theme.rs` 的 `selection`：`hsla(211, 1.0, 0.50, α)`）。
-/// 注意它与 brand 是**分开的**：珊瑚色只做品牌标记，选中态用蓝色。
-const WAKU_HUE_SELECTION: f32 = 211.;
-/// waku 风格的中性/边框色相（上游的 `border` 用 `hsla(220, 0.10, …)`）。
-const WAKU_HUE_NEUTRAL: f32 = 220.;
-
-/// waku 风格·亮色。
-///
-/// 取自上游 `src/theme.rs` 的 `light()`：中性面是**无彩灰**（#F6F5F6 / #ECECEC /
-/// #E6E6E6，色相无从谈起），不是我们 Linear 那套冷灰（hue 225）；边框是低透明度
-/// 叠色而非实色；brand 是珊瑚 #C85F44；选中态是与 brand 分离的蓝
-/// `hsla(211, 1.0, 0.50, 0.35)`；主 CTA 用单色 `inverse`（#202227）而不是彩色。
-///
-/// 已知差异：上游在 macOS 上侧栏取 `transparent_black()` 让系统 vibrancy 透出来。
-/// 我们这一版**不做真 vibrancy**（需要给 crates/macos 加 NSVisualEffectView 绑定），
-/// 所以侧栏取与 canvas 同色——观感是「整块平面 + 一条发丝分隔线」，比上游更平，
-/// 这是本原型的已知偏差，不是取色错误。
-fn waku_light_palette() -> Palette {
-    // 上游的 border 是 hsla(220, 0.10, 0.12, 0.08) / (…, 0.15)
-    let border = hsla(WAKU_HUE_NEUTRAL, 0.10, 0.12, 0.08);
-    let border_strong = hsla(WAKU_HUE_NEUTRAL, 0.10, 0.12, 0.15);
-    let canvas = rgb(0xF6F5F6);
-    let raised = rgb(0xECECEC);
-    let inset = rgb(0xE6E6E6);
-    Palette {
-        background: canvas,
-        foreground: rgb(0x242424),
-        muted: raised,
-        muted_foreground: rgb(0x666666),
-        border,
-        sidebar: canvas,
-        sidebar_foreground: rgb(0x242424),
-        sidebar_border: border,
-        popover: canvas,
-        secondary: raised,
-        secondary_hover: inset,
-        secondary_active: rgb(0xDEDEDE),
-        // 控件边框：比表格分隔线明显一档（分隔线可以极浅，控件边框不行）
-        input: hsla(WAKU_HUE_NEUTRAL, 0.10, 0.12, 0.25),
-        list: canvas,
-        list_even: raised,
-        list_head: raised,
-        table: canvas,
-        table_even: raised,
-        table_head: raised,
-        table_row_border: border_strong,
-        title_bar: canvas,
-        overlay: hsla(WAKU_HUE_NEUTRAL, 0.10, 0.10, 0.30),
-        window_border: border_strong,
-        group_box: raised,
-        group_box_foreground: rgb(0x242424),
-        description_list_label: raised,
-        description_list_label_foreground: rgb(0x242424),
-        // 单色 CTA（上游的 inverse / on_inverse），不是彩色主按钮
-        primary: rgb(0x202227),
-        primary_hover: rgb(0x2B2D33),
-        primary_active: rgb(0x35383F),
-        primary_foreground: rgb(0xF8F8F9),
-        progress_bar: rgb(0xC85F44),
-        // brand：珊瑚，只用于品牌标记与链接
-        accent: rgb(0xC85F44),
-        accent_foreground: rgb(0xF8F8F9),
-        ring: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        // 上游侧栏的选中/悬停复用同一个 sidebar_item_background（中性层），
-        // 不染色——这是 waku「颜色只用于表意」最直观的一处体现。
-        sidebar_accent: raised,
-        sidebar_accent_foreground: rgb(0x242424),
-        // list_active 受库强制 alpha ≤ 0.2，源色必须很淡才不至于「选中态消失」
-        // （见 selection_tint_survives_library_alpha_clamp），故单独取淡蓝。
-        list_active: hsl(WAKU_HUE_SELECTION, 0.60, 0.91),
-        list_active_border: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        table_active: hsl(WAKU_HUE_SELECTION, 0.60, 0.91),
-        table_active_border: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        // 上游原值：hsla(211, 1.0, 0.50, 0.35)
-        selection: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 0.35),
-        link: rgb(0xC85F44),
-        link_hover: rgb(0xB4523A),
-        link_active: rgb(0xA04731),
-        drag_border: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        drop_target: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 0.22),
-        // 行 hover：上游说的「6% 中性层」
-        row_hover: hsla(WAKU_HUE_NEUTRAL, 0.03, 0.30, 0.06),
-        // status：上游原值 warning #A66B20 / success #2F8F52 / danger #C64A42；
-        // info 上游没有，取它的选中蓝同系以保持一致。
-        file_icon: rgb(0xC85F44),
-        danger: rgb(0xC64A42),
-        danger_hover: rgb(0xB04039),
-        danger_active: rgb(0x9A3730),
-        danger_foreground: rgb(0xF8F8F9),
-        warning: rgb(0xA66B20),
-        warning_hover: rgb(0x935E1C),
-        warning_active: rgb(0x805118),
-        warning_foreground: rgb(0xF8F8F9),
-        success: rgb(0x2F8F52),
-        success_hover: rgb(0x297D48),
-        success_active: rgb(0x236B3E),
-        success_foreground: rgb(0xF8F8F9),
-        info: rgb(0x2A7FBF),
-        info_hover: rgb(0x256FA7),
-        info_active: rgb(0x205F8F),
-        info_foreground: rgb(0xF8F8F9),
-    }
-}
-
-/// waku 风格·暗色。取自上游 `dark()`（canvas #1A1A1A / raised #232323 /
-/// inset #151515 / text #E2E2E2 / accent #E2795B / selection
-/// `hsla(211, 1.0, 0.50, 0.55)`）。
-fn waku_dark_palette() -> Palette {
-    let border = hsla(WAKU_HUE_NEUTRAL, 0.10, 0.90, 0.07);
-    let border_strong = hsla(WAKU_HUE_NEUTRAL, 0.10, 0.90, 0.14);
-    let canvas = rgb(0x1A1A1A);
-    let raised = rgb(0x232323);
-    let inset = rgb(0x151515);
-    Palette {
-        background: canvas,
-        foreground: rgb(0xE2E2E2),
-        muted: raised,
-        muted_foreground: rgb(0xA3A3A3),
-        border,
-        sidebar: canvas,
-        sidebar_foreground: rgb(0xE2E2E2),
-        sidebar_border: border,
-        popover: raised,
-        secondary: raised,
-        secondary_hover: rgb(0x2C2C2C),
-        secondary_active: rgb(0x353535),
-        input: hsla(WAKU_HUE_NEUTRAL, 0.10, 0.90, 0.30),
-        list: canvas,
-        list_even: raised,
-        list_head: inset,
-        table: canvas,
-        table_even: raised,
-        table_head: inset,
-        table_row_border: border_strong,
-        title_bar: canvas,
-        overlay: hsla(WAKU_HUE_NEUTRAL, 0.10, 0.01, 0.55),
-        window_border: border_strong,
-        group_box: raised,
-        group_box_foreground: rgb(0xE2E2E2),
-        description_list_label: raised,
-        description_list_label_foreground: rgb(0xE2E2E2),
-        // 暗色下单色 CTA 反过来：浅色底 + 深色字（上游 inverse / on_inverse）
-        primary: rgb(0xE7E9EC),
-        primary_hover: rgb(0xD8DADE),
-        primary_active: rgb(0xC9CBD0),
-        primary_foreground: rgb(0x17181C),
-        progress_bar: rgb(0xE2795B),
-        accent: rgb(0xE2795B),
-        accent_foreground: rgb(0x17181C),
-        ring: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        sidebar_accent: raised,
-        sidebar_accent_foreground: rgb(0xE2E2E2),
-        list_active: hsl(WAKU_HUE_SELECTION, 0.30, 0.24),
-        list_active_border: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        table_active: hsl(WAKU_HUE_SELECTION, 0.30, 0.24),
-        table_active_border: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        // 上游原值：hsla(211, 1.0, 0.50, 0.55)
-        selection: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 0.55),
-        link: rgb(0xE2795B),
-        link_hover: rgb(0xE88D72),
-        link_active: rgb(0xEEA189),
-        drag_border: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 1.0),
-        drop_target: hsla(WAKU_HUE_SELECTION, 1.0, 0.50, 0.25),
-        row_hover: hsla(WAKU_HUE_NEUTRAL, 0.03, 0.90, 0.06),
-        // status：上游原值 warning #E0B36A / success #62C987 / danger #E2726A
-        file_icon: rgb(0xE2795B),
-        danger: rgb(0xE2726A),
-        danger_hover: rgb(0xE8867F),
-        danger_active: rgb(0xEE9A94),
-        danger_foreground: rgb(0x17181C),
-        warning: rgb(0xE0B36A),
-        warning_hover: rgb(0xE6C183),
-        warning_active: rgb(0xECCF9C),
-        warning_foreground: rgb(0x17181C),
-        success: rgb(0x62C987),
-        success_hover: rgb(0x79D39A),
-        success_active: rgb(0x90DDAD),
-        success_foreground: rgb(0x17181C),
-        info: rgb(0x5AA9E0),
-        info_hover: rgb(0x73B7E6),
-        info_active: rgb(0x8CC5EC),
-        info_foreground: rgb(0x17181C),
-    }
-}
-
 /// OSS Browser（阿里官方客户端）风格 · 亮色。
 ///
 /// 取值**逐项来自该应用自己的 CSS**（`/Applications/oss-browser2.app` →
@@ -419,7 +221,7 @@ fn waku_dark_palette() -> Palette {
 /// `selection` 不是直接抄 `#eff3f8`：gpui-component 会把 `selection` 的 alpha
 /// 强压到 ≤0.3，源色太淡会渲染到看不见（见 `selection_tint_survives_library_alpha_clamp`）。
 /// 这里取 `#b8cee6` 作**源色**，0.3 压完后叠在白底上恰好约等于它的 `#eff3f8`。
-fn oss_browser_light_palette() -> Palette {
+fn light_palette() -> Palette {
     let border = rgb(0xF0F0F0);
     Palette {
         background: rgb(0xFFFFFF),
@@ -508,7 +310,7 @@ fn oss_browser_light_palette() -> Palette {
 /// 深色主题**的取值（body `#141414`、容器 `#1f1f1f`、边框 `#303030`、主色
 /// `#1668dc`、正文 `rgba(255,255,255,0.85)`），而不是我凭空配的——保持同一套
 /// 设计语言，来源可查。
-fn oss_browser_dark_palette() -> Palette {
+fn dark_palette() -> Palette {
     let border = rgb(0x303030);
     Palette {
         background: rgb(0x141414),
@@ -581,171 +383,6 @@ fn oss_browser_dark_palette() -> Palette {
     }
 }
 
-/// 亮色套：白底冷灰面 + 低饱和靛蓝。
-fn light_palette(style: ThemeStyle) -> Palette {
-    match style {
-        ThemeStyle::Waku => return waku_light_palette(),
-        ThemeStyle::OssBrowser => return oss_browser_light_palette(),
-        ThemeStyle::Linear => {}
-    }
-    let n = |s: f32, l: f32| hsl(NEUTRAL_HUE, s, l);
-    let na = |s: f32, l: f32, a: f32| hsla(NEUTRAL_HUE, s, l, a);
-    let p = |l: f32| hsl(HUE_DEG, 0.45, l);
-    Palette {
-        background: n(0.20, 1.00),
-        foreground: n(0.10, 0.13),
-        muted: n(0.12, 0.965),
-        muted_foreground: n(0.06, 0.44),
-        border: n(0.12, 0.915),
-        sidebar: n(0.14, 0.978),
-        sidebar_foreground: n(0.10, 0.20),
-        sidebar_border: n(0.12, 0.915),
-        popover: hsl(0., 0., 1.0),
-        secondary: n(0.12, 0.955),
-        secondary_hover: n(0.10, 0.935),
-        secondary_active: n(0.12, 0.915),
-        // `input` 是**控件边框**色（复选框未选中态与输入框边框都用它，见下面的测试），
-        // 取比 border 略深一档，保证在浅底上看得见。
-        input: n(0.12, 0.86),
-        list: hsl(0., 0., 1.0),
-        list_even: n(0.14, 0.985),
-        list_head: n(0.14, 0.978),
-        table: hsl(0., 0., 1.0),
-        table_even: n(0.14, 0.985),
-        table_head: n(0.14, 0.978),
-        table_row_border: na(0.12, 0.915, 0.70),
-        title_bar: n(0.14, 0.975),
-        overlay: hsla(NEUTRAL_HUE, 0.10, 0.12, 0.32),
-        window_border: n(0.12, 0.88),
-        group_box: n(0.12, 0.965),
-        group_box_foreground: n(0.10, 0.13),
-        description_list_label: n(0.12, 0.965),
-        description_list_label_foreground: n(0.10, 0.13),
-        primary: p(0.55),
-        primary_hover: p(0.48),
-        primary_active: p(0.42),
-        primary_foreground: hsl(0., 0., 1.0),
-        progress_bar: p(0.55),
-        accent: hsl(HUE_DEG, 0.35, 0.945),
-        accent_foreground: hsl(HUE_DEG, 0.40, 0.30),
-        ring: hsl(HUE_DEG, 0.45, 0.60),
-        sidebar_accent: hsl(HUE_DEG, 0.32, 0.935),
-        sidebar_accent_foreground: hsl(HUE_DEG, 0.40, 0.28),
-        list_active: hsl(HUE_DEG, 0.38, 0.925),
-        list_active_border: hsl(HUE_DEG, 0.45, 0.62),
-        table_active: hsl(HUE_DEG, 0.38, 0.925),
-        table_active_border: hsl(HUE_DEG, 0.45, 0.62),
-        selection: hsl(HUE_DEG, 0.45, 0.80),
-        link: hsl(HUE_DEG, 0.48, 0.50),
-        link_hover: hsl(HUE_DEG, 0.48, 0.42),
-        link_active: hsl(HUE_DEG, 0.48, 0.38),
-        drag_border: hsl(HUE_DEG, 0.45, 0.60),
-        drop_target: hsla(HUE_DEG, 0.45, 0.60, 0.22),
-        row_hover: n(0.10, 0.94),
-        // status 族：亮色实底 + 白字，明度对齐 primary（0.55）以便同一排按钮等高观感。
-        // 取本风格的靛蓝：原先非文本图标直接用 `accent`（近白，几乎不可见），
-        // 统一 icon 色后这个既有缺陷一并消失。
-        file_icon: hsl(HUE_DEG, 0.40, 0.30),
-        danger: hsl(HUE_DANGER, 0.62, 0.50),
-        danger_hover: hsl(HUE_DANGER, 0.62, 0.44),
-        danger_active: hsl(HUE_DANGER, 0.62, 0.38),
-        danger_foreground: hsl(0., 0., 1.0),
-        warning: hsl(HUE_WARNING, 0.72, 0.42),
-        warning_hover: hsl(HUE_WARNING, 0.72, 0.36),
-        warning_active: hsl(HUE_WARNING, 0.72, 0.31),
-        warning_foreground: hsl(0., 0., 1.0),
-        success: hsl(HUE_SUCCESS, 0.52, 0.38),
-        success_hover: hsl(HUE_SUCCESS, 0.52, 0.33),
-        success_active: hsl(HUE_SUCCESS, 0.52, 0.28),
-        success_foreground: hsl(0., 0., 1.0),
-        info: hsl(HUE_INFO, 0.60, 0.44),
-        info_hover: hsl(HUE_INFO, 0.60, 0.38),
-        info_active: hsl(HUE_INFO, 0.60, 0.33),
-        info_foreground: hsl(0., 0., 1.0),
-    }
-}
-
-/// 暗色套：深冷灰底 + 同系靛蓝提亮、压饱和。
-fn dark_palette(style: ThemeStyle) -> Palette {
-    match style {
-        ThemeStyle::Waku => return waku_dark_palette(),
-        ThemeStyle::OssBrowser => return oss_browser_dark_palette(),
-        ThemeStyle::Linear => {}
-    }
-    let n = |s: f32, l: f32| hsl(NEUTRAL_HUE, s, l);
-    let na = |s: f32, l: f32, a: f32| hsla(NEUTRAL_HUE, s, l, a);
-    let p = |l: f32| hsl(HUE_DEG, 0.40, l);
-    Palette {
-        background: n(0.09, 0.075),
-        foreground: n(0.10, 0.90),
-        muted: n(0.08, 0.14),
-        muted_foreground: n(0.06, 0.58),
-        border: n(0.08, 0.165),
-        sidebar: n(0.09, 0.055),
-        sidebar_foreground: n(0.08, 0.88),
-        sidebar_border: n(0.08, 0.14),
-        popover: n(0.09, 0.10),
-        secondary: n(0.08, 0.16),
-        secondary_hover: n(0.08, 0.20),
-        secondary_active: n(0.08, 0.24),
-        input: n(0.08, 0.30),
-        list: n(0.09, 0.075),
-        list_even: n(0.08, 0.09),
-        list_head: n(0.09, 0.065),
-        table: n(0.09, 0.075),
-        table_even: n(0.08, 0.09),
-        table_head: n(0.09, 0.065),
-        table_row_border: na(0.08, 0.165, 0.70),
-        title_bar: n(0.09, 0.06),
-        overlay: hsla(NEUTRAL_HUE, 0.10, 0.01, 0.55),
-        window_border: n(0.08, 0.20),
-        group_box: n(0.08, 0.11),
-        group_box_foreground: n(0.10, 0.90),
-        description_list_label: n(0.08, 0.11),
-        description_list_label_foreground: n(0.10, 0.90),
-        primary: p(0.58),
-        primary_hover: p(0.64),
-        primary_active: p(0.70),
-        primary_foreground: hsl(0., 0., 1.0),
-        progress_bar: p(0.58),
-        accent: hsl(HUE_DEG, 0.30, 0.22),
-        accent_foreground: hsl(HUE_DEG, 0.30, 0.88),
-        ring: hsl(HUE_DEG, 0.40, 0.60),
-        sidebar_accent: hsl(HUE_DEG, 0.28, 0.22),
-        sidebar_accent_foreground: hsl(HUE_DEG, 0.30, 0.88),
-        list_active: hsl(HUE_DEG, 0.28, 0.24),
-        list_active_border: hsl(HUE_DEG, 0.40, 0.55),
-        table_active: hsl(HUE_DEG, 0.28, 0.24),
-        table_active_border: hsl(HUE_DEG, 0.40, 0.55),
-        selection: hsl(HUE_DEG, 0.40, 0.35),
-        link: hsl(HUE_DEG, 0.40, 0.72),
-        link_hover: hsl(HUE_DEG, 0.40, 0.80),
-        link_active: hsl(HUE_DEG, 0.40, 0.78),
-        drag_border: hsl(HUE_DEG, 0.40, 0.60),
-        drop_target: hsla(HUE_DEG, 0.40, 0.60, 0.25),
-        row_hover: n(0.08, 0.13),
-        // status 族：暗色同样用「实底 + 白字」，明度对齐暗色 primary（0.58），
-        // 只把饱和度略压（暗底上高饱和会发荧光）。
-        file_icon: hsl(HUE_DEG, 0.30, 0.88),
-        danger: hsl(HUE_DANGER, 0.55, 0.56),
-        danger_hover: hsl(HUE_DANGER, 0.55, 0.62),
-        danger_active: hsl(HUE_DANGER, 0.55, 0.68),
-        danger_foreground: hsl(0., 0., 1.0),
-        warning: hsl(HUE_WARNING, 0.62, 0.52),
-        warning_hover: hsl(HUE_WARNING, 0.62, 0.58),
-        warning_active: hsl(HUE_WARNING, 0.62, 0.64),
-        warning_foreground: hsl(0., 0., 1.0),
-        success: hsl(HUE_SUCCESS, 0.45, 0.48),
-        success_hover: hsl(HUE_SUCCESS, 0.45, 0.54),
-        success_active: hsl(HUE_SUCCESS, 0.45, 0.60),
-        success_foreground: hsl(0., 0., 1.0),
-        info: hsl(HUE_INFO, 0.52, 0.54),
-        info_hover: hsl(HUE_INFO, 0.52, 0.60),
-        info_active: hsl(HUE_INFO, 0.52, 0.66),
-        info_foreground: hsl(0., 0., 1.0),
-    }
-}
-
 /// HSL（h: 0..360, s/l: 0..1）→ HSLA 分量数组（alpha = 1）。
 fn hsl(h_deg: f32, s: f32, l: f32) -> [f32; 4] {
     hsla(h_deg, s, l, 1.0)
@@ -791,13 +428,12 @@ fn hsla_to_hex([h, s, l, a]: [f32; 4]) -> String {
 
 /// 文件类型图标的统一色（`ThemeConfig` 没有这一位，故走模块函数，同 `image_outline`）。
 ///
-/// 取当前**视觉风格**对应的色板值：参照实现对所有类型用同一个金色。
+/// 取当前亮暗模式对应的色板值：参照实现对所有类型用同一个金色。
 pub fn file_icon_color(mode: ThemeMode) -> Hsla {
-    let style = preferences().read().expect("主题偏好锁被毒化").theme_style;
     let palette = if mode.is_dark() {
-        dark_palette(style)
+        dark_palette()
     } else {
-        light_palette(style)
+        light_palette()
     };
     let [h, s, l, a] = palette.file_icon;
     gpui::hsla(h * 360., s, l, a)
@@ -809,20 +445,14 @@ pub fn theme_configs() -> Vec<ThemeConfig> {
 }
 
 fn theme_configs_for_preferences(prefs: &ThemePreferences) -> Vec<ThemeConfig> {
-    let style = prefs.theme_style;
     vec![
         config(
             ThemeMode::Light,
             "CloudStorage Light",
-            light_palette(style),
+            light_palette(),
             prefs,
         ),
-        config(
-            ThemeMode::Dark,
-            "CloudStorage Dark",
-            dark_palette(style),
-            prefs,
-        ),
+        config(ThemeMode::Dark, "CloudStorage Dark", dark_palette(), prefs),
     ]
 }
 
@@ -972,12 +602,12 @@ pub fn image_outline(mode: ThemeMode) -> Hsla {
 /// 亮暗两套同结构：暗色提高各 token 亮度保持辨识度；中性色与 surface
 /// 族同冷灰系（hue 225），编辑器底色随亮暗模式微调。
 ///
-/// `ThemeStyle` 字段私有且无 pub 构造器，只能走 serde 反序列化——
+/// `HighlightThemeStyle` 字段私有且无 pub 构造器，只能走 serde 反序列化——
 /// 与库加载内置主题（default-theme.json）同路径，hex 字符串即 gpui
 /// `Hsla` 的 serde 格式。
 fn highlight_theme_style(mode: ThemeMode) -> HighlightThemeStyle {
     let dark = mode.is_dark();
-    let keyword = hsl_hex(233.0, 0.60, if dark { 0.72 } else { 0.46 });
+    let keyword = hsl_hex(HUE_DEG, 0.60, if dark { 0.72 } else { 0.46 });
     let string = hsl_hex(105.0, 0.45, if dark { 0.62 } else { 0.32 });
     let comment = hsl_hex(NEUTRAL_HUE, 0.08, if dark { 0.52 } else { 0.50 });
     let warm = hsl_hex(5.0, 0.65, if dark { 0.68 } else { 0.46 });
@@ -1119,17 +749,10 @@ mod tests {
     /// 四种组合：两套风格 × 亮/暗。族纪律必须对**全部**组合成立，
     /// 否则新加的风格可以偷偷破坏纪律而测试全绿。
     fn all_palettes() -> Vec<(String, Palette)> {
-        let mut out = Vec::new();
-        // 必须列出**全部**风格：漏一套 = 那套可以偷偷破坏族纪律而测试全绿
-        for (style_name, style) in [
-            ("linear", ThemeStyle::Linear),
-            ("waku", ThemeStyle::Waku),
-            ("ossbrowser", ThemeStyle::OssBrowser),
-        ] {
-            out.push((format!("{style_name}/light"), light_palette(style)));
-            out.push((format!("{style_name}/dark"), dark_palette(style)));
-        }
-        out
+        vec![
+            ("light".to_string(), light_palette()),
+            ("dark".to_string(), dark_palette()),
+        ]
     }
 
     impl Palette {
@@ -1240,18 +863,25 @@ mod tests {
     }
 
     #[test]
-    fn light_primary_is_low_saturation_indigo() {
-        let [h, s, l, _] = light_palette(ThemeStyle::Linear).primary;
-        assert!(s <= 0.5, "primary 饱和度 {s} 应为低饱和");
-        assert!((l - 0.55).abs() < 1e-6);
-        assert!((h - HUE_DEG / 360.).abs() < 1e-6);
-    }
+    fn primary_is_the_reference_blue_in_both_modes() {
+        // 主色取自参照实现的 `--oss-primary-color`（`#0064c8`）与其深色对应档。
+        // 断言它确实是**蓝色系**且饱和足够（主 CTA 要一眼可辨）——旧的低饱和靛蓝调色板
+        // 已随视觉切换一并删除，这条测试顺带防止「主色悄悄退回灰色」。
+        let [h, s, l, _] = light_palette().primary;
+        let hue = h * 360.;
+        assert!(
+            (190.0..=230.0).contains(&hue),
+            "主色应在蓝色系（当前 {hue:.0}°）"
+        );
+        assert!(s >= 0.5, "主 CTA 需要足够饱和（当前 {s}）");
+        assert!((0.30..=0.60).contains(&l), "主色明度应在中间档（当前 {l}）");
 
-    #[test]
-    fn dark_primary_is_low_saturation_indigo() {
-        let [h, s, _, _] = dark_palette(ThemeStyle::Linear).primary;
-        assert!(s <= 0.5, "primary 饱和度 {s} 应为低饱和");
-        assert!((h - HUE_DEG / 360.).abs() < 1e-6);
+        let [dh, _, _, _] = dark_palette().primary;
+        let dhue = dh * 360.;
+        assert!(
+            (190.0..=230.0).contains(&dhue),
+            "深色主色也应在蓝色系（当前 {dhue:.0}°）"
+        );
     }
 
     #[test]
@@ -1447,7 +1077,6 @@ mod tests {
     fn theme_config_applies_font_preferences() {
         let prefs = ThemePreferences {
             appearance_mode: AppearanceMode::System,
-            theme_style: ThemeStyle::Linear,
             ui_font_family: Some("PingFang SC".into()),
             ui_font_scale: 1.15,
             code_font_family: Some("SF Mono".into()),
@@ -1621,25 +1250,27 @@ mod tests {
 
     #[test]
     fn status_hues_are_mutually_distinguishable() {
-        // 四个状态之间色相至少差 30°：靠颜色就能区分「出错 / 留意 / 成功 / 提示」，
-        // 而不是要用户去读文字（无障碍要求：不能只靠颜色，但颜色也不能没用）。
+        // 四个状态的色相至少差 30°，靠颜色就能区分「出错 / 留意 / 成功 / 提示」。
         //
-        // 阈值取 30 而不是 40：waku 的 danger(4) 与 warning(37) 只差 33°，
-        // 这是上游取色本身的取舍（红与琥珀本就相邻），保留它以便对照真实观感。
-        let hues = [
-            ("danger", HUE_DANGER),
-            ("warning", HUE_WARNING),
-            ("success", HUE_SUCCESS),
-            ("info", HUE_INFO),
-        ];
-        for (i, (a_name, a)) in hues.iter().enumerate() {
-            for (b_name, b) in hues.iter().skip(i + 1) {
-                let raw = (a - b).abs();
-                let diff = raw.min(360. - raw);
-                assert!(
-                    diff >= 30.,
-                    "{a_name} 与 {b_name} 色相仅差 {diff:.0}°，肉眼难以区分"
-                );
+        // **从色板取实际色相**，不维护一份常量：常量会变成「色板改了、测试还在验旧值」，
+        // 那种测试比没有更糟（它给的是虚假的安全感）。
+        // 阈值 30 而非 40：参照实现的状态色取自 Ant 的色板，其 danger 与 warning 相邻较近。
+        for (name, p) in all_palettes() {
+            let hues = [
+                ("danger", p.danger[0] * 360.),
+                ("warning", p.warning[0] * 360.),
+                ("success", p.success[0] * 360.),
+                ("info", p.info[0] * 360.),
+            ];
+            for (i, (a_name, a)) in hues.iter().enumerate() {
+                for (b_name, b) in hues.iter().skip(i + 1) {
+                    let raw = (a - b).abs();
+                    let diff = raw.min(360. - raw);
+                    assert!(
+                        diff >= 30.,
+                        "{name}: {a_name} 与 {b_name} 色相仅差 {diff:.0}°，肉眼难以区分"
+                    );
+                }
             }
         }
     }

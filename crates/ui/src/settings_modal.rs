@@ -23,7 +23,7 @@ use gpui_component::{
 };
 
 use object_storage_persistence::{
-    AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings, TRANSFER_CONCURRENCY_DEFAULT, ThemeStyle,
+    AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings, TRANSFER_CONCURRENCY_DEFAULT,
 };
 
 use crate::actions::DismissModal;
@@ -102,8 +102,6 @@ pub struct SettingsModal {
     ttl: Entity<InputState>,
     clipboard: Entity<InputState>,
     appearance_mode: AppearanceMode,
-    /// 视觉风格（调色板）。与外观模式同一分区：二者都只影响配色。
-    theme_style: ThemeStyle,
     /// 界面字体下拉（含自定义字体名；None 选项 = 系统默认）
     ui_font_select: Entity<SelectState<Vec<FontOption>>>,
     ui_font_scale: Entity<InputState>,
@@ -269,7 +267,6 @@ impl SettingsModal {
             ttl,
             clipboard,
             appearance_mode: settings.appearance_mode,
-            theme_style: settings.theme_style,
             ui_font_select,
             ui_font_scale,
             code_font_select,
@@ -369,12 +366,6 @@ impl SettingsModal {
         cx.notify();
     }
 
-    fn set_theme_style(&mut self, style: ThemeStyle, cx: &mut Context<Self>) {
-        self.theme_style = style;
-        self.saved_note = None;
-        cx.notify();
-    }
-
     fn build_settings(&self, cx: &mut Context<Self>) -> Result<Settings, String> {
         let ttl = parse_u64_field(
             self.ttl.read(cx).value().trim(),
@@ -407,7 +398,6 @@ impl SettingsModal {
             signed_url_ttl_secs: ttl,
             clipboard_clear_secs: clipboard,
             appearance_mode: self.appearance_mode,
-            theme_style: self.theme_style,
             ui_font_family,
             ui_font_scale,
             code_font_family,
@@ -716,32 +706,6 @@ impl SettingsModal {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let mode = self.appearance_mode;
-        let style = self.theme_style;
-        let style_radio =
-            |section_id: &'static str, style_value: ThemeStyle, theme: &gpui_component::Theme| {
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Radio::new(section_id)
-                            .checked(style == style_value)
-                            .on_click({
-                                let theme = theme.clone();
-                                cx.listener(move |this, checked: &bool, _, cx| {
-                                    if *checked {
-                                        this.set_theme_style(style_value, cx);
-                                    }
-                                    let _ = &theme;
-                                })
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(tokens::body())
-                            .text_color(theme.foreground)
-                            .child(style_value.label()),
-                    )
-            };
         let radio = |section_id: &'static str,
                      mode_value: AppearanceMode,
                      label: &'static str,
@@ -792,24 +756,6 @@ impl SettingsModal {
                             "appearance-dark",
                             AppearanceMode::Dark,
                             "深色",
-                            theme,
-                        )),
-                    theme,
-                ))
-                .into_any_element(),
-            // 视觉风格：两套调色板共用同一份视图代码与同一组语义字段，切换即时
-            // 生效，所以可以对着同一屏做 A/B 对照——比较的确实只是颜色与中性面。
-            section_divider(theme)
-                .child(field_row(
-                    "视觉风格",
-                    Some("Linear：冷灰 + 靛蓝；waku：无彩灰 + 珊瑚 + 蓝选中；OSS Browser：Ant 蓝 + 淡蓝选中。"),
-                    v_flex()
-                        .gap_2()
-                        .child(style_radio("theme-style-linear", ThemeStyle::Linear, theme))
-                        .child(style_radio("theme-style-waku", ThemeStyle::Waku, theme))
-                        .child(style_radio(
-                            "theme-style-oss-browser",
-                            ThemeStyle::OssBrowser,
                             theme,
                         )),
                     theme,
