@@ -111,7 +111,14 @@ fn main() {
                 // 菜单 Action 经焦点链派发：初始焦点置于 Workspace 根节点。
                 window.focus(&workspace.focus_handle(cx), cx);
                 // 窗口第一层视图必须是 Root。
-                cx.new(|cx| Root::new(workspace, window, cx))
+                //
+                // **把 Root 的底色覆盖成透明**：它默认铺满整窗的 `tokens.background`，
+                // 会把系统材质（侧栏透光用的 NSVisualEffectView）整个盖住。Root 实现了
+                // `Styled`，而它的 render 是先 `.bg(tokens.background)`、之后才
+                // `.refine_style(&self.style)`，所以在构造时覆写即可生效。
+                // 安全性：WorkspaceView 是 size_full 的子视图且自己负责铺底色
+                // （Linear 铺不透明、Waku 让出侧栏那块），所以这里透明不会露出窗口底色。
+                cx.new(|cx| Root::new(workspace, window, cx).bg(rgba(0x00000000)))
             })?;
 
             // 终端直启（cargo run）不触发 LaunchServices 激活，主动把应用带到前台，
