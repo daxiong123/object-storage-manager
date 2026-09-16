@@ -304,6 +304,10 @@ impl WorkspaceView {
         // gpui 只在「已有 hover 样式 / 正在拖」时注册 mousemove→notify。
         // 系统文件拖入前一帧 active_drag 为空，不注册监听 → drag_over 永不刷新。
         // 空 hover() 让监听常驻；透明 2px 边框避免拖入时布局跳动。
+        //
+        // 拖入时的样子照参照实现：**灰色虚线框、整个内容区不加底色**（它只有一圈虚线，
+        // 底色不变）。所以这里不设 `.bg(theme.drop_target)`——彩色底叠在虚线上会显得脏，
+        // 也不是参照的观感。
         el.id("object-browser-drop")
             .border_2()
             .border_color(gpui::transparent_black())
@@ -312,9 +316,7 @@ impl WorkspaceView {
                 this.handle_dropped_paths(paths.paths(), cx);
             }))
             .drag_over::<ExternalPaths>(|style, _, _, cx| {
-                style
-                    .border_color(cx.theme().drag_border)
-                    .bg(cx.theme().drop_target)
+                style.border_dashed().border_color(cx.theme().drag_border)
             })
     }
 

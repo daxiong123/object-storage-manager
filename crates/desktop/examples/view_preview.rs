@@ -18,6 +18,7 @@
 //! - `search`（默认）：对象搜索控件，`object_storage_ui::compact_search_field`；
 //!   加 `OSM_PREVIEW_FOCUS=1` 让输入框带焦点（看聚焦边框）。
 //! - `provider`：「添加账号」弹层里的服务商分段控件，直接渲染整个 `AddAccountModal`。
+//! - `dropframe`：拖入提示框的边框样式（灰色虚线），用于确认 gpui 的虚线渲染。
 //!
 //! 两个开关对所有视图都生效：`OSM_PREVIEW_DARK=1` 切暗色（暗色的选中底/边框是另一套值）。
 
@@ -30,6 +31,27 @@ use object_storage_app::AppServices;
 /// 搜索控件：只画这一条控件，四周留白以便量边框。
 struct SearchHarness {
     input: Entity<InputState>,
+}
+
+/// 拖入提示框的**边框样式**：与 `with_file_drop` 的 `drag_over` 写同一组调用
+/// （`border_2` + `border_dashed` + `theme.drag_border`）。
+///
+/// 这里只能验这一层：离屏窗口里没法触发真实文件拖拽（拖拽由系统会话驱动），
+/// 所以「虚线画不画得出来、间距如何、颜色对不对」看这张图，「拖入时是否真的应用」
+/// 只能人肉拖一次文件确认。
+struct DropFrameHarness;
+
+impl Render for DropFrameHarness {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        v_flex().size_full().bg(theme.background).p_3().child(
+            div()
+                .size_full()
+                .border_2()
+                .border_dashed()
+                .border_color(theme.drag_border),
+        )
+    }
 }
 
 impl Render for SearchHarness {
@@ -72,6 +94,7 @@ fn main() {
 
         let size = match view.as_str() {
             "provider" => size(px(520.), px(660.)),
+            "dropframe" => size(px(420.), px(240.)),
             _ => size(px(260.), px(80.)),
         };
         let bounds = Bounds {
@@ -99,6 +122,10 @@ fn main() {
                             object_storage_ui::AddAccountModal::new(services, window, cx)
                         });
                         cx.new(|cx| Root::new(modal, window, cx))
+                    }
+                    "dropframe" => {
+                        let harness = cx.new(|_| DropFrameHarness);
+                        cx.new(|cx| Root::new(harness, window, cx))
                     }
                     _ => {
                         let input =

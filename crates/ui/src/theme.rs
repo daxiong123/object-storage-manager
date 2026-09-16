@@ -277,7 +277,8 @@ fn light_palette() -> Palette {
         link: rgb(0x1677FF),
         link_hover: rgb(0x69B1FF),
         link_active: rgb(0x0958D9),
-        drag_border: rgb(0x1677FF),
+        // 拖入时的提示框：参照实现是**灰色虚线**（实测 #757575），不是彩色实线
+        drag_border: rgb(0x757575),
         drop_target: hsla(215., 1.0, 0.53, 0.22),
         row_hover: rgb(0xF2F2F2),
         // 状态色：基色取自上游 CSS，**hover/active 在同色相上推亮度**得到，
@@ -359,7 +360,8 @@ fn dark_palette() -> Palette {
         link: rgb(0x1677FF),
         link_hover: rgb(0x69B1FF),
         link_active: rgb(0x0958D9),
-        drag_border: rgb(0x1677FF),
+        // 暗色用本盘自己的中性灰（#737373），保证在 #141414 上仍看得见
+        drag_border: rgb(0x737373),
         drop_target: hsla(215., 1.0, 0.53, 0.25),
         row_hover: rgb(0x262626),
         // 同亮色套：hover/active 在同色相上推亮度派生
