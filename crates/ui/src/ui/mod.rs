@@ -40,8 +40,12 @@ pub(crate) fn icon_button(
 
 /// 紧凑搜索控件：输入框 + **接合**在右侧的放大镜按钮（参照实现的样子）。
 ///
+/// **宽度由调用方给，本控件铺满它**（`w_full`）。别指望它自己量出宽度：输入框是
+/// `flex_1`（flex-basis 0），放进一条内容尺寸的 flex 行里会塌成一条缝——工具栏最初
+/// 就是这么塌的（定宽容器不会自动撑满它的 flex 子项，得子项自己 `w_full`）。
+///
 /// 收进 `ui/` 的第二个理由不只是复用：它必须能被**单独渲染**出来做视觉验收
-/// （`crates/desktop/examples/search_field_preview.rs` 离屏渲染的就是这个函数，
+/// （`crates/desktop/examples/view_preview.rs` 离屏渲染的就是这个函数，
 /// 而不是照抄一份）。gpui 不建 AX 树，控件级的视觉回归只能这样看。
 ///
 /// 结构要点（从参照实现的截图逐像素量出来的）：
@@ -65,6 +69,7 @@ pub fn compact_search_field(
     //
     // 圆角内外两层必须一致（左角方、右角圆）：外壳决定边框轮廓，里层决定 hover 底色的轮廓。
     h_flex()
+        .w_full()
         .items_center()
         .child(
             div().flex_1().min_w_0().child(

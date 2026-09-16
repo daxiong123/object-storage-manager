@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use gpui::*;
-use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode, input::InputState, v_flex};
+use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode, h_flex, input::InputState, v_flex};
 use object_storage_app::AppServices;
 
 /// 搜索控件：只画这一条控件，四周留白以便量边框。
@@ -35,16 +35,23 @@ struct SearchHarness {
 impl Render for SearchHarness {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // 父链必须与工具栏里一致：`render_object_search` 是一条 `h_flex().w(220).items_center()`，
+        // 控件是它的 flex 子项。**别改成给控件套一个定宽 div** —— 那样子项会撑满，
+        // 「控件在内容尺寸的 flex 行里塌成一条缝」这类 bug 就被预览掩盖了（踩过一次）。
         v_flex()
             .size_full()
             .justify_center()
             .items_center()
             .bg(theme.background)
             .child(
-                // 宽度与对象工具栏里一致（`render_object_search` 的 `w(tokens::text(220.))`）
-                div().w(object_storage_ui::tokens::text(220.)).child(
-                    object_storage_ui::compact_search_field(&self.input, &theme, |_, _, _| {}),
-                ),
+                h_flex()
+                    .w(object_storage_ui::tokens::text(220.))
+                    .items_center()
+                    .child(object_storage_ui::compact_search_field(
+                        &self.input,
+                        &theme,
+                        |_, _, _| {},
+                    )),
             )
     }
 }
