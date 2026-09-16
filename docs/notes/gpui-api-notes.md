@@ -78,7 +78,7 @@ CGWindowList OnScreenOnly 仍列出 layer=0 alpha=1.0 的窗口）。
 窗口卡在可见状态。这不是 gpui 特有的 bug 路径，而是「close 动画 × 立即 teardown」
 的组合，任何 NSWindow 子类都可能踩到。
 
-**修复**（两行，见 `crates/ui/src/workspace_view.rs` `handle_close_window`）：
+**修复**（两行，见 `crates/ui/src/workspace/quit.rs` `handle_close_window`）：
 
 ```rust
 // NSWindowAnimationBehaviorNone = 1，禁用 close 动画，[super close] 退化为纯 orderOut
@@ -275,6 +275,17 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 
 ## 动效（能力边界，已核实）
 
+- **`with_animation` 已内建 `reduce_motion` 支持（勿重复实现）**：`AnimationExt`
+  的文档写明「Animations rendered through this trait automatically respect
+  `App::reduce_motion`」，实现见 `elements/animation.rs:407`——命中时取最后一个
+  动画且 oneshot 直接给 `delta = 1.0`（即渲染**终态**）、`done = true`、不再排帧。
+  `window.rs:2522` 同时提醒：**直接**用 `request_animation_frame` 做装饰性动效时
+  才需要自己判 `cx.reduce_motion()`。→ 浮层淡入这类 `with_animation` 动效不必再判。
+- **`button::ButtonIcon` 对外不可命名**：`button/mod.rs` 是
+  `pub(crate) use button_icon::*;`，所以虽然 `pub struct ButtonIcon` 存在，库外
+  无法在签名里写它（`Button::icon(impl Into<ButtonIcon>)` 也因此没法被泛型包装）。
+  → 想抽一个「图标按钮」helper，形参要取 `gpui_component::Icon`，不能取
+  `ButtonIcon`（本仓库 `ui::icon_button` 即如此）。
 - **`Div` 没有 `transform` / `scale` / `rotate`**：`Transformation` 只定义在
   `elements/svg.rs`，由 `Svg::with_transformation` 使用；`Styled` 上没有相关方法。
   只有 SVG 能变换（gpui-component 的 `Icon` 会转发 `transform`，所以 Spinner 能转）。
