@@ -364,8 +364,7 @@ impl WorkspaceView {
             return;
         }
         let extend = extend && !self.preview_overlay_open;
-        let order =
-            display_entry_order(&self.entries, self.object_sort, self.filtered_ix.as_deref());
+        let order = display_entry_order(&self.entries, self.object_sort);
         let keys = visible_object_keys(&self.entries, &order);
         if keys.is_empty() {
             return;

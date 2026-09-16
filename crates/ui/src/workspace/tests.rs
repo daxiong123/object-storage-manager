@@ -6,7 +6,6 @@
 use super::copy_move::*;
 use super::delete::*;
 use super::download::*;
-use super::filter::*;
 use super::folder::*;
 use super::menus::*;
 use super::sidebar::*;
@@ -751,6 +750,25 @@ fn menu_targets_follow_the_entry_point() {
 }
 
 #[test]
+fn normalize_prefix_query_trims_and_drops_leading_slash() {
+    // 前缀搜索的输入规范化：空串 = 回桶根；前导 `/` 不进 key；
+    // **不补尾斜杠**——参照实现是「文件前缀搜索」，输入 2025 要能列出 2025… 的对象，
+    // 补成 2025/ 就只剩目录了。
+    assert_eq!(
+        normalize_prefix_query("  photos/2024  "),
+        Some("photos/2024".into())
+    );
+    assert_eq!(normalize_prefix_query("/photos/"), Some("photos/".into()));
+    // 前后都有斜杠与空白时一并处理
+    assert_eq!(normalize_prefix_query(" /logs "), Some("logs".into()));
+    assert_eq!(normalize_prefix_query("2025"), Some("2025".into()));
+    // 空/纯空白 = 回到桶根
+    assert_eq!(normalize_prefix_query(""), None);
+    assert_eq!(normalize_prefix_query("   "), None);
+    assert_eq!(normalize_prefix_query("/"), None);
+}
+
+#[test]
 fn display_slot_accounts_for_directory_prefixes() {
     // 虚拟列表的 item 下标 = 显示顺序里的槽位；目录前缀也占槽位。
     // 这条守着键盘导航「把选中行滚进视野」不会滚错位置。
@@ -1000,38 +1018,6 @@ fn directory_mixed_reverse_shift_range_uses_object_indexes() {
     assert!(!preview);
 }
 
-#[test]
-fn filter_drops_selection_only_when_filtering_actually_changes() {
-    // 开始过滤 / 过滤条件变了 → 必须丢选择（否则搜索结果会带着旧选中底色，
-    // 而 ⌘⌫ 取的是选择全集，可能删掉当前看不见的对象）
-    assert!(filter_drops_selection("", "2025"));
-    assert!(filter_drops_selection("2025", "2026"));
-
-    // 过滤条件没变 → 不丢。`refresh_filter` 在数据重载/翻页后也会被调用，
-    // 那时丢选择是误伤（用户刚在过滤结果里选了几项，点「加载更多」不该清空）。
-    assert!(!filter_drops_selection("2025", "2025"));
-
-    // 清空查询 → 不丢：可见集回到全集，选中项全都看得见
-    assert!(!filter_drops_selection("2025", ""));
-
-    // 空白查询等同「没有过滤」（与 filter_entries 的处理一致）：
-    // 只敲空格不该被当成开始了过滤，也不该丢掉选择。比较按 trim 后进行。
-    assert!(!filter_drops_selection("", ""));
-    assert!(!filter_drops_selection("", " "));
-    assert!(!filter_drops_selection("  ", " "));
-}
-
-#[test]
-fn filter_entries_none_or_blank_keeps_all() {
-    let entries = vec![
-        ListingEntry::CommonPrefix("dir/".into()),
-        entry_object("a/b.txt"),
-    ];
-    assert_eq!(filter_entries(&entries, None), vec![0, 1]);
-    assert_eq!(filter_entries(&entries, Some("")), vec![0, 1]);
-    assert_eq!(filter_entries(&entries, Some("   ")), vec![0, 1]);
-}
-
 fn entry_object_sized(key: &str, size: u64, time: i64) -> ListingEntry {
     ListingEntry::Object(CloudObject {
         key: key.into(),
@@ -1154,23 +1140,6 @@ fn visible_object_keys_skip_prefixes_and_follow_display_order() {
     assert_eq!(
         visible_object_keys(&entries, &[2, 0, 1]),
         vec!["a.txt".to_string(), "b.txt".to_string()]
-    );
-}
-
-#[test]
-fn display_entry_order_intersects_sort_with_filter() {
-    let entries = vec![
-        entry_object("c.txt"),
-        ListingEntry::CommonPrefix("a/".into()),
-        entry_object("b.txt"),
-    ];
-    assert_eq!(
-        display_entry_order(&entries, ObjectSort::Natural, None),
-        vec![0, 1, 2]
-    );
-    assert_eq!(
-        display_entry_order(&entries, ObjectSort::Natural, Some(&[0, 2])),
-        vec![0, 2]
     );
 }
 
@@ -1324,31 +1293,6 @@ fn provider_icon_distinguishes_vendors() {
         provider_icon(ProviderKind::Aliyun),
         IconName::Building2
     ));
-}
-
-#[test]
-fn filter_entries_matches_key_and_prefix_case_insensitive() {
-    let entries = vec![
-        ListingEntry::CommonPrefix("Photos/".into()),
-        entry_object("photos/2024/a.jpg"),
-        entry_object("docs/readme.md"),
-    ];
-    // 大小写不敏感：photos 同时命中目录前缀与对象 key
-    assert_eq!(filter_entries(&entries, Some("photos")), vec![0, 1]);
-    // 文件名片段
-    assert_eq!(filter_entries(&entries, Some("readme")), vec![2]);
-    // 无命中
-    assert!(filter_entries(&entries, Some("不存在的词")).is_empty());
-}
-
-#[test]
-fn filter_entries_keeps_original_order() {
-    let entries = vec![
-        entry_object("b.txt"),
-        ListingEntry::CommonPrefix("a/".into()),
-        entry_object("a/c.txt"),
-    ];
-    assert_eq!(filter_entries(&entries, Some("a")), vec![1, 2]);
 }
 
 #[test]

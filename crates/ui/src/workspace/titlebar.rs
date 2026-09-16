@@ -106,8 +106,7 @@ impl WorkspaceView {
         } else {
             Some(format!("{}/", trimmed.trim_end_matches('/')))
         };
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.push_nav_history();
         self.current_prefix = prefix;
         self.reload_objects(cx);

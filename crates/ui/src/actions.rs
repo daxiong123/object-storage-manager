@@ -45,8 +45,8 @@ actions!(
         SelectObjectNextRange,
         // 重命名：Return（仅 Workspace 上下文）
         RenameObject,
-        // 过滤当前对象列表：⌘F（仅 Workspace 上下文；再按 ⌘F / Esc 关闭）
-        ToggleObjectFilter,
+        // 聚焦前缀搜索框：⌘F（仅 Workspace 上下文）
+        FocusObjectSearch,
         // 打开设置：⌘,（菜单 / 快捷键共享）
         OpenSettings,
         // 打开关于弹窗：菜单（设置上方）/ 命令面板共享
@@ -78,7 +78,7 @@ actions!(cloud_storage, [DismissCommandPalette]);
 // 未设 clean_on_escape，Esc 由 Input escape() propagate 到这里。
 actions!(cloud_storage, [DismissRename]);
 
-// 对象列表过滤的关闭（Esc）：仅通过 context "ObjectFilter" 生效。
+// 前缀搜索框的 Esc（清空）与 ⌘L 路径框关闭：context "ObjectFilter"。
 actions!(cloud_storage, [DismissFilter]);
 
 // 无文本输入弹层（对象详情/预览）的统一关闭（Esc）：仅通过 context
@@ -134,7 +134,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", RenameObject, Some("Workspace")),
         // 规范 ⌘F：过滤当前对象列表。Workspace context 绑定，输入框聚焦时
         // 不触发（输入组件原生响应链优先）。
-        KeyBinding::new("cmd-f", ToggleObjectFilter, Some("Workspace")),
+        KeyBinding::new("cmd-f", FocusObjectSearch, Some("Workspace")),
         // 规范 §11：⌘[ 回退 / ⌘] 前进（桶内导航历史）。
         KeyBinding::new("cmd-[", NavigateBack, None),
         KeyBinding::new("cmd-]", NavigateForward, None),

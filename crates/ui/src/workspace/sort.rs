@@ -115,17 +115,6 @@ pub(crate) fn sort_entries(entries: &[ListingEntry], sort: ObjectSort) -> Vec<us
 }
 
 /// 展示顺序：先按排序取全量下标，再与过滤命中求交（过滤不影响 entries 本身）。
-pub(crate) fn display_entry_order(
-    entries: &[ListingEntry],
-    sort: ObjectSort,
-    filtered_ix: Option<&[usize]>,
-) -> Vec<usize> {
-    let sorted = sort_entries(entries, sort);
-    match filtered_ix {
-        Some(ix) => {
-            let keep: std::collections::HashSet<usize> = ix.iter().copied().collect();
-            sorted.into_iter().filter(|i| keep.contains(i)).collect()
-        }
-        None => sorted,
-    }
+pub(crate) fn display_entry_order(entries: &[ListingEntry], sort: ObjectSort) -> Vec<usize> {
+    sort_entries(entries, sort)
 }

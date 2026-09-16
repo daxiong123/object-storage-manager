@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// 前缀搜索输入的规范化（纯函数，单测锁死）。
+///
+/// 规则刻意简单：去空白 → 空串即「回到桶根」（`None`）→ 去掉开头的 `/`
+/// （用户常从地址栏复制 `oss://bucket/path` 那样的串，前导斜杠不该进 key）。
+/// **不**强制补尾斜杠：参照实现的搜索是「文件前缀搜索」，输入 `2025` 应当列出
+/// `2025…` 这些对象，补成 `2025/` 就只剩目录了。
+pub(crate) fn normalize_prefix_query(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches('/').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// 目录前缀的上一级（保持结尾 `/`）；已是根级返回 None。
 pub fn parent_prefix(prefix: &str) -> Option<&str> {
     let trimmed = prefix.trim_end_matches('/');
@@ -17,7 +28,6 @@ impl WorkspaceView {
         self.clear_object_selection();
         // entries 将重建：作废过滤命中缓存（过滤条保留，加载完成后
         // refresh_filter 会按新数据重算；用同一词继续过滤是用户预期）
-        self.filtered_ix = None;
         self.download_message = None;
         self.objects_state = AsyncState::Loading;
         cx.notify();
@@ -27,8 +37,7 @@ impl WorkspaceView {
     /// 下钻到某个目录前缀（压导航历史，⌘[ 可回退）。
     pub(super) fn open_prefix(&mut self, prefix: String, cx: &mut Context<Self>) {
         // 目录切换 = 重上下文切换：关闭过滤条（与跳桶同理）
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.push_nav_history();
         self.current_prefix = Some(prefix);
         self.reload_objects(cx);
@@ -36,6 +45,45 @@ impl WorkspaceView {
 
     /// 导航位置变更前：当前位置压入 back 栈并清空 forward 栈
     /// （浏览器语义：新跳转使 forward 失效）。
+    /// 确保前缀搜索框存在（首次渲染时创建并订阅 Enter）。
+    pub(super) fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input.is_some() {
+            return;
+        }
+        let editor = cx.new(|cx| InputState::new(window, cx).placeholder("文件前缀搜索"));
+        cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                // 参照实现的搜索是**显式提交**（右边那个 🔍），不是边打边查
+                if let InputEvent::PressEnter { .. } = event {
+                    this.commit_prefix_search(window, cx);
+                }
+            },
+        )
+        .detach();
+        self.search_input = Some(editor);
+    }
+
+    /// 提交前缀搜索：把输入值当作列举前缀，压历史并重新列举。
+    ///
+    /// 走 `push_nav_history` 是为了 ⌘[ 能退回搜索前的位置——参照实现里搜索也是一次
+    /// 位置跳转（地址栏会跟着显示新前缀）。
+    pub(super) fn commit_prefix_search(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.search_input.as_ref() else {
+            return;
+        };
+        let raw = editor.read(cx).value().to_string();
+        let normalized = normalize_prefix_query(&raw);
+        if normalized == self.current_prefix {
+            cx.notify();
+            return;
+        }
+        self.push_nav_history();
+        self.current_prefix = normalized;
+        self.reload_objects(cx);
+    }
+
     pub(super) fn push_nav_history(&mut self) {
         self.nav_back.push(self.current_prefix.clone());
         self.nav_forward.clear();
@@ -48,8 +96,7 @@ impl WorkspaceView {
         };
         self.nav_forward.push(self.current_prefix.clone());
         self.current_prefix = previous;
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.reload_objects(cx);
     }
 
@@ -60,8 +107,7 @@ impl WorkspaceView {
         };
         self.nav_back.push(self.current_prefix.clone());
         self.current_prefix = next;
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.reload_objects(cx);
     }
 
@@ -69,8 +115,7 @@ impl WorkspaceView {
         if self.current_prefix.is_none() {
             return;
         }
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.push_nav_history();
         self.current_prefix = None;
         self.reload_objects(cx);
@@ -162,9 +207,6 @@ impl WorkspaceView {
                         }
                         this.next_marker = marker;
                         this.objects_state = AsyncState::Idle;
-                        // 过滤条开着时按新 entries 重算命中（refresh_filter
-                        // 对未开启过滤是 no-op）
-                        this.refresh_filter(cx);
                     }
                     Err(e) => {
                         // 整页失败清空；翻页失败保留已加载数据（见 render_objects）

@@ -109,7 +109,7 @@ impl WorkspaceView {
                             }),
                     ),
             )
-            .child(self.render_object_filter(cx))
+            .child(self.render_object_search(cx))
             .into_any_element()
     }
 
@@ -151,37 +151,34 @@ impl WorkspaceView {
         self.reload_objects(cx);
     }
 
-    /// 工具栏右端：过滤输入框（展开时）或搜索图标按钮。
-    pub(super) fn render_object_filter(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(editor) = &self.object_filter {
-            return h_flex()
-                .id("object-filter")
-                .key_context("ObjectFilter")
-                .w(tokens::text(220.))
-                .items_center()
-                .gap_1()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
-                .child(
-                    Button::new("filter-close")
-                        .icon(Icon::new(IconName::Close))
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_object_filter(window, cx);
-                        })),
-                )
-                .into_any_element();
-        }
-        Button::new("objects-filter")
-            .icon(Icon::new(IconName::Search))
-            .ghost()
-            .with_size(Size::Small)
-            .tooltip("过滤 ⌘F")
+    /// 工具栏右端：**前缀搜索**（参照实现的「文件前缀搜索」）。
+    ///
+    /// 常驻显示（不再是 ⌘F 开关的浮层），右侧一个 🔍 提交按钮——参照实现是
+    /// **显式提交**的查询，不是边打边筛。提交后把输入值当作列举前缀重新请求
+    /// （见 `commit_prefix_search`），所以能查到还没加载出来的对象。
+    pub(super) fn render_object_search(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(editor) = self.search_input.as_ref() else {
+            return div().into_any_element();
+        };
+        h_flex()
+            .id("object-search")
+            .key_context("ObjectFilter")
+            .w(tokens::text(220.))
+            .items_center()
+            .gap_1()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.handle_toggle_object_filter(&ToggleObjectFilter, window, cx);
-            }))
+            .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
+            .child(
+                Button::new("object-search-submit")
+                    .icon(Icon::new(IconName::Search))
+                    .ghost()
+                    .with_size(Size::Small)
+                    .tooltip("按前缀搜索（回车）")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.commit_prefix_search(window, cx)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -193,8 +190,7 @@ impl WorkspaceView {
     ) -> impl IntoElement {
         // 显示顺序在**表头之前**算好并存起来：表头要拿它判断「是否已全选」，
         // 而表头先于列表渲染——放在 render_object_list 里会让表头读到上一帧的缓存。
-        self.display_order =
-            display_entry_order(&self.entries, self.object_sort, self.filtered_ix.as_deref());
+        self.display_order = display_entry_order(&self.entries, self.object_sort);
         let Some(_bucket) = self.selected_bucket.clone() else {
             let (title, hint) = if self.selected_account_id.is_some() {
                 ("选择一个 Bucket", "从左侧列表选择空间，查看其中对象")
@@ -336,6 +332,43 @@ impl WorkspaceView {
         content.into_any_element()
     }
 
+    /// ⌘F：聚焦前缀搜索框（参照实现里搜索是工具栏上的常驻控件）。
+    pub(super) fn handle_focus_object_search(
+        &mut self,
+        _: &FocusObjectSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
+            return;
+        }
+        self.ensure_search_input(window, cx);
+        if let Some(editor) = self.search_input.as_ref() {
+            editor.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Esc：优先关 ⌘L 路径框，否则**清空**搜索框。
+    ///
+    /// 搜索框是常驻控件，Esc 不该把它藏起来（参照实现也没有隐藏态），所以这里是清空
+    /// 而不是关闭；清空后列表保持当前前缀，需再回车才重新列举——与「显式提交」一致。
+    pub(super) fn handle_dismiss_filter(
+        &mut self,
+        _: &DismissFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.path_input.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+        if let Some(editor) = self.search_input.clone() {
+            editor.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+    }
+
     /// 对象列表本体：虚拟列表（`uniform_list`）+ 行级操作列。
     ///
     /// **空白点击清空选择（B6）挂在滚动容器上**：`UniformList` 自己实现了
@@ -359,16 +392,6 @@ impl WorkspaceView {
                 IconName::Inbox,
                 "此目录为空",
                 "拖入文件或文件夹即可上传",
-            );
-        }
-        // ⌘F 过滤开启时只渲染命中项；命中为空给出明确空态。
-        // 过滤与排序都只影响展示：entries 全集与选择集合不动（Finder 语义）。
-        if self.filtered_ix.is_some() && self.display_order.is_empty() {
-            return Self::object_list_placeholder(
-                theme,
-                IconName::Search,
-                "没有匹配的对象",
-                "试试其他关键词，或按 Esc 清除过滤",
             );
         }
 
@@ -895,10 +918,7 @@ impl WorkspaceView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let visible_count = match &self.filtered_ix {
-            Some(ix) => ix.len(),
-            None => self.entries.len(),
-        };
+        let visible_count = self.entries.len();
         let mut bar = h_flex()
             .w_full()
             .flex_shrink_0() // 不被滚动区挤压，恒定钉底

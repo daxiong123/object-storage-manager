@@ -82,8 +82,7 @@ impl WorkspaceView {
         // （⌘R 刷新/翻页保留过滤词——只关这里，不动 reload_objects）
         self.nav_back.clear();
         self.nav_forward.clear();
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.reload_objects(cx);
     }
 
@@ -99,8 +98,7 @@ impl WorkspaceView {
         self.clear_object_selection();
         // 过滤命中缓存基于 entries，数据已换直接作废缓存与过滤条
         // （跳桶是重上下文切换，Finder 同样不保留过滤）。
-        self.object_filter = None;
-        self.filtered_ix = None;
+        self.search_input = None;
         self.download_message = None;
     }
 

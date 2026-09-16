@@ -52,10 +52,10 @@ use crate::PaletteCommand;
 use crate::account_modal::AddAccountModal;
 use crate::actions::{
     AddAccount, CloseWindow, CopyObjectUrl, CycleThemeStyle, DeleteObject, DismissFilter,
-    DismissRename, DownloadObject, FocusPath, NavigateBack, NavigateForward, OpenAbout,
-    OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh, RenameObject,
-    RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll, SelectObjectNext,
-    SelectObjectNextRange, SelectObjectPrev, SelectObjectPrevRange, ToggleObjectFilter,
+    DismissRename, DownloadObject, FocusObjectSearch, FocusPath, NavigateBack, NavigateForward,
+    OpenAbout, OpenCommandPalette, OpenObject, OpenSettings, PreviewObject, Quit, Refresh,
+    RenameObject, RevealInFinder, SaveTextObject, SelectBucketByName, SelectObjectAll,
+    SelectObjectNext, SelectObjectNextRange, SelectObjectPrev, SelectObjectPrevRange,
     ToggleSidebar, UnifiedDismiss, UploadFiles, UploadFolder,
 };
 use crate::command_palette::CommandPaletteView;
@@ -74,7 +74,6 @@ mod buckets;
 mod copy_move;
 mod delete;
 mod download;
-mod filter;
 mod folder;
 mod format;
 mod menus;
@@ -242,16 +241,16 @@ pub struct WorkspaceView {
     renaming: Option<(String, Entity<InputState>)>,
     /// rename 后台执行中（防重入）。
     renaming_busy: bool,
-    /// ⌘F 过滤：Some = 过滤开启（查询词在输入框实体里）。
-    object_filter: Option<Entity<InputState>>,
+    /// 工具栏的**前缀搜索**框（参照实现叫「文件前缀搜索」）。
+    ///
+    /// 懒创建：`WorkspaceView::new` 拿不到 `Window`，所以在首次渲染时建（同
+    /// `ensure_preview_text_editor`）。它是工具栏的常驻控件，不再是 ⌘F 开关的浮层。
+    ///
+    /// 语义与服务端一致：提交时把输入值作为 `ListObjectsRequest::prefix` **重新列举**，
+    /// 因此能查到「还没加载出来」的对象；本地过滤做不到这点。
+    search_input: Option<Entity<InputState>>,
     /// ⌘L 路径跳转输入框（Some = 打开中；回车跳转，Esc 经 DismissFilter 关闭）。
     path_input: Option<Entity<InputState>>,
-    /// 过滤命中缓存（render 时由 filter_entries 计算；None = 未开启过滤）。
-    filtered_ix: Option<Vec<usize>>,
-    /// 上一次生效的过滤查询词（已 trim）。用来判断「查询词有没有变」——
-    /// 只有真变了才丢弃对象选择（见 `refresh_filter`）：该函数在数据重载/翻页后
-    /// 也会被调用，那时清选择是误伤。
-    filter_query: String,
     /// 对象列表排序方式（工具栏循环切换；Natural = 列举原序）。
     object_sort: ObjectSort,
     /// 当前帧的显示顺序（`entries` 下标序列，已应用排序与过滤）。
@@ -408,6 +407,8 @@ impl gpui::Focusable for WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_preview_text_editor(window, cx);
+        // 前缀搜索框是工具栏常驻控件：懒创建（new() 拿不到 Window）
+        self.ensure_search_input(window, cx);
         let theme = cx.theme().clone();
         let mut root = v_flex()
             .id("workspace")
@@ -445,7 +446,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_select_object_next_range))
             .on_action(cx.listener(Self::handle_rename_object))
             .on_action(cx.listener(Self::handle_dismiss_rename))
-            .on_action(cx.listener(Self::handle_toggle_object_filter))
+            .on_action(cx.listener(Self::handle_focus_object_search))
             .on_action(cx.listener(Self::handle_dismiss_filter))
             .on_action(cx.listener(Self::handle_select_bucket_by_name))
             .on_action(cx.listener(Self::handle_open_settings))
@@ -595,10 +596,8 @@ impl WorkspaceView {
             selection_anchor: None,
             renaming: None,
             renaming_busy: false,
-            object_filter: None,
+            search_input: None,
             path_input: None,
-            filtered_ix: None,
-            filter_query: String::new(),
             object_sort: ObjectSort::default(),
             display_order: Vec::new(),
             object_list_scroll: UniformListScrollHandle::new(),
