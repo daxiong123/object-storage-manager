@@ -716,6 +716,30 @@ fn entry_object(key: &str) -> ListingEntry {
 }
 
 #[test]
+fn display_slot_accounts_for_directory_prefixes() {
+    // 虚拟列表的 item 下标 = 显示顺序里的槽位；目录前缀也占槽位。
+    // 这条守着键盘导航「把选中行滚进视野」不会滚错位置。
+    let entries = vec![
+        ListingEntry::CommonPrefix("photos/".into()),
+        entry_object("a.txt"),
+        ListingEntry::CommonPrefix("reports/".into()),
+        entry_object("b.txt"),
+    ];
+    let natural: Vec<usize> = (0..entries.len()).collect();
+    assert_eq!(display_slot_of_key(&entries, &natural, "a.txt"), Some(1));
+    assert_eq!(display_slot_of_key(&entries, &natural, "b.txt"), Some(3));
+
+    // 反序（模拟「名称降序」排序）后槽位随之改变
+    let reversed = vec![3, 2, 1, 0];
+    assert_eq!(display_slot_of_key(&entries, &reversed, "b.txt"), Some(0));
+    assert_eq!(display_slot_of_key(&entries, &reversed, "a.txt"), Some(2));
+
+    // 被过滤掉（不在显示顺序里）或不存在 → 没有槽位，不滚
+    assert_eq!(display_slot_of_key(&entries, &[2, 0], "b.txt"), None);
+    assert_eq!(display_slot_of_key(&entries, &natural, "missing.txt"), None);
+}
+
+#[test]
 fn object_selection_ix_ignores_directory_prefixes() {
     let entries = vec![
         ListingEntry::CommonPrefix("photos/".into()),

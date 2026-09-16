@@ -273,6 +273,39 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 ### 杂项
 - 查 crates.io API（版本号等）需要带 `User-Agent` 头，否则被拒。
 
+## 虚拟列表（列表选型，已核实）
+
+三个候选，**选 `gpui::uniform_list`**，理由如下（都是实测过的接口事实）：
+
+- **`gpui::uniform_list`（gpui 本体）实现了 `InteractiveElement`**
+  （`elements/uniform_list.rs:714`）→ 可以 `.on_mouse_down(..)` / `.on_click(..)`，
+  也就意味着**空白点击这类「挂在滚动容器自己身上」的处理器仍然可用**。
+  这是它胜出的决定性原因（见 agents.md 的 B6 规约：处理器必须落在滚动容器上，
+  挂到祖先容器历史上失败过）。
+- **`v_virtual_list` / `VirtualList`（gpui-base，经 gpui-component 再导出）
+  只实现了 `Styled`**（`gpui-base/src/virtual_list.rs:230`），没有
+  `InteractiveElement` → **挂不上任何鼠标事件**。若选它，B6 的清空处理器只能挂到
+  祖先 div 上，正是踩过坑的那版。
+- **`uniform_list` 按第 0 行（`item_to_measure_index`，默认 0）的高度给所有行排版**：
+  `content_height = item_height * item_count`、`item_top = item_height * item_index`
+  （`uniform_list.rs:371/397/427`）。所以**所有行必须等高**，行不能再由内容撑开——
+  行内多挂一行文字（如校验提示）会让该行比定高更高而被裁掉或与邻行重叠，此时应把
+  那行文字移出行外（横幅）。
+- **`uniform_list` 的行闭包签名是 `Fn(Range<usize>, &mut Window, &mut App)`——拿不到
+  `&mut self`**。用 **`Context::processor`**（`app/context.rs:264`）桥接：
+  `cx.processor(|this: &mut Self, range, window, cx| ...)` 会捕获 `entity()` 并在调用时
+  `view.update(cx, ..)`，把签名适配成元素要的 `'static` 闭包。闭包在 layout/prepaint
+  阶段才被调用（render 已返回），因此不会与 render 期间的借用冲突。
+- **`UniformListScrollHandle`**（`UniformListScrollHandle::new()`）配 `.track_scroll(&h)`；
+  `scroll_to_item(ix, ScrollStrategy::Nearest)` 是**非严格**滚动（已可见则不动），
+  适合作「键盘导航把选中行带进视野」，不会把列表来回拽。
+- **`v_virtual_list` 若真要用**：`v_virtual_list(view: Entity<V>, id, item_sizes:
+  Rc<Vec<Size<Pixels>>>, f: Fn(&mut V, Range<usize>, &mut Window, &mut Context<V>) -> Vec<R>)`
+  ——它**给 `&mut V`**（比 uniform_list 方便），但行高要调用方自己给准，且没有交互能力。
+- 行内重命名这类「行内要塞控件」的场景注意：`Input::small()` 的高度是库按
+  `Size::Small => h_6()` 固定的 **24px**（`gpui-component/src/sizing.rs:265`），
+  **不随字号缩放**；定高行必须为它留量，否则字号放大后输入框会被裁。
+
 ## 动效（能力边界，已核实）
 
 - **`with_animation` 已内建 `reduce_motion` 支持（勿重复实现）**：`AnimationExt`

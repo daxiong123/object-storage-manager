@@ -344,10 +344,35 @@ impl WorkspaceView {
         });
         self.object_menu_open = None;
         self.top_more_open = false;
+        // 把新的主选滚进视野：虚拟列表只渲染可见区间，长列表里「选中了但看不见」
+        // 等于没有反馈。`order` 含目录前缀，所以它的下标就是 uniform_list 的 item
+        // 下标（`keys` 只含对象、不能直接用）。用 Nearest 非严格滚动：已在视野内
+        // 就不动，避免方向键把列表来回拽。
+        if let Some(selected) = self.selected_object_key.as_deref()
+            && let Some(slot) = display_slot_of_key(&self.entries, &order, selected)
+        {
+            self.object_list_scroll
+                .scroll_to_item(slot, ScrollStrategy::Nearest);
+        }
         if self.preview_overlay_open && changed {
             self.start_object_preview(cx);
         } else {
             cx.notify();
         }
     }
+}
+
+/// 显示顺序里某个对象 Key 的**槽位**下标（= 虚拟列表 `uniform_list` 的 item 下标）。
+///
+/// 必须按 `order`（含目录前缀、已应用排序与过滤）数，不能按「只含对象的 keys」
+/// 数：目录前缀同样占一个槽位，用 keys 的下标当槽位会把列表滚到错位置——行数少
+/// 时看不出来，长列表里越滚越偏。与 `object_selection_ix` 是同一类索引陷阱。
+pub(super) fn display_slot_of_key(
+    entries: &[ListingEntry],
+    order: &[usize],
+    key: &str,
+) -> Option<usize> {
+    order
+        .iter()
+        .position(|&ix| entries.get(ix).and_then(object_key) == Some(key))
 }

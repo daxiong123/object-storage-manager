@@ -16,6 +16,7 @@
 //! 串台防护：每次异步加载携带自增代号（generation）。用户快速切换账号/桶时，
 //! 过期任务的结果因代号不匹配被丢弃，不会覆盖新选中项的状态。
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,8 +24,9 @@ use gpui::{
     Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, ClickEvent, Context, Entity,
     ExternalPaths, FocusHandle, Img, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Point, PromptButton,
-    PromptLevel, Render, SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _,
-    Window, anchored, deferred, div, img, point, prelude::FluentBuilder, px,
+    PromptLevel, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled,
+    StyledImage as _, UniformListScrollHandle, Window, anchored, deferred, div, img, point,
+    prelude::FluentBuilder, px, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Sizable, Size, Theme, TitleBar, button::Button,
@@ -240,6 +242,15 @@ pub struct WorkspaceView {
     filtered_ix: Option<Vec<usize>>,
     /// 对象列表排序方式（工具栏循环切换；Natural = 列举原序）。
     object_sort: ObjectSort,
+    /// 当前帧的显示顺序（`entries` 下标序列，已应用排序与过滤）。
+    ///
+    /// 每帧在 `render_object_list` 里重算一次并存到这里，而不是让行渲染闭包
+    /// 各自去算：闭包每被调用一次就重排+重过滤一遍是 O(行数 log 行数)，
+    /// 每帧会跑多次。存**下标**而不是克隆条目：既省掉 clone，也让「缓存过期」
+    /// 只可能表现为下标越界，由取用处的 `get()` 兜住（不会渲染出错行）。
+    display_order: Vec<usize>,
+    /// 对象列表的虚拟滚动句柄（`uniform_list` 绑定；键盘导航用它把选中行滚进视野）。
+    object_list_scroll: UniformListScrollHandle,
     /// 应用设置（settings.json 快照；⌘, 可改）。
     settings: object_storage_persistence::Settings,
     /// settings.json 路径（模态展示与保存用）。
@@ -564,6 +575,8 @@ impl WorkspaceView {
             path_input: None,
             filtered_ix: None,
             object_sort: ObjectSort::default(),
+            display_order: Vec::new(),
+            object_list_scroll: UniformListScrollHandle::new(),
             settings,
             settings_path,
             settings_modal: None,
@@ -605,7 +618,11 @@ impl WorkspaceView {
         this
     }
 
-    pub(super) fn render_body(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_body(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // 每种 sidebar 布局变体独立 group id：折叠态互不串宽。
         let group_id: &'static str = if self.sidebar_collapsed {
             "workspace-layout-content-only"

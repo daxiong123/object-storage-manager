@@ -136,6 +136,33 @@ pub fn row_pad_y_transfer() -> Pixels {
     px(4.)
 }
 
+/// 对象列表行盒高度（不含上下内边距）。
+///
+/// 对象列表走虚拟列表（`gpui::uniform_list`），它**按第 0 行的高度给所有行
+/// 排版**（`item_height * item_count`），所以行高必须是确定的，不能像侧栏
+/// 那样由内容撑开——原先「行高由内容撑开，不另设固定行高」的约定只适用于
+/// 非虚拟列表。
+///
+/// 取 22 是为了**对齐改造前实测的行高 34pt**（22 + 上下内边距 12；见 agents.md
+/// 「B6 复验要点」里按行高估算空白区的记法），换虚拟列表不应该顺带改变行距密度。
+/// 22 也明显大于行内 `Input::small()` 的 24px 高度与正文行盒，留量充足。
+const ROW_BOX: f32 = 22.;
+
+/// 对象列表行高 = 行盒 + 上下内边距。
+///
+/// 行必须显式用这个高度（`.h(row_height())`）**并且**同时设
+/// `row_line_height()`，二者一起保证「行高 = 行盒 + 内边距 + 边框」恒等：
+/// 只固定高度而不固定行盒，文字的行盒高度由字体度量决定，字号缩放后可能
+/// 高于或低于行盒，表现为裁字或行间留缝。
+pub fn row_height() -> Pixels {
+    text(ROW_BOX) + row_pad_y() * 2
+}
+
+/// 行内文字的行盒高度（与 `row_height()` 同一基准，一起改）。
+pub fn row_line_height() -> Pixels {
+    text(ROW_BOX)
+}
+
 /// 对象列表「大小」列宽（100% 字号下的设计值）。必须随字号缩放：
 /// 固定像素在 140% 档位会被「最新修改时间」表头和时间串撑爆。
 pub fn col_size_width() -> Pixels {
@@ -225,5 +252,40 @@ mod tests {
             ramp.windows(2).all(|pair| pair[0] < pair[1]),
             "字号阶梯必须严格递增：{ramp:?}"
         );
+    }
+
+    #[test]
+    fn row_height_fits_the_inline_rename_input() {
+        let _guard = scale_guard();
+        // 虚拟列表按第 0 行定高，所以行高必须能容下行内重命名的
+        // `Input::small()`（gpui-component 按 h_6() 固定 24px，不随字号缩放）。
+        // 这条不变量一旦破了，重命名时输入框会被定高裁掉——而且只在
+        // 「点了重命名」时才看得见，最容易漏掉。
+        const INPUT_SMALL_HEIGHT: f32 = 24.;
+        for scale in [1.0_f32, 1.4] {
+            set_ui_font_scale(scale);
+            assert!(
+                row_height() >= px(INPUT_SMALL_HEIGHT),
+                "字号 {scale} 下行高 {:?} 容不下 24px 的 Input::small()",
+                row_height()
+            );
+            // 行盒必须小于行高（否则内边距被吃掉），且行高必须跟随字号缩放
+            assert!(row_line_height() < row_height());
+        }
+        set_ui_font_scale(1.0);
+    }
+
+    #[test]
+    fn row_height_follows_font_scale() {
+        let _guard = scale_guard();
+        let base_line = row_line_height();
+        let base = row_height();
+        set_ui_font_scale(1.4);
+        // 行盒随字号缩放，内边距是固定像素——所以总高度不是简单 ×1.4
+        assert_eq!(row_line_height(), base_line * 1.4);
+        assert_eq!(row_height(), row_line_height() + row_pad_y() * 2.);
+        assert!(row_height() > base, "字号变大后行高必须变大");
+        // 增量应恰为行盒的增量；f32 下用容差而不是精确相等
+        assert!((row_height() - base - base_line * 0.4).abs() < px(0.01));
     }
 }
