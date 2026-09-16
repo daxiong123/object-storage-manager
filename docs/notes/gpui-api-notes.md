@@ -273,37 +273,6 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 ### 杂项
 - 查 crates.io API（版本号等）需要带 `User-Agent` 头，否则被拒。
 
-## 窗口材质 / 侧栏透光（已核实）
-
-- **`WindowBackgroundAppearance::Blurred` 是 gpui 原生能力，不用自己写 objc**：
-  `gpui-pre-macos/src/window.rs:1659` 的 `set_background_appearance` 做三件事——
-  `native_window.setOpaque(false)`、把窗口底色设为 **alpha 0.0001**（注释说明刻意
-  不用 `+[NSColor clearColor]`，否则窗口阴影会坏）、并插入一个铺满 contentView 的
-  模糊视图。该视图是 `NSVisualEffectView` 的子类（`BlurredView`，类定义在 `:304`），
-  材质 `NSVisualEffectMaterial::Selection` + `state = Active`（注释：无彩语义材质），
-  用 `addSubview:positioned:NSWindowBelow relativeTo:nil` 放在最底层，
-  `NSViewWidthSizable | NSViewHeightSizable` 自动跟随窗口尺寸。
-- 运行时切换用 `Window::set_background_appearance(...)`（`window.rs:2750`），
-  所以「按主题开关透光」是支持的，不必在窗口创建时定死。
-- **陷阱：`gpui_component::Root` 会铺满整窗的不透明底色**（`root.rs:592` 的
-  `.bg(cx.theme().tokens.background)`），它会把材质整个盖住——只让子视图透明是没用的，
-  因为在 gpui 里**父视图的底色画在子视图之下**，你看到的是父的底色。
-- **不要**为了透光把 `tokens.background` 改成透明：该 token 在库内有 **26 处**读取
-  （`kbd.rs` / `separator.rs` / `tab.rs` / `sheet.rs` / `color_picker.rs` / `inspector.rs` …），
-  一起变透会波及 Kbd 键帽、分隔线、Tab、Sheet。
-- **正确做法**：`Root` 实现了 `Styled`（`root.rs:572`），而它的 render 是
-  先 `.bg(tokens.background)`、**之后才** `.refine_style(&self.style)` —— 所以在构造时
-  覆写即可盖掉：
-  ```rust
-  cx.new(|cx| Root::new(workspace, window, cx).bg(rgba(0x00000000)))
-  ```
-  前提是**子视图自己负责铺底色**（我们让 `WorkspaceView` 铺：Linear 铺不透明、
-  Waku 让出侧栏那块），否则任何缝隙会露出窗口底色。
-- **验收方法（像素级，可脚本化）**：材质会**实时采样窗口背后的内容**，所以把窗口
-  移到不同背景上，透光区域的像素值必须随之变化。实测：位置 (180,160) 采到
-  `(241,241,241)`、位置 (420,470) 采到 `(247,247,247)` —— 变则透光生效；
-  若恒定不变，说明被某个不透明元素盖住了。
-
 ## 虚拟列表（列表选型，已核实）
 
 三个候选，**选 `gpui::uniform_list`**，理由如下（都是实测过的接口事实）：

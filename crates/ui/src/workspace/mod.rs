@@ -63,7 +63,6 @@ use crate::settings_modal::SettingsModal;
 use crate::tokens;
 use crate::ui;
 use crate::ui::overlay;
-use object_storage_persistence::ThemeStyle;
 
 // 各 feature 模块（对齐 waku 的 src/app/* 分层）。子模块以 `use super::*;` 取用
 // 本模块的类型与 import；这里把它们的条目 glob 回来，使整棵模块树看到的名称与拆分前
@@ -259,8 +258,6 @@ pub struct WorkspaceView {
     display_order: Vec<usize>,
     /// 对象列表的虚拟滚动句柄（`uniform_list` 绑定；键盘导航用它把选中行滚进视野）。
     object_list_scroll: UniformListScrollHandle,
-    /// 已下发给窗口的视觉风格（用于避免每帧重复设置窗口材质）。
-    applied_backdrop_style: Option<ThemeStyle>,
     /// 应用设置（settings.json 快照；⌘, 可改）。
     settings: object_storage_persistence::Settings,
     /// settings.json 路径（模态展示与保存用）。
@@ -394,12 +391,6 @@ impl gpui::Focusable for WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_preview_text_editor(window, cx);
-        // 窗口材质（侧栏透光）随视觉风格切换：只在风格变化时真正下发
-        crate::theme::sync_window_backdrop(
-            self.settings.theme_style,
-            &mut self.applied_backdrop_style,
-            window,
-        );
         let theme = cx.theme().clone();
         let mut root = v_flex()
             .id("workspace")
@@ -448,12 +439,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_navigate_back))
             .on_action(cx.listener(Self::handle_navigate_forward))
             .on_action(cx.listener(Self::handle_focus_path))
-            // 开透光时根容器**不铺底色**：否则会把侧栏那块区域的系统材质整个盖掉。
-            // 各区域自绘自己的底色（内容区/标题栏不透明，侧栏透明）。
-            .when(
-                !crate::theme::window_canvas_is_transparent(self.settings.theme_style),
-                |root| root.bg(theme.background),
-            )
+            .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_title_bar(&theme, cx))
             .child(self.render_body(&theme, cx));
@@ -599,7 +585,6 @@ impl WorkspaceView {
             object_sort: ObjectSort::default(),
             display_order: Vec::new(),
             object_list_scroll: UniformListScrollHandle::new(),
-            applied_backdrop_style: None,
             settings,
             settings_path,
             settings_modal: None,

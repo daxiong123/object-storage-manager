@@ -242,9 +242,7 @@ fn waku_light_palette() -> Palette {
         muted: raised,
         muted_foreground: rgb(0x666666),
         border,
-        // 侧栏：**半透明染色**（不是全透明——见 `SIDEBAR_TINT_ALPHA` 的说明）。
-        // 系统材质由窗口层提供，见 `sync_window_backdrop`。
-        sidebar: sidebar_tint(0.925),
+        sidebar: canvas,
         sidebar_foreground: rgb(0x242424),
         sidebar_border: border,
         popover: canvas,
@@ -331,8 +329,7 @@ fn waku_dark_palette() -> Palette {
         muted: raised,
         muted_foreground: rgb(0xA3A3A3),
         border,
-        // 见亮色套的说明：侧栏是半透明染色，不是全透明。
-        sidebar: sidebar_tint(0.135),
+        sidebar: canvas,
         sidebar_foreground: rgb(0xE2E2E2),
         sidebar_border: border,
         popover: raised,
@@ -552,23 +549,6 @@ fn dark_palette(style: ThemeStyle) -> Palette {
     }
 }
 
-/// 侧栏染色的不透明度。
-///
-/// **踩过的坑**：一开始我把侧栏设成 `transparent_black()`（照搬上游「侧栏透明」的说法），
-/// 结果整块侧栏看起来**就是个洞**——因为 gpui 给 `Blurred` 用的材质是
-/// `NSVisualEffectMaterial::Selection`（gpui-pre-macos 注释自己写明是「无彩语义材质」），
-/// 它几乎没有存在感，只靠它撑不起一个面。
-///
-/// 真实的 macOS 侧栏 = **材质 + 一层染色**。这里补的就是染色那一半：材质仍在背后实时
-/// 采样（透光还在），但面板本身有明确的底色，读起来是「面」而不是「洞」。
-/// 0.62 是让「看得出透光」与「不糊成一片」都能成立的位置，改小会越来越像洞。
-const SIDEBAR_TINT_ALPHA: f32 = 0.62;
-
-/// 侧栏染色：中性灰 + 半透明（`lightness` 取该模式下接近 canvas 的亮度）。
-fn sidebar_tint(lightness: f32) -> [f32; 4] {
-    hsla(0., 0., lightness, SIDEBAR_TINT_ALPHA)
-}
-
 /// HSL（h: 0..360, s/l: 0..1）→ HSLA 分量数组（alpha = 1）。
 fn hsl(h_deg: f32, s: f32, l: f32) -> [f32; 4] {
     hsla(h_deg, s, l, 1.0)
@@ -610,48 +590,6 @@ fn hsla_to_hex([h, s, l, a]: [f32; 4]) -> String {
         channel(h - 1.0 / 3.0),
         (a * 255.0).round().clamp(0.0, 255.0) as u8
     )
-}
-
-/// 该风格是否用系统材质给侧栏做透光。
-///
-/// 只有 Waku 用：它的侧栏是 `transparent_black`，靠窗口层的 `NSVisualEffectView`
-/// 提供模糊背景；Linear 是**不透明**冷灰面，没有可透的东西。所以这个判据同时决定
-/// 两件事：窗口要不要开 `WindowBackgroundAppearance::Blurred`，以及根容器要不要
-/// 让出底色（见 `window_canvas_is_transparent`）。
-pub fn sidebar_vibrancy(style: ThemeStyle) -> bool {
-    matches!(style, ThemeStyle::Waku)
-}
-
-/// 根容器是否**不画**底色。
-///
-/// 透光的前提是「侧栏那块区域没有任何不透明元素盖住」——而根容器当前是
-/// `bg(theme.background)` 铺满整窗的，会把材质整个盖掉。所以开透光时根容器让出底色，
-/// 改由各区域自绘（内容区 / 标题栏本来就画自己的不透明底色，侧栏画透明）。
-/// 不开透光时根容器照旧铺满——否则任何没被覆盖的缝隙会露出窗口底色。
-pub fn window_canvas_is_transparent(style: ThemeStyle) -> bool {
-    sidebar_vibrancy(style)
-}
-
-/// 按风格同步窗口的背景材质（`Opaque` ⇄ `Blurred`），只在风格变化时真正下发。
-///
-/// gpui 在 macOS 上原生实现了 `Blurred`：`setOpaque(false)` + 一个铺满内容视图的
-/// `NSVisualEffectView`（材质 `Selection`，`state = Active`）插在最底层
-/// （gpui-pre-macos `window.rs:1659`）。所以**不需要我们自己写 objc 绑定**。
-pub fn sync_window_backdrop(
-    style: ThemeStyle,
-    applied: &mut Option<ThemeStyle>,
-    window: &mut gpui::Window,
-) {
-    if *applied == Some(style) {
-        return;
-    }
-    let appearance = if sidebar_vibrancy(style) {
-        gpui::WindowBackgroundAppearance::Blurred
-    } else {
-        gpui::WindowBackgroundAppearance::Opaque
-    };
-    window.set_background_appearance(appearance);
-    *applied = Some(style);
 }
 
 /// 亮/暗两套主题配置。
