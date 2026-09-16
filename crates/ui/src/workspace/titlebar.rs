@@ -1,6 +1,26 @@
 //! Unified Titlebar：导航按钮、当前位置（路径输入 / 面包屑）、过滤与上传入口。
+//!
+//! **标题栏里的交互控件必须拦掉 click 冒泡**（用下面的 `stop_click`）。
+//!
+//! 统一标题栏（gpui-component `TitleBar`）在 macOS 上把**双击**当窗口缩放：
+//! `on_double_click → window.titlebar_double_click()`；而 `on_double_click` 不过是
+//! `on_click` 加了 `click_count == 2` 过滤（gpui-base `event.rs`）。文本输入框依赖
+//! **双击选词**，事件冒泡上去就会顺手把窗口缩放掉——表现为「输入框里的文字选不中」。
+//!
+//! 为什么只拦 `on_mouse_down` 不够：它只在 **bubble 阶段**生效
+//! （gpui-pre `elements/div.rs`），而 Input 自己的 mouse_down 处理在更深一层，
+//! 且 Input 全模块都不拦 click（只有 `on_scroll_wheel` 里有 stop_propagation），
+//! 所以 click 会原样冒到 TitleBar。
+//!
+//! 拦 click 不会影响输入框选词：Input 的选词在它自己的 `on_mouse_down` 里按
+//! `event.click_count` 处理，不依赖 click 事件本身。
 
 use super::*;
+
+/// click 来临时掐掉冒泡（配合 `.on_click(stop_click)` 使用），理由见模块注释。
+fn stop_click(_: &ClickEvent, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
+}
 
 pub(super) fn breadcrumb_prefixes(prefix: Option<&str>) -> Vec<(String, String)> {
     let Some(prefix) = prefix else {
@@ -175,6 +195,8 @@ impl WorkspaceView {
                 .items_center()
                 .gap_2()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // 双击选词不能被标题栏当成「缩放窗口」（见模块注释）
+                .on_click(stop_click)
                 .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
                 .child(
                     div()
@@ -204,9 +226,16 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
+            .id("title-trailing")
             .flex_shrink_0()
             .items_center()
             .gap_1()
+            // 这一组全是交互控件（过滤框 / 上传 / 更多）：双击它们不该被标题栏
+            // 当「缩放窗口」。放在容器上而不是逐个控件：容器在冒泡里**晚于**
+            // 所有后代，所以不会像加到 Button 上那样挤掉按钮自己的 on_click
+            // （Button 的 click 监听注册顺序我无法在此核实，加到 Button 上有
+            // 让按钮失灵的风险）。
+            .on_click(stop_click)
             .when(has_bucket, |row| {
                 row.child(self.render_title_filter(theme, cx))
                     .child(
@@ -260,6 +289,8 @@ impl WorkspaceView {
                 .items_center()
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // 双击选词不能被标题栏当成「缩放窗口」（见模块注释）
+                .on_click(stop_click)
                 .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
                 .child(
                     Button::new("filter-close")
