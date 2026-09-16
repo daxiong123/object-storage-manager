@@ -242,7 +242,10 @@ fn waku_light_palette() -> Palette {
         muted: raised,
         muted_foreground: rgb(0x666666),
         border,
-        sidebar: canvas,
+        // 侧栏**透明**：同上游在 macOS 上的 `transparent_black` 用法，让系统
+        // 材质（NSVisualEffectView）透出来。真正的材质由窗口层提供，见
+        // `sync_window_backdrop`。
+        sidebar: transparent_black(),
         sidebar_foreground: rgb(0x242424),
         sidebar_border: border,
         popover: canvas,
@@ -329,7 +332,8 @@ fn waku_dark_palette() -> Palette {
         muted: raised,
         muted_foreground: rgb(0xA3A3A3),
         border,
-        sidebar: canvas,
+        // 见亮色套的说明：侧栏透明，系统材质透出。
+        sidebar: transparent_black(),
         sidebar_foreground: rgb(0xE2E2E2),
         sidebar_border: border,
         popover: raised,
@@ -549,6 +553,11 @@ fn dark_palette(style: ThemeStyle) -> Palette {
     }
 }
 
+/// 完全透明（保持 HSLA 分量形态，便于参与色板）。
+fn transparent_black() -> [f32; 4] {
+    [0., 0., 0., 0.]
+}
+
 /// HSL（h: 0..360, s/l: 0..1）→ HSLA 分量数组（alpha = 1）。
 fn hsl(h_deg: f32, s: f32, l: f32) -> [f32; 4] {
     hsla(h_deg, s, l, 1.0)
@@ -590,6 +599,48 @@ fn hsla_to_hex([h, s, l, a]: [f32; 4]) -> String {
         channel(h - 1.0 / 3.0),
         (a * 255.0).round().clamp(0.0, 255.0) as u8
     )
+}
+
+/// 该风格是否用系统材质给侧栏做透光。
+///
+/// 只有 Waku 用：它的侧栏是 `transparent_black`，靠窗口层的 `NSVisualEffectView`
+/// 提供模糊背景；Linear 是**不透明**冷灰面，没有可透的东西。所以这个判据同时决定
+/// 两件事：窗口要不要开 `WindowBackgroundAppearance::Blurred`，以及根容器要不要
+/// 让出底色（见 `window_canvas_is_transparent`）。
+pub fn sidebar_vibrancy(style: ThemeStyle) -> bool {
+    matches!(style, ThemeStyle::Waku)
+}
+
+/// 根容器是否**不画**底色。
+///
+/// 透光的前提是「侧栏那块区域没有任何不透明元素盖住」——而根容器当前是
+/// `bg(theme.background)` 铺满整窗的，会把材质整个盖掉。所以开透光时根容器让出底色，
+/// 改由各区域自绘（内容区 / 标题栏本来就画自己的不透明底色，侧栏画透明）。
+/// 不开透光时根容器照旧铺满——否则任何没被覆盖的缝隙会露出窗口底色。
+pub fn window_canvas_is_transparent(style: ThemeStyle) -> bool {
+    sidebar_vibrancy(style)
+}
+
+/// 按风格同步窗口的背景材质（`Opaque` ⇄ `Blurred`），只在风格变化时真正下发。
+///
+/// gpui 在 macOS 上原生实现了 `Blurred`：`setOpaque(false)` + 一个铺满内容视图的
+/// `NSVisualEffectView`（材质 `Selection`，`state = Active`）插在最底层
+/// （gpui-pre-macos `window.rs:1659`）。所以**不需要我们自己写 objc 绑定**。
+pub fn sync_window_backdrop(
+    style: ThemeStyle,
+    applied: &mut Option<ThemeStyle>,
+    window: &mut gpui::Window,
+) {
+    if *applied == Some(style) {
+        return;
+    }
+    let appearance = if sidebar_vibrancy(style) {
+        gpui::WindowBackgroundAppearance::Blurred
+    } else {
+        gpui::WindowBackgroundAppearance::Opaque
+    };
+    window.set_background_appearance(appearance);
+    *applied = Some(style);
 }
 
 /// 亮/暗两套主题配置。
