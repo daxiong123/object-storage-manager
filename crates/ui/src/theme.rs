@@ -249,7 +249,8 @@ fn waku_light_palette() -> Palette {
         secondary: raised,
         secondary_hover: inset,
         secondary_active: rgb(0xDEDEDE),
-        input: canvas,
+        // 控件边框：比表格分隔线明显一档（分隔线可以极浅，控件边框不行）
+        input: hsla(WAKU_HUE_NEUTRAL, 0.10, 0.12, 0.25),
         list: canvas,
         list_even: raised,
         list_head: raised,
@@ -336,7 +337,7 @@ fn waku_dark_palette() -> Palette {
         secondary: raised,
         secondary_hover: rgb(0x2C2C2C),
         secondary_active: rgb(0x353535),
-        input: raised,
+        input: hsla(WAKU_HUE_NEUTRAL, 0.10, 0.90, 0.30),
         list: canvas,
         list_even: raised,
         list_head: inset,
@@ -425,7 +426,9 @@ fn oss_browser_light_palette() -> Palette {
         secondary: rgb(0xFAFAFC),
         secondary_hover: rgb(0xF2F2F2),
         secondary_active: rgb(0xEFEFEF),
-        input: rgb(0xFFFFFF),
+        // Ant 的控件边框是 `@border-color-base` = #d9d9d9——比表格分隔线 #f0f0f0
+        // 明显更深；两者混用会让复选框「没有边框」。
+        input: rgb(0xD9D9D9),
         list: rgb(0xFFFFFF),
         list_even: rgb(0xFAFAFC),
         list_head: rgb(0xFAFAFC),
@@ -508,7 +511,7 @@ fn oss_browser_dark_palette() -> Palette {
         secondary: rgb(0x1F1F1F),
         secondary_hover: rgb(0x262626),
         secondary_active: rgb(0x303030),
-        input: rgb(0x1F1F1F),
+        input: rgb(0x424242),
         list: rgb(0x141414),
         list_even: rgb(0x1A1A1A),
         list_head: rgb(0x1F1F1F),
@@ -587,7 +590,9 @@ fn light_palette(style: ThemeStyle) -> Palette {
         secondary: n(0.12, 0.955),
         secondary_hover: n(0.10, 0.935),
         secondary_active: n(0.12, 0.915),
-        input: hsl(0., 0., 1.0),
+        // `input` 是**控件边框**色（复选框未选中态与输入框边框都用它，见下面的测试），
+        // 取比 border 略深一档，保证在浅底上看得见。
+        input: n(0.12, 0.86),
         list: hsl(0., 0., 1.0),
         list_even: n(0.14, 0.985),
         list_head: n(0.14, 0.978),
@@ -666,7 +671,7 @@ fn dark_palette(style: ThemeStyle) -> Palette {
         secondary: n(0.08, 0.16),
         secondary_hover: n(0.08, 0.20),
         secondary_active: n(0.08, 0.24),
-        input: n(0.09, 0.10),
+        input: n(0.08, 0.30),
         list: n(0.09, 0.075),
         list_even: n(0.08, 0.09),
         list_head: n(0.09, 0.065),
@@ -1277,6 +1282,34 @@ mod tests {
                 p.row_hover
             );
             assert_ne!(p.row_hover, p.list_active, "{name}: hover ≠ 选中色");
+        }
+    }
+
+    #[test]
+    fn control_border_is_visible_against_the_input_background() {
+        // `theme.input` 是**控件边框**色，不是输入框底色：
+        // gpui-component 用 `cx.theme().input` 画复选框的未选中边框
+        // （checkbox.rs:231）与输入框边框（input.rs 的 `border_color`），
+        // 而输入框**底色**另走 `input_background()`（亮色=background，
+        // 暗色=input 混 30% 透明）。
+        //
+        // 我一度把它当底色填成纯白，结果复选框「没有边框」——这条测试把
+        // 「边框必须与它所处的底明显不同」钉住，不靠肉眼发现。
+        for (name, p) in all_palettes() {
+            let [_, _, l, a] = p.input;
+            let bg_l = p.background[2];
+            let dark = bg_l < 0.5;
+            let border_l = if dark {
+                // 暗色的 input_background() 是 input 与透明 30% 混合，再叠在 background 上
+                0.3 * l + 0.7 * bg_l
+            } else {
+                a * l + (1. - a) * bg_l
+            };
+            assert!(
+                (border_l - bg_l).abs() >= 0.05,
+                "{name}: 控件边框与输入框底色太接近（{border_l:.3} vs {bg_l:.3}）——\
+                 复选框会看起来「没有边框」"
+            );
         }
     }
 
