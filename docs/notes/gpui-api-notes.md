@@ -395,12 +395,23 @@ gpui 不建 AX 树，UI 内部交互没法脚本化；但**单个视图的视觉
 不必人肉看、也不必抢用户焦点：
 
 ```bash
-# 1) 例子程序把视图放进一个 focus:false 的窗口（crates/desktop/examples/*_preview.rs）
-nohup ./target/debug/examples/provider_picker_preview > /tmp/preview.log 2>&1 &
+# 1) 例子程序把视图放进一个 focus:false 的窗口（crates/desktop/examples/view_preview.rs）
+OSM_PREVIEW_VIEW=search nohup ./target/debug/examples/view_preview > /tmp/preview.log 2>&1 &
+PID=$!                     # 用 $!，别 pgrep（见下）
 # 2) 按 pid 取该窗口的 CGWindowNumber（swift/CGWindowListCopyWindowInfo）
 # 3) 按窗口号抓图——离屏窗口也能抓到内容
 screencapture -x -o -l <CGWindowNumber> /tmp/view.png
 ```
+
+**抓图脚本本身踩过的两个坑**（都让人拿到过「看起来对、其实是上一次的」图）：
+
+- **zsh 不对未加引号的变量做分词**：`env $flags nohup app` 会把整串当一个参数**传给程序**，
+  而不是当成环境变量赋值（日志里能看到 `view=search OSM_PREVIEW_DARK=1`）。用
+  `env "$@" nohup app` 这类显式传参形式，或直接写 `VAR=1 VAR2=2 cmd`。
+- **不要用 `pgrep -f <路径>` 取 pid**：外层 shell 的命令行里就含这个路径，`head -1`
+  常常命中 shell 而不是目标进程，于是抓到的是别的窗口。用后台启动后的 `$!`。
+  另外进程被杀后它的窗口还会在 `CGWindowList` 里停留一会儿，所以**按窗口尺寸筛**
+  （例：预览窗口 W=260 还是 W=520）比取第一个更可靠。
 
 踩过的点：
 

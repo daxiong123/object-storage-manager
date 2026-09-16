@@ -156,7 +156,12 @@ impl WorkspaceView {
     /// 常驻显示（不再是 ⌘F 开关的浮层），右侧一个 🔍 提交按钮——参照实现是
     /// **显式提交**的查询，不是边打边筛。提交后把输入值当作列举前缀重新请求
     /// （见 `commit_prefix_search`），所以能查到还没加载出来的对象。
+    /// 对象搜索：输入框 + 接合的放大镜按钮（形状与理由见 `ui::compact_search_field`）。
+    ///
+    /// 这里只管业务外壳：Esc 上下文（`ObjectFilter` → `DismissFilter`）、宽度、
+    /// 以及不让点击穿到列表（列表容器上的空白点击会清空选择）。
     pub(super) fn render_object_search(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
         let Some(editor) = self.search_input.as_ref() else {
             return div().into_any_element();
         };
@@ -165,20 +170,12 @@ impl WorkspaceView {
             .key_context("ObjectFilter")
             .w(tokens::text(220.))
             .items_center()
-            .gap_1()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().flex_1().min_w_0().child(Input::new(editor).small()))
-            .child(
-                Button::new("object-search-submit")
-                    .icon(Icon::new(IconName::Search))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .tooltip("按前缀搜索（回车）")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.commit_prefix_search(window, cx)),
-                    ),
-            )
+            .child(ui::compact_search_field(
+                editor,
+                &theme,
+                cx.listener(|this, _, window, cx| this.commit_prefix_search(window, cx)),
+            ))
             .into_any_element()
     }
 

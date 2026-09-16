@@ -8,6 +8,11 @@ pub mod tokens;
 mod ui;
 mod workspace;
 
+// 紧凑搜索控件的唯一对外导出：`ui` 层保持私有，只把这一条具名形状公开出来，
+// 好让桌面的离屏预览程序（`crates/desktop/examples/search_field_preview.rs`）
+// 渲染**生产代码本身**做视觉验收，而不是照抄一份。
+pub use ui::compact_search_field;
+
 use gpui::{Bounds, Pixels, WindowOptions};
 use gpui_component::TitleBar;
 

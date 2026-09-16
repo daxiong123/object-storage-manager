@@ -266,7 +266,7 @@ fn light_palette() -> Palette {
         // 文件夹图标），所以取它的主色蓝——不能取淡蓝，否则图标看不见。
         accent: rgb(0x0064C8),
         accent_foreground: rgb(0x0064C8),
-        ring: rgb(0x1677FF),
+        ring: rgb(0x0064C8),
         sidebar_accent: rgb(0xE6F7FF),
         sidebar_accent_foreground: rgb(0x0064C8),
         list_active: rgb(0xE6F7FF),
@@ -348,7 +348,7 @@ fn dark_palette() -> Palette {
         progress_bar: rgb(0x1668DC),
         accent: rgb(0x1668DC),
         accent_foreground: rgb(0x1668DC),
-        ring: rgb(0x1677FF),
+        ring: rgb(0x1668DC),
         sidebar_accent: rgb(0x111D2C),
         sidebar_accent_foreground: rgb(0x1668DC),
         list_active: rgb(0x111D2C),
