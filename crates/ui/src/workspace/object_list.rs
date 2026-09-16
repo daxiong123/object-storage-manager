@@ -726,7 +726,15 @@ impl WorkspaceView {
                     .into_any_element()
             }
             ListingEntry::Object(object) => {
-                let selected = self.selected_object_keys.contains(&object.key);
+                // 「勾选」与「当前行」是两件事，必须分开：
+                // - `checked` = 在勾选集合里（只由复选框 / ⌘Click / ⇧Click / ⌘A 改变）
+                // - `active`  = 当前行（不带动词的点击/方向键移动的就是它）
+                // 高亮两者都给（否则点一行看不出「动作会作用在谁」），但**复选框只认
+                // `checked`**——曾经两者共用同一个标志，于是「点几行看一眼」就把它们
+                // 全勾上了，再按删除会一起删掉（见 selection.rs 的 `plain_click`）。
+                let checked = self.selected_object_keys.contains(&object.key);
+                let active =
+                    checked || self.selected_object_key.as_deref() == Some(object.key.as_str());
                 let key = object.key.clone();
                 let check_key = object.key.clone();
                 let actions_key = object.key.clone();
@@ -748,8 +756,8 @@ impl WorkspaceView {
                     .border_color(theme.table_row_border)
                     .text_size(tokens::body())
                     .line_height(tokens::row_line_height())
-                    .when(selected, |row| row.bg(theme.selection))
-                    .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
+                    .when(active, |row| row.bg(theme.selection))
+                    .when(!active, |row| row.hover(|row| row.bg(theme.list_hover)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -793,7 +801,7 @@ impl WorkspaceView {
                             // 复选框自己吃掉 mouse_down，否则行处理器会把它当成
                             // 「点行」而先做一次选择，再叠加一次切换
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(Checkbox::new(("row-check", ix)).checked(selected).on_click(
+                            .child(Checkbox::new(("row-check", ix)).checked(checked).on_click(
                                 cx.listener(move |this, _: &bool, _, cx| {
                                     this.toggle_object_key_selection(&check_key.clone(), cx)
                                 }),

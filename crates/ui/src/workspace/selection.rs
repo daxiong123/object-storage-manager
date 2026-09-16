@@ -2,6 +2,16 @@
 
 use super::*;
 
+impl ObjectSelectionIntent {
+    /// 不带动词的点击 / 方向键：只移动「当前行」，**不改勾选集合**。
+    ///
+    /// 这是「未加修饰键」的唯一定义处——`apply_object_selection` 用它决定是否动集合，
+    /// 调用方也用它决定「主选取点击项」还是「取集合末项」，两边不会走偏。
+    pub(crate) fn plain_click(&self) -> bool {
+        !self.command && !self.shift && !self.select_all
+    }
+}
+
 /// 计算点击后的选中集合。`ordered_keys` 是当前列表中全部对象 key
 /// （按展示顺序，不含目录前缀）；`selection` 是当前选中集合（有序）；
 /// `anchor` 是范围选择的起点（上次普通/⌘点击的对象下标）。
@@ -48,10 +58,12 @@ pub(crate) fn apply_object_selection(
                 next.insert(key);
                 return (next, Some(ix), false);
             }
-            // 普通 Click：单选主选，触发预览
-            let mut next = indexmap::IndexSet::new();
-            next.insert(key);
-            (next, Some(ix), true)
+            // 不带动词的点击（`plain_click()`）：只移动「当前行」——**勾选集合保持不动**。
+            // 复选框是显式的多选动作（点框 / ⌘Click / ⇧Click / ⌘A），点行看一眼不该顺手把它
+            // 勾上：这里曾经把集合替换成点击项，于是「点几行看一眼，再按删除」会把那几行一起删掉。
+            // 主选（`selected_object_key`）由调用方按 `plain_click()` 取成点击项，所以下面返回的
+            // 集合与锚点照旧，只有「是否触发预览」为真。
+            (selection.clone(), Some(ix), true)
         }
     }
 }
@@ -167,11 +179,15 @@ impl WorkspaceView {
         }
     }
 
-    /// 行级操作按钮以“该行对象”为作用域，避免当前多选集合导致误批量操作。
+    /// 行级操作按钮以「该行对象」为作用域，避免当前多选集合导致误批量操作。
+    ///
+    /// **只设主选，不往勾选集合里塞**：作用域由主选（也就是行高亮）表达，复选框保持干净
+    /// ——它是用户自己的多选动作，行级按钮不该替他勾上。读取「当前对象」的路径都会回落到
+    /// 主选（`selected_cloud_object()`；集合为空时 `selected_object_keys_vec()` 也回落），
+    /// 所以详情 / 重命名 / 下载照旧拿到这一行。
     pub(super) fn select_object_for_row_action(&mut self, key: &str) {
         let anchor = object_selection_ix(&self.entries, key);
         self.selected_object_keys.clear();
-        self.selected_object_keys.insert(key.to_string());
         self.selected_object_key = Some(key.to_string());
         self.selection_anchor = anchor;
         self.renaming = None;
@@ -202,6 +218,12 @@ impl WorkspaceView {
             select_all: false,
             clicked_index,
         };
+        let plain_click = intent.plain_click();
+        // 主选要看点击项，但 `clicked` 会被 move 进纯函数，所以先记下 key
+        let clicked_key = match &clicked {
+            ClickedEntry::Object(key) => Some(key.clone()),
+            _ => None,
+        };
         let (next, anchor, _) = apply_object_selection(
             intent,
             &ordered_keys,
@@ -214,7 +236,13 @@ impl WorkspaceView {
             clicked,
         );
         self.selected_object_keys = next;
-        self.selected_object_key = self.selected_object_keys.last().cloned();
+        // 不带动词的点击 = 主选就是被点的那一行（集合没动，不能从集合末项取）；
+        // 带 ⌘/⇧ 的点击才从集合末项取。目录行不参与对象选择，主选保持原样。
+        self.selected_object_key = if plain_click {
+            clicked_key.or_else(|| self.selected_object_key.clone())
+        } else {
+            self.selected_object_keys.last().cloned()
+        };
         self.selection_anchor = anchor;
         self.object_menu_open = None;
         self.toolbar_menu = None;

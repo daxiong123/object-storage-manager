@@ -149,8 +149,9 @@ impl WorkspaceView {
         // 它们解析「当前对象」时都回落到主选（`selected_cloud_object()`，以及集合为空时
         // 的 `selected_object_keys_vec()`）。
         //
-        // 关键：**行高亮只认多选集合**（`selected_object_keys.contains(..)`），所以这样做
-        // 不会让这一行看起来被选中；而且主选在菜单关闭后仍然有效，动作路径不依赖菜单开着。
+        // 主选在菜单关闭后仍然有效，动作路径不依赖菜单开着。行高亮现在**同时认主选**
+        // （`checked || active`，见 `object_list.rs` 的行渲染），所以这一行会亮起来——
+        // 这是想要的：菜单里的动作作用在哪一行应当看得见。复选框不受影响。
         if self.selected_object_keys.is_empty() {
             self.selected_object_key = Some(key.to_string());
         }

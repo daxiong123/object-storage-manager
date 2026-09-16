@@ -362,8 +362,9 @@ fn copy_move_summary_lists_partial_failures() {
 }
 
 #[test]
-fn selection_pure_logic_single_click_selects_and_previews() {
+fn selection_pure_logic_plain_click_moves_current_row_and_leaves_checkboxes_alone() {
     let keys = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    // 勾选集合里已有 b（用户自己勾的）
     let current: indexmap::IndexSet<String> = ["b".to_string()].into_iter().collect();
     let intent = ObjectSelectionIntent {
         command: false,
@@ -378,9 +379,11 @@ fn selection_pure_logic_single_click_selects_and_previews() {
         Some(1),
         ClickedEntry::Object("c".into()),
     );
-    assert_eq!(next.len(), 1);
-    assert!(next.contains("c"));
-    assert_eq!(anchor, Some(2));
+    // 不带动词的点击**不动勾选集合**：点行看一眼不该把复选框勾上——曾经会替换集合，
+    // 于是「点几行看一眼，再按删除」把它们一起删了。「当前行」由调用方按
+    // `plain_click()` 取点击项（`handle_object_row_click`）。
+    assert_eq!(next, current, "普通点击不得改动勾选集合");
+    assert_eq!(anchor, Some(2), "锚点跟到点击项，随后的 ⇧ 范围才有起点");
     assert!(preview, "普通点击应触发预览");
 }
 
@@ -860,17 +863,19 @@ fn directory_mixed_keyboard_multi_select_blocks_rename_then_single_rename_keeps_
         select_all: false,
         clicked_index: Some(b_ix),
     };
-    let (single, anchor, preview) = apply_object_selection(
+    // 行级作用域（行级按钮 / ⋯ 菜单的行为）：清空勾选集合，把「当前行」指向这一行。
+    // 纯函数这一层等价于「空集合 + 普通点击」——主选由调用方按 plain_click() 取点击项。
+    let (scoped, scope_anchor, preview) = apply_object_selection(
         single_click,
         &keys,
-        &multi,
+        &indexmap::IndexSet::new(),
         anchor,
         ClickedEntry::Object("reports/b.pdf".into()),
     );
-    assert_eq!(single.len(), 1);
-    assert!(single.contains("reports/b.pdf"));
-    assert_eq!(anchor, Some(1));
+    assert!(scoped.is_empty(), "行级作用域不再往勾选集合里塞东西");
+    assert_eq!(scope_anchor, Some(1));
     assert!(preview);
+    assert!(scoped.len() <= 1, "行级作用域下单行重命名不被多选挡住");
 
     // Rename changes only the last segment and detects visible conflicts.
     let renamed = rename_target_key("reports/b.pdf", "renamed.pdf").unwrap();
@@ -919,10 +924,7 @@ fn directory_mixed_shift_range_and_command_toggle_use_object_indexes() {
         None,
         ClickedEntry::Object("reports/b.pdf".into()),
     );
-    assert_eq!(
-        selected.iter().collect::<Vec<_>>(),
-        [&"reports/b.pdf".to_string()]
-    );
+    assert!(selected.is_empty(), "普通点击不勾选任何东西（只设当前行）");
     assert_eq!(anchor, Some(1));
     assert!(preview);
 
@@ -1001,10 +1003,7 @@ fn directory_mixed_reverse_shift_range_uses_object_indexes() {
         None,
         ClickedEntry::Object("archive/d.txt".into()),
     );
-    assert_eq!(
-        selected.iter().collect::<Vec<_>>(),
-        [&"archive/d.txt".to_string()]
-    );
+    assert!(selected.is_empty(), "普通点击不勾选任何东西（只设当前行）");
     assert_eq!(anchor, Some(3));
     assert!(preview);
 
@@ -1177,11 +1176,11 @@ fn keyboard_nav_moves_primary_and_stops_at_ends() {
         false,
     );
     assert_eq!(
-        next.iter().cloned().collect::<Vec<_>>(),
-        vec!["b".to_string()]
+        next, selection,
+        "不带动词的方向键只移动当前行，不动勾选集合"
     );
     assert_eq!(anchor, Some(1));
-    assert_eq!(target, 1);
+    assert_eq!(target, 1, "主选 = keys[target]，由调用方取");
 
     let (end, end_anchor, end_target) = apply_object_keyboard_nav(
         &keys,
@@ -1199,10 +1198,7 @@ fn keyboard_nav_moves_primary_and_stops_at_ends() {
         ObjectNavDirection::Next,
         false,
     );
-    assert_eq!(
-        stay.iter().cloned().collect::<Vec<_>>(),
-        vec!["c".to_string()]
-    );
+    assert_eq!(stay, end, "到末尾再按 ↓：集合仍不动");
     assert_eq!(stay_anchor, Some(2), "到末尾再按 ↓ 停住");
     assert_eq!(end_target, 2);
     assert_eq!(stay_target, 2);
@@ -1214,19 +1210,13 @@ fn keyboard_nav_without_selection_picks_first_or_last() {
     let empty = indexmap::IndexSet::new();
     let (next, anchor, target) =
         apply_object_keyboard_nav(&keys, &empty, None, None, ObjectNavDirection::Next, false);
-    assert_eq!(
-        next.iter().cloned().collect::<Vec<_>>(),
-        vec!["a".to_string()]
-    );
+    assert!(next.is_empty(), "方向键不勾选任何东西（只移动当前行）");
     assert_eq!(anchor, Some(0));
     assert_eq!(target, 0);
 
     let (prev, prev_anchor, prev_target) =
         apply_object_keyboard_nav(&keys, &empty, None, None, ObjectNavDirection::Prev, false);
-    assert_eq!(
-        prev.iter().cloned().collect::<Vec<_>>(),
-        vec!["c".to_string()]
-    );
+    assert!(prev.is_empty(), "方向键不勾选任何东西（只移动当前行）");
     assert_eq!(prev_anchor, Some(2));
     assert_eq!(prev_target, 2);
 }
