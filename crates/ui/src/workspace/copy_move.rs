@@ -127,7 +127,7 @@ impl WorkspaceView {
         .detach();
         filter.update(cx, |state, cx| state.focus(window, cx));
         self.object_menu_open = None;
-        self.top_more_open = false;
+        self.toolbar_menu = None;
         self.copy_move = Some(CopyMoveState {
             mode,
             source_keys,

@@ -80,6 +80,16 @@ impl ObjectSort {
 pub(crate) fn sort_entries(entries: &[ListingEntry], sort: ObjectSort) -> Vec<usize> {
     let mut ix: Vec<usize> = (0..entries.len()).collect();
     if matches!(sort, ObjectSort::Natural) {
+        // 「列举原序」只指**组内**：目录仍恒排在对象前（Finder 语义，参照实现同样如此）。
+        // 稳定排序（sort_by_key 是稳定）保证同组内保持 provider 的返回顺序。
+        //
+        // 这里曾经直接 `return ix`，于是默认顺序完全交给 provider：OSS 的列举把对象
+        // 放在 CommonPrefix 之前，结果目录被排到整张表的最后——既与本函数开头的
+        // 「目录恒在对象前」自相矛盾，也和 Finder / 参照实现不一致。
+        ix.sort_by_key(|&i| match &entries[i] {
+            ListingEntry::CommonPrefix(_) => 0,
+            ListingEntry::Object(_) => 1,
+        });
         return ix;
     }
     // 排序键：(段类型序 目录=0 对象=1, 降序数值键, 字符串键)。

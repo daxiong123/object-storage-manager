@@ -32,18 +32,45 @@ impl WorkspaceView {
                     .gap_1()
                     // 操作组顺序与参照实现一致：上传（主色）· 新建目录 · 下载 · 更多
                     .child(
-                        Button::new("toolbar-upload-files")
-                            .icon(Icon::new(IconName::ArrowUp))
-                            .label(if self.uploading {
-                                "选择文件…"
-                            } else {
-                                "上传"
-                            })
-                            .primary()
-                            .with_size(Size::Small)
-                            .disabled(self.uploading)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| this.start_files_upload(cx))),
+                        // 「上传 ▾」：一个按钮带下拉（参照实现如此），两个条目
+                        // （上传文件… / 上传文件夹…）走同一条既有上传路径。
+                        // 原先「上传文件夹」藏在「更多」里，发现成本高。
+                        div()
+                            .relative()
+                            .child(
+                                Button::new("toolbar-upload")
+                                    .icon(Icon::new(IconName::ArrowUp))
+                                    .label(if self.uploading {
+                                        "选择文件…"
+                                    } else {
+                                        "上传"
+                                    })
+                                    .icon(Icon::new(IconName::ChevronDown))
+                                    .primary()
+                                    .with_size(Size::Small)
+                                    .disabled(self.uploading)
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                                        this.toggle_toolbar_menu(
+                                            ToolbarMenu::Upload,
+                                            event.position(),
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .when(self.toolbar_menu == Some(ToolbarMenu::Upload), |button| {
+                                let at = self.toolbar_menu_at.unwrap_or(point(px(8.), px(8.)));
+                                button.child(deferred(
+                                    anchored()
+                                        .anchor(Anchor::TopLeft)
+                                        .position_mode(AnchoredPositionMode::Window)
+                                        .position(at)
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(self.render_upload_menu(theme, cx)),
+                                ))
+                            }),
                     )
                     .child(
                         Button::new("toolbar-create-folder")
@@ -69,15 +96,6 @@ impl WorkspaceView {
                             })),
                     )
                     .child(
-                        Button::new("toolbar-refresh")
-                            .label("刷新")
-                            .with_size(Size::Small)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.handle_refresh(&Refresh, window, cx)
-                            })),
-                    )
-                    .child(
                         div()
                             .relative()
                             .child(
@@ -89,15 +107,19 @@ impl WorkspaceView {
                                         cx.stop_propagation()
                                     })
                                     .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                                        this.toggle_top_more_menu(event.position(), cx)
+                                        this.toggle_toolbar_menu(
+                                            ToolbarMenu::More,
+                                            event.position(),
+                                            cx,
+                                        )
                                     })),
                             )
-                            .when(self.top_more_open, |button| {
+                            .when(self.toolbar_menu == Some(ToolbarMenu::More), |button| {
                                 // 锚定用**触发点的窗口坐标**（与对象右键菜单同一写法）。
                                 // 不要用 `anchor(...) + offset(...)` 的相对定位：它锚的是
                                 // 「锚定元素所在容器的原点」，而这个按钮所在的容器会变
                                 // （从标题栏挪到内容区工具栏后菜单就整体偏移了）。
-                                let at = self.top_more_menu_at.unwrap_or(point(px(8.), px(8.)));
+                                let at = self.toolbar_menu_at.unwrap_or(point(px(8.), px(8.)));
                                 button.child(deferred(
                                     anchored()
                                         .anchor(Anchor::TopLeft)
@@ -110,6 +132,22 @@ impl WorkspaceView {
                     ),
             )
             .child(self.render_object_search(cx))
+            // 刷新放在搜索框右侧（参照实现的工具栏右端是 搜索 + ⟳）：
+            // 它是「重新拉取当前列表」，跟右侧这组读取类控件在一起更顺。
+            .child(
+                Button::new("toolbar-refresh")
+                    .icon(Icon::new(IconName::Replace))
+                    .ghost()
+                    .with_size(Size::Small)
+                    .tooltip("刷新")
+                    .disabled(self.objects_state == AsyncState::Loading)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.handle_refresh(&Refresh, window, cx)
+                        }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -547,6 +585,15 @@ impl WorkspaceView {
                     )
                     .child(format!("最新修改时间{}", self.object_sort.time_mark())),
             )
+            // 「操作」列表头（行末图标列）。这不只是补个文字：**表头必须用与数据行
+            // 相同的固定宽度占位**，否则名称列（flex_1）会多吸收这一列的宽度，
+            // 后面几列整体右移——实测过表头比数据行右偏 55px。
+            .child(
+                div()
+                    .w(tokens::col_action_width())
+                    .flex_shrink_0()
+                    .child("操作"),
+            )
     }
 
     /// 名称单元格。重命名已改为弹层（见 `rename.rs`），所以这里恒为纯文本——
@@ -686,6 +733,7 @@ impl WorkspaceView {
                 let right_key = object.key.clone();
                 let menu_open_key = object.key.clone();
                 let dbl_key = object.key.clone();
+                let download_key = object.key.clone();
                 let size = format_size(object.size);
                 let time = format_time(object.put_time_millis);
                 h_flex()
@@ -796,15 +844,34 @@ impl WorkspaceView {
                         ),
                     )
                     .child(
-                        // 「操作」列（参照实现的最后一列）：一个 ⋯ 入口打开整行菜单。
-                        // 与对象右键菜单共用同一个 `object_menu_*` 状态，所以只有
-                        // 一个菜单实体，位置按**点击点**的窗口坐标定位。
+                        // 「操作」列（参照实现的最后一列 = ⤓ ⋯）。下载是最常用动作，
+                        // 提到行内省一次开菜单；其余动作留在 ⋯ 里。
+                        // 两点与工具栏的「下载」不同：这里先**把选择收敛到本行**
+                        // （`select_object_for_row_action`），所以未选中任何行时点行内
+                        // 下载也按本行来，不需要先选。
                         div()
                             .w(tokens::col_action_width())
                             .flex_shrink_0()
                             .flex()
+                            .items_center()
                             .justify_end()
+                            .gap_1()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new(("row-download", ix))
+                                    .icon(Icon::new(IconName::ArrowDown))
+                                    .ghost()
+                                    .with_size(Size::Small)
+                                    .tooltip("下载")
+                                    .disabled(self.downloading)
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select_object_for_row_action(&download_key);
+                                        this.start_object_download(window, cx);
+                                    })),
+                            )
                             .child(
                                 Button::new(("row-actions", ix))
                                     .icon(Icon::new(IconName::Ellipsis))

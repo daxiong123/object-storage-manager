@@ -14,9 +14,35 @@ pub(super) fn object_menu_items() -> Vec<ObjectMenuItem> {
     ]
 }
 
+/// 工具栏下拉菜单：上传 / 更多。同一时刻只开一个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToolbarMenu {
+    /// 「上传 ▾」：上传文件 / 上传文件夹
+    Upload,
+    /// 「更多 ▾」：次级动作（上传文件夹已归到「上传 ▾」，不在这里重复）
+    More,
+}
+
+/// 「上传 ▾」的条目（顺序即展示顺序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UploadMenuItem {
+    Files,
+    Folder,
+}
+
+pub(super) fn upload_menu_items() -> Vec<UploadMenuItem> {
+    vec![UploadMenuItem::Files, UploadMenuItem::Folder]
+}
+
+pub(super) fn upload_menu_item_label(item: UploadMenuItem) -> &'static str {
+    match item {
+        UploadMenuItem::Files => "上传文件…",
+        UploadMenuItem::Folder => "上传文件夹…",
+    }
+}
+
 pub(super) fn top_more_menu_items() -> Vec<TopMoreMenuItem> {
     vec![
-        TopMoreMenuItem::UploadFolder,
         TopMoreMenuItem::CreateFolder,
         TopMoreMenuItem::CopyTo,
         TopMoreMenuItem::MoveTo,
@@ -38,7 +64,6 @@ pub(super) fn object_menu_item_label(item: ObjectMenuItem) -> &'static str {
 
 pub(super) fn top_more_menu_item_label(item: TopMoreMenuItem) -> &'static str {
     match item {
-        TopMoreMenuItem::UploadFolder => "上传文件夹…",
         TopMoreMenuItem::CreateFolder => "新建目录…",
         TopMoreMenuItem::CopyTo => "复制到…",
         TopMoreMenuItem::MoveTo => "移动到…",
@@ -151,15 +176,61 @@ impl WorkspaceView {
         }
     }
 
-    pub(super) fn toggle_top_more_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        self.top_more_open = !self.top_more_open;
-        self.top_more_menu_at = Some(at);
+    /// 打开/收起工具栏下拉菜单。同一个按钮再点 = 收起；换一个按钮 = 直接切过去
+    /// （`toolbar_menu` 是单值，所以不可能同时开两个）。
+    pub(super) fn toggle_toolbar_menu(
+        &mut self,
+        kind: ToolbarMenu,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.toolbar_menu = (self.toolbar_menu != Some(kind)).then_some(kind);
+        self.toolbar_menu_at = Some(at);
         self.object_menu_open = None;
         cx.notify();
     }
 
-    pub(super) fn close_top_more_menu(&mut self) {
-        self.top_more_open = false;
+    pub(super) fn close_toolbar_menu(&mut self) {
+        self.toolbar_menu = None;
+    }
+
+    /// 「上传 ▾」菜单：两个入口都只是把既有流程再暴露一层
+    /// （文件多选 / 文件夹递归），不引入新的上传路径。
+    pub(super) fn render_upload_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let has_bucket = self.selected_bucket.is_some();
+        let mut menu = ui::menu::popup(theme);
+        for (item_ix, item) in upload_menu_items().into_iter().enumerate() {
+            let disabled = !has_bucket || self.uploading;
+            let color = if disabled {
+                theme.muted_foreground
+            } else {
+                theme.foreground
+            };
+            menu = menu.child(
+                ui::menu::item(theme, ("upload-menu-item", item_ix), color, !disabled)
+                    .child(upload_menu_item_label(item))
+                    .when(!disabled, |row| {
+                        row.on_click(cx.listener(move |this, _, window, cx| {
+                            this.handle_upload_menu_item(item, window, cx)
+                        }))
+                    }),
+            );
+        }
+        overlay::fade_in("upload-menu", menu).into_any_element()
+    }
+
+    pub(super) fn handle_upload_menu_item(
+        &mut self,
+        item: UploadMenuItem,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_toolbar_menu();
+        match item {
+            UploadMenuItem::Files => self.start_files_upload(cx),
+            UploadMenuItem::Folder => self.start_folder_upload(cx),
+        }
+        cx.notify();
     }
 
     /// 对象详情弹层：打开聚焦弹层（Esc 经焦点链命中 Overlay context），
@@ -206,9 +277,8 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_top_more_menu();
+        self.close_toolbar_menu();
         match item {
-            TopMoreMenuItem::UploadFolder => self.start_folder_upload(cx),
             TopMoreMenuItem::CreateFolder => self.open_create_folder_overlay(window, cx),
             TopMoreMenuItem::CopyTo => self.open_copy_move_overlay(CopyMoveMode::Copy, window, cx),
             TopMoreMenuItem::MoveTo => self.open_copy_move_overlay(CopyMoveMode::Move, window, cx),
@@ -244,11 +314,11 @@ impl WorkspaceView {
         let mut menu = ui::menu::popup(theme);
 
         for (item_ix, item) in top_more_menu_items().into_iter().enumerate() {
-            if item_ix == 2 {
+            // 分隔线：新建类动作 / 对象类动作 之间
+            if item_ix == 1 {
                 menu = menu.child(ui::menu::separator(theme));
             }
             let disabled = match item {
-                TopMoreMenuItem::UploadFolder => !has_bucket || self.uploading,
                 TopMoreMenuItem::CreateFolder => !has_bucket || self.creating_folder,
                 TopMoreMenuItem::CopyTo | TopMoreMenuItem::MoveTo | TopMoreMenuItem::Delete => {
                     !has_selection

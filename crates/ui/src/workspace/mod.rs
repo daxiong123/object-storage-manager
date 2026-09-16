@@ -97,6 +97,9 @@ mod upload;
 mod tests;
 
 use self::format::*;
+// 菜单模型（ToolbarMenu / TopMoreMenuItem / UploadMenuItem 等）定义在 menus.rs，
+// 但状态字段在 mod.rs —— 所以这里要把它 glob 进来。
+use self::menus::*;
 use self::objects::*;
 use self::preview::*;
 use self::rename::*;
@@ -168,7 +171,6 @@ pub(super) enum ObjectMenuItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TopMoreMenuItem {
-    UploadFolder,
     CreateFolder,
     CopyTo,
     MoveTo,
@@ -307,11 +309,13 @@ pub struct WorkspaceView {
     /// 跑到侧栏上）。右键位置是唯一不依赖容器/滚动坐标系的锚。
     object_menu_at: Option<Point<Pixels>>,
     /// 顶部「更多」菜单是否打开。
-    top_more_open: bool,
+    /// 工具栏下拉菜单（上传 / 更多）：同一时刻只可能开一个，所以用枚举而不是
+    /// 两个 bool——省掉「两个菜单同时开着」的不可能状态。
+    toolbar_menu: Option<ToolbarMenu>,
     /// 触发「更多」菜单时的**窗口坐标**（点击点）。锚定必须用它，不能靠
     /// 「锚定元素所在容器的原点」——那个原点会随按钮所在的容器变化（按钮从
     /// 标题栏挪到内容区工具栏后就偏了），而窗口坐标与容器无关。
-    top_more_menu_at: Option<Point<Pixels>>,
+    toolbar_menu_at: Option<Point<Pixels>>,
     /// 对象菜单打开时记录的**动作目标集合**（见 `menu_targets_for`）。
     /// 菜单关闭后清空；清空后动作回落为普通选择集。
     object_menu_targets: Vec<String>,
@@ -422,8 +426,8 @@ impl Render for WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    if this.top_more_open || this.object_menu_open.is_some() {
-                        this.top_more_open = false;
+                    if this.toolbar_menu.is_some() || this.object_menu_open.is_some() {
+                        this.toolbar_menu = None;
                         this.object_menu_open = None;
                         cx.notify();
                     }
@@ -622,8 +626,8 @@ impl WorkspaceView {
             preview_needs_focus: false,
             object_menu_open: None,
             object_menu_at: None,
-            top_more_open: false,
-            top_more_menu_at: None,
+            toolbar_menu: None,
+            toolbar_menu_at: None,
             object_menu_targets: Vec::new(),
             transfers_expanded: false,
             details_overlay_open: false,

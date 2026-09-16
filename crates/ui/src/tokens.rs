@@ -189,8 +189,11 @@ pub fn col_check_width() -> Pixels {
 }
 
 /// 对象列表行末**操作**列宽（参照实现的表格最后一列）。
+///
+/// 两个图标（下载 + 更多）+ 间距：参照实现这一列放 4 个图标，我们只做有实际动作的
+/// 两个（收藏/解冻不做）。表头也用同一宽度占位，否则表头与数据行会整体错开。
 pub fn col_action_width() -> Pixels {
-    text(40.)
+    text(64.)
 }
 
 #[cfg(test)]
@@ -237,7 +240,7 @@ mod tests {
         // 时间列必须容得下「最新修改时间」六个字 + 时间串
         assert!(col_time_width() > col_size_width());
         assert_eq!(col_check_width(), text(28.));
-        assert_eq!(col_action_width(), text(40.));
+        assert_eq!(col_action_width(), text(64.));
         set_ui_font_scale(1.0);
     }
 

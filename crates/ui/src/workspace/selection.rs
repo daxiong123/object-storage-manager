@@ -145,7 +145,7 @@ impl WorkspaceView {
         self.selection_anchor = None;
         self.renaming = None;
         self.object_menu_open = None;
-        self.top_more_open = false;
+        self.toolbar_menu = None;
         self.details_overlay_open = false;
     }
 
@@ -217,7 +217,7 @@ impl WorkspaceView {
         self.selected_object_key = self.selected_object_keys.last().cloned();
         self.selection_anchor = anchor;
         self.object_menu_open = None;
-        self.top_more_open = false;
+        self.toolbar_menu = None;
         cx.notify();
     }
 
@@ -349,7 +349,7 @@ impl WorkspaceView {
         self.selected_object_key = self.selected_object_keys.last().cloned();
         self.selection_anchor = anchor;
         self.object_menu_open = None;
-        self.top_more_open = false;
+        self.toolbar_menu = None;
         cx.notify();
     }
 
@@ -390,7 +390,7 @@ impl WorkspaceView {
                 .and_then(|key| object_selection_ix(&self.entries, key))
         });
         self.object_menu_open = None;
-        self.top_more_open = false;
+        self.toolbar_menu = None;
         // 把新的主选滚进视野：虚拟列表只渲染可见区间，长列表里「选中了但看不见」
         // 等于没有反馈。`order` 含目录前缀，所以它的下标就是 uniform_list 的 item
         // 下标（`keys` 只含对象、不能直接用）。用 Nearest 非严格滚动：已在视野内

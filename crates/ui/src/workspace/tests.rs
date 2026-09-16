@@ -146,15 +146,29 @@ fn row_activation_requires_double_click() {
 
 #[test]
 fn top_more_menu_items_keep_product_order() {
+    // 「上传文件夹」已归到工具栏的「上传 ▾」，不在这里重复；
+    // 剩下的是「新建类 → 对象类」的顺序。
     assert_eq!(
         top_more_menu_items(),
         vec![
-            TopMoreMenuItem::UploadFolder,
             TopMoreMenuItem::CreateFolder,
             TopMoreMenuItem::CopyTo,
             TopMoreMenuItem::MoveTo,
             TopMoreMenuItem::Delete,
         ]
+    );
+}
+
+#[test]
+fn upload_menu_lists_files_before_folder() {
+    assert_eq!(
+        upload_menu_items(),
+        vec![UploadMenuItem::Files, UploadMenuItem::Folder]
+    );
+    assert_eq!(upload_menu_item_label(UploadMenuItem::Files), "上传文件…");
+    assert_eq!(
+        upload_menu_item_label(UploadMenuItem::Folder),
+        "上传文件夹…"
     );
 }
 
@@ -1029,13 +1043,20 @@ fn entry_object_sized(key: &str, size: u64, time: i64) -> ListingEntry {
 }
 
 #[test]
-fn sort_entries_natural_is_identity() {
+fn sort_entries_natural_keeps_listing_order_within_groups_but_puts_dirs_first() {
+    // `Natural` 的「原序」只保证**组内**不动：目录仍然恒排在对象前（Finder 语义，
+    // 参照实现亦然）。这条曾经写成「恒等映射」，把「前缀夹在中间不动」当成了预期，
+    // 于是默认视图里目录会被 provider 的返回顺序推到整张表最后。
     let entries = vec![
         entry_object("z.txt"),
         ListingEntry::CommonPrefix("a/".into()),
         entry_object("m.txt"),
+        ListingEntry::CommonPrefix("b/".into()),
     ];
-    assert_eq!(sort_entries(&entries, ObjectSort::Natural), vec![0, 1, 2]);
+    assert_eq!(
+        sort_entries(&entries, ObjectSort::Natural),
+        vec![1, 3, 0, 2]
+    );
 }
 
 #[test]

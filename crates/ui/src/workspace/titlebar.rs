@@ -144,6 +144,26 @@ impl WorkspaceView {
                 format!("{active} 项传输中")
             }
         };
+        // 聚合进度：只看**进行中**的任务，且只统计已知总大小的（下载的
+        // Content-Length 可能未知）。参照实现在标题栏放一条进度条 + 计数，
+        // 这里做成「文字 + 一条细进度条」，不占满整条标题栏。
+        let (done, total) = self
+            .transfers
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    TransferState::Running | TransferState::Waiting | TransferState::Paused
+                )
+            })
+            .fold((0u64, 0u64), |(done, total), task| match task.bytes_total {
+                Some(task_total) if task_total > 0 => {
+                    (done + task.bytes_done.min(task_total), total + task_total)
+                }
+                _ => (done, total),
+            });
+        let progress = (total > 0).then(|| done as f32 / total as f32);
+
         TitleBar::new().child(
             h_flex()
                 .w_full()
@@ -189,6 +209,37 @@ impl WorkspaceView {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
                 .child(div().flex_1())
+                .when_some(progress, |this, ratio| {
+                    this.child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_2()
+                            .pr_2()
+                            .child(
+                                div()
+                                    .w(tokens::text(96.))
+                                    .h(tokens::text(4.))
+                                    .rounded(tokens::radius())
+                                    .bg(theme.border)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .rounded(tokens::radius())
+                                            .bg(theme.primary)
+                                            // 宽度按比例算成像素：`relative()` 不在此模块作用域内，
+                                            // 而且用 text() 能让进度条跟着字号缩放一起变。
+                                            .w(tokens::text(96. * ratio.clamp(0.0, 1.0))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(tokens::label())
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{:.0}%", ratio * 100.)),
+                            ),
+                    )
+                })
                 .child(
                     div()
                         .flex_shrink_0()
@@ -292,6 +343,12 @@ impl WorkspaceView {
         bucket: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // 参照实现的地址栏是 `oss://<bucket>/<path>`：scheme 只是身份提示（不是可点
+        // 目标），所以用次要色、不加 hover。bucket 与后续段仍是可点的面包屑。
+        let scheme = self
+            .selected_provider_kind()
+            .map(provider_url_scheme)
+            .unwrap_or("oss");
         let mut path = h_flex()
             .id("title-breadcrumb")
             .flex_1()
@@ -302,6 +359,12 @@ impl WorkspaceView {
             .overflow_hidden()
             .text_size(tokens::label())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{scheme}://")),
+            )
             .child(
                 div()
                     .px_1()

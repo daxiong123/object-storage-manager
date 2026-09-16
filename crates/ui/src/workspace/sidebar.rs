@@ -74,6 +74,91 @@ impl WorkspaceView {
                         ]
                     }),
             )
+            .child(self.render_sidebar_footer(theme, cx))
+    }
+
+    /// 侧栏底部常驻入口：传输（带进行中角标）与设置。
+    ///
+    /// 放在滚动区**之外**：账号/空间列表会把滚动区撑长，常驻入口必须始终可见
+    /// （参照实现把这类全局入口放在左侧栏底部）。传输面板本身在标题栏（`transfers.rs`），
+    /// 这里只是第二个入口，角标让「有任务在跑」在收起侧栏内容时也能看见。
+    fn render_sidebar_footer(&self, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let active = self
+            .transfers
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.state,
+                    TransferState::Running | TransferState::Waiting | TransferState::Paused
+                )
+            })
+            .count();
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(Self::sidebar_footer_entry(
+                theme,
+                "sidebar-footer-transfers",
+                // 图标只从 `gpui_component::IconName` 这 101 个里选：`gpui-kit-assets`
+                // 的完整目录不在 `Assets` 的嵌入集合里，用了会画成空白。
+                Icon::new(IconName::ChevronsUpDown),
+                "传输",
+                Some(active),
+                cx.listener(|this, _, _, cx| {
+                    this.transfers_expanded = !this.transfers_expanded;
+                    cx.notify();
+                }),
+            ))
+            .child(Self::sidebar_footer_entry(
+                theme,
+                "sidebar-footer-settings",
+                Icon::new(IconName::Settings),
+                "设置",
+                None,
+                cx.listener(|this, _, window, cx| {
+                    this.handle_open_settings(&OpenSettings, window, cx)
+                }),
+            ))
+    }
+
+    /// 底部入口的统一样式（图标 + 文字 + 可选角标）。
+    fn sidebar_footer_entry(
+        theme: &Theme,
+        id: &'static str,
+        icon: Icon,
+        label: &'static str,
+        badge: Option<usize>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(tokens::radius())
+            .text_size(tokens::label())
+            .text_color(theme.muted_foreground)
+            .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
+            .on_click(on_click)
+            .child(icon.text_color(theme.muted_foreground))
+            .child(label)
+            .children(badge.filter(|count| *count > 0).map(|count| {
+                div()
+                    .px_1()
+                    .rounded(tokens::radius_lg())
+                    .bg(theme.primary)
+                    .text_color(theme.primary_foreground)
+                    .text_size(tokens::caption())
+                    .child(count.to_string())
+            }))
     }
 
     /// 账户区：加载态 / 错误重试 / 真实账号行（点击选中并加载空间）。
