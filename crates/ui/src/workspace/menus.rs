@@ -385,9 +385,13 @@ impl WorkspaceView {
         if self.palette.is_some() || self.add_modal.is_some() || self.settings_modal.is_some() {
             return;
         }
-        if let Err(error) =
-            object_storage_macos::show_about_panel("CloudStorage", env!("CARGO_PKG_VERSION"))
-        {
+        // 图标显式传嵌入的那份（512px PNG）：面板默认读 bundle 的 Info.plist，
+        // 开发期裸二进制没有 bundle，会退化成系统通用图标。
+        if let Err(error) = object_storage_macos::show_about_panel(
+            "CloudStorage",
+            env!("CARGO_PKG_VERSION"),
+            Some(crate::APP_ICON_PNG),
+        ) {
             self.download_message = Some(DownloadMessage {
                 is_error: true,
                 text: format!("无法打开「关于」面板：{error}"),
