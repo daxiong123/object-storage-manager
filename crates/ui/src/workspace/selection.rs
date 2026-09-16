@@ -116,8 +116,8 @@ pub(crate) fn visible_object_keys(
 /// 免得日后一处改了一处没改；单测锁死「单击不激活」这一点——把判据放松成
 /// `>= 1` 会让单击既选中又打开，等于回到「点一下就跳走」。
 ///
-/// `renaming`：行内重命名还在进行（即 mouse_down 里的提交校验失败、inline editor
-/// 仍残留）时不激活，否则会跳走并丢掉编辑态。
+/// `renaming`：重命名弹层开着时不激活——否则一次双击既打开预览又在弹层后面
+/// 改变视图，回来时用户已经不知道自己刚才在改哪个对象了。
 pub(crate) fn row_activation(click_count: usize, renaming: bool) -> bool {
     click_count >= 2 && !renaming
 }

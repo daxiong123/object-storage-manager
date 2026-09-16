@@ -83,6 +83,8 @@ mod palette;
 mod preview;
 mod quit;
 mod rename;
+// 重命名弹层的外观单独导出：离屏预览要靠它渲染（见 `rename.rs` 的 `rename_dialog`）。
+pub use rename::{RenameDialogCallback, rename_dialog};
 mod selection;
 mod settings;
 mod sidebar;
@@ -241,6 +243,8 @@ pub struct WorkspaceView {
     renaming: Option<(String, Entity<InputState>)>,
     /// rename 后台执行中（防重入）。
     renaming_busy: bool,
+    /// 重命名弹层里就地显示的错误（校验类问题不写这里，见 `rename.rs`）
+    rename_error: Option<String>,
     /// 工具栏的**前缀搜索**框（参照实现叫「文件前缀搜索」）。
     ///
     /// 懒创建：`WorkspaceView::new` 拿不到 `Window`，所以在首次渲染时建（同
@@ -470,6 +474,9 @@ impl Render for WorkspaceView {
         if self.details_overlay_open {
             root = root.child(self.render_details_overlay(&theme, cx));
         }
+        if self.renaming.is_some() {
+            root = root.child(self.render_rename_overlay(&theme, cx));
+        }
         if self.preview_overlay_open {
             // 焦点在弹层元素挂载后设置（mouse_down 里设置会被同一点击覆盖）
             if self.preview_needs_focus {
@@ -591,6 +598,7 @@ impl WorkspaceView {
             selection_anchor: None,
             renaming: None,
             renaming_busy: false,
+            rename_error: None,
             search_input: None,
             path_input: None,
             object_sort: ObjectSort::default(),

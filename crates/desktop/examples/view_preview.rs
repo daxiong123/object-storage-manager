@@ -19,6 +19,8 @@
 //!   加 `OSM_PREVIEW_FOCUS=1` 让输入框带焦点（看聚焦边框）。
 //! - `provider`：「添加账号」弹层里的服务商分段控件，直接渲染整个 `AddAccountModal`。
 //! - `dropframe`：拖入提示框的边框样式（灰色虚线），用于确认 gpui 的虚线渲染。
+//! - `rename`：重命名弹层，一次画两个状态——「名称没变」（确认置灰、无提示）与
+//!   「校验不通过」（输入框下方红字提示）；`OSM_PREVIEW_FOCUS=1` 让输入框带焦点。
 //!
 //! 两个开关对所有视图都生效：`OSM_PREVIEW_DARK=1` 切暗色（暗色的选中底/边框是另一套值）。
 
@@ -31,6 +33,45 @@ use object_storage_app::AppServices;
 /// 搜索控件：只画这一条控件，四周留白以便量边框。
 struct SearchHarness {
     input: Entity<InputState>,
+}
+
+/// 重命名弹层：同一张图里画两个状态（没变 / 校验失败），一次看清两种排版。
+struct RenameDialogHarness {
+    editor: Entity<InputState>,
+}
+
+impl Render for RenameDialogHarness {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let noop: object_storage_ui::RenameDialogCallback = std::rc::Rc::new(|_, _, _| {});
+        v_flex()
+            .size_full()
+            .gap_4()
+            .p_4()
+            .items_center()
+            .justify_center()
+            .bg(theme.muted)
+            .child(object_storage_ui::rename_dialog(
+                &theme,
+                "avatar_1785746191997.jpg",
+                &self.editor,
+                None,
+                false,
+                false, // 名称没变 → 确认置灰（参照截图里的状态）
+                noop.clone(),
+                noop.clone(),
+            ))
+            .child(object_storage_ui::rename_dialog(
+                &theme,
+                "avatar_1785746191997.jpg",
+                &self.editor,
+                Some("目标名称已存在：avatar_1785746191997.jpg，请换一个名字".to_string()),
+                false,
+                false, // 校验不通过 → 确认仍置灰
+                noop.clone(),
+                noop.clone(),
+            ))
+    }
 }
 
 /// 拖入提示框的**边框样式**：与 `with_file_drop` 的 `drag_over` 写同一组调用
@@ -95,6 +136,7 @@ fn main() {
         let size = match view.as_str() {
             "provider" => size(px(520.), px(660.)),
             "dropframe" => size(px(420.), px(240.)),
+            "rename" => size(px(520.), px(460.)),
             _ => size(px(260.), px(80.)),
         };
         let bounds = Bounds {
@@ -122,6 +164,16 @@ fn main() {
                             object_storage_ui::AddAccountModal::new(services, window, cx)
                         });
                         cx.new(|cx| Root::new(modal, window, cx))
+                    }
+                    "rename" => {
+                        let input = cx.new(|cx| {
+                            InputState::new(window, cx).default_value("avatar_1785746191997.jpg")
+                        });
+                        if focus {
+                            input.update(cx, |state, cx| state.focus(window, cx));
+                        }
+                        let harness = cx.new(|_| RenameDialogHarness { editor: input });
+                        cx.new(|cx| Root::new(harness, window, cx))
                     }
                     "dropframe" => {
                         let harness = cx.new(|_| DropFrameHarness);

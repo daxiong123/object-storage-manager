@@ -311,11 +311,6 @@ impl WorkspaceView {
             );
         }
 
-        // 行内重命名的校验提示走横幅（行高固定，行内放不下第二行）
-        if let Some(banner) = self.rename_validation_banner(theme, cx) {
-            content = content.child(banner);
-        }
-
         content = content
             .child(self.render_object_list_header(theme, cx))
             .child(
@@ -417,14 +412,8 @@ impl WorkspaceView {
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, _, cx| {
-                // 编辑中先提交重命名（Finder：点别处即提交）；未提交成功
-                // （校验失败）则本次点击不当作空白处理。
-                if this.renaming.is_some() {
-                    this.commit_rename(cx);
-                    if this.renaming.is_some() {
-                        return;
-                    }
-                }
+                // 重命名已改为弹层：遮罩 `occlude` 之后列表收不到点击，
+                // 「点别处提交重命名」这一步随之取消（现由弹层自己的按钮/Esc/遮罩决定）。
                 if this.selected_object_keys.is_empty() && this.selected_object_key.is_none() {
                     return;
                 }
@@ -560,32 +549,14 @@ impl WorkspaceView {
             )
     }
 
+    /// 名称单元格。重命名已改为弹层（见 `rename.rs`），所以这里恒为纯文本——
+    /// 行内编辑那套（行变 Input + 上方横幅提示）随之删除。
     pub(super) fn render_object_name_cell(
         &self,
         object: &CloudObject,
-        renaming: bool,
         theme: &Theme,
     ) -> AnyElement {
         let icon = crate::file_type::file_type_icon(&object.key, theme.mode);
-        if renaming && let Some((_, editor)) = &self.renaming {
-            return h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_2()
-                .child(icon)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .key_context("Renaming")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                        // 校验提示不在这里渲染，见 `rename_validation_banner`：
-                        // 行高由虚拟列表定死，行内塞不下第二行文字。
-                        .child(Input::new(editor).small()),
-                )
-                .into_any_element();
-        }
         h_flex()
             .flex_1()
             .min_w_0()
@@ -598,40 +569,6 @@ impl WorkspaceView {
                     .child(display_name(&object.key).to_string()),
             )
             .into_any_element()
-    }
-
-    /// 行内重命名的**校验提示**横幅（放在列表上方，而不是行内）。
-    ///
-    /// 虚拟列表按固定行高排版（`uniform_list` 取第 0 行的高度给所有行），行内再
-    /// 挂一行 caption 会让这行比别的行高，被定高裁掉或与相邻行重叠。提示语因此
-    /// 移到列表上方，与「加载更多失败」同一位置——两处都是「当前操作出了问题」
-    /// 的横幅，位置统一反而更好找。
-    ///
-    /// 沿用行内版同一条过滤：把「请输入一个不同的新名称」当成正常输入过程，
-    /// 不当错误提示。
-    pub(super) fn rename_validation_banner(
-        &self,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
-        let (old_key, editor) = self.renaming.as_ref()?;
-        let current_name = editor.read(cx).value().to_string();
-        let message = rename_validation_message(old_key, &current_name, &self.entries)
-            .filter(|message| message != "请输入一个不同的新名称")?;
-        Some(
-            h_flex()
-                .mx_3()
-                .mt_2()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded(tokens::radius())
-                .text_color(theme.danger)
-                .text_size(tokens::label())
-                .child(Icon::new(IconName::TriangleAlert))
-                .child(message)
-                .into_any_element(),
-        )
     }
 
     /// 虚拟列表的行渲染回调：只渲染可见区间 `range`（显示顺序里的**槽位**下标）。
@@ -694,12 +631,6 @@ impl WorkspaceView {
                             // 命中行 = 不再是空白点击：拦在列表容器之前，
                             // 否则容器会把这次点击当成空白而清空刚做的选择
                             cx.stop_propagation();
-                            if this.renaming.is_some() {
-                                this.commit_rename(cx);
-                                if this.renaming.is_some() {
-                                    return;
-                                }
-                            }
                             this.handle_object_row_click(
                                 ix,
                                 ClickedEntry::CommonPrefix(prefix_sel.clone()),
@@ -749,10 +680,6 @@ impl WorkspaceView {
             }
             ListingEntry::Object(object) => {
                 let selected = self.selected_object_keys.contains(&object.key);
-                let renaming = self
-                    .renaming
-                    .as_ref()
-                    .is_some_and(|(key, _)| key == &object.key);
                 let key = object.key.clone();
                 let check_key = object.key.clone();
                 let actions_key = object.key.clone();
@@ -780,12 +707,6 @@ impl WorkspaceView {
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             // 命中行 = 不再是空白点击（见列表容器的清空处理器）
                             cx.stop_propagation();
-                            if this.renaming.is_some() {
-                                this.commit_rename(cx);
-                                if this.renaming.is_some() {
-                                    return;
-                                }
-                            }
                             this.handle_object_row_click(
                                 ix,
                                 ClickedEntry::Object(key.clone()),
@@ -830,7 +751,7 @@ impl WorkspaceView {
                                 }),
                             )),
                     )
-                    .child(self.render_object_name_cell(object, renaming, theme))
+                    .child(self.render_object_name_cell(object, theme))
                     .child(
                         div()
                             .w(tokens::col_size_width())
