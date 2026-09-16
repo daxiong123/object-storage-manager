@@ -563,7 +563,7 @@ impl SettingsModal {
                         let selected = active == section;
                         let (text_color, bg) = if selected {
                             // 选中底用不透明的 sidebar_accent：本面板底色就是
-                            // theme.sidebar，语义属侧栏，与 workspace_view 的侧栏
+                            // theme.sidebar，语义属侧栏，与 workspace 侧栏
                             // 选中行逐字段一致。**不要用 list_active**：
                             // gpui-component 的 apply_config 把它的 alpha 压到
                             // ≤0.2（schema.rs:637），源色太淡，叠加后与底色只差

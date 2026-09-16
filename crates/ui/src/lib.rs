@@ -6,7 +6,7 @@ mod overlay;
 pub mod settings_modal;
 pub mod theme;
 pub mod tokens;
-mod workspace_view;
+mod workspace;
 
 use gpui::{Bounds, Pixels, WindowOptions};
 use gpui_component::TitleBar;
@@ -15,7 +15,7 @@ pub use account_modal::AddAccountModal;
 pub use command_palette::{CommandKind, PaletteCommand, PaletteHandler};
 pub use settings_modal::SettingsModal;
 pub use theme::observe_appearance;
-pub use workspace_view::WorkspaceView;
+pub use workspace::WorkspaceView;
 
 /// 应用图标（512px PNG，构建期嵌入）。「关于」弹层与 Dock/Finder 图标共用同一来源。
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");

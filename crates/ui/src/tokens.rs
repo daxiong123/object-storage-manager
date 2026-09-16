@@ -150,9 +150,26 @@ pub fn col_time_width() -> Pixels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// 字号缩放是**进程级全局**状态（`UI_FONT_SCALE_PERCENT`），而 cargo 默认并行
+    /// 跑测试。两个测试交错就会互相踩：曾实测到 `column_widths_follow_font_scale`
+    /// 两次读取之间被 `ui_font_scale_clamps_bounds` 重置回 1.0，断言变成
+    /// `148px == 207.2px`（偶发，满负载跑全量测试时更容易命中）。
+    /// 全局状态必须串行访问，这里用互斥锁钉住。
+    static SCALE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 取锁并把缩放还原成默认值，避免测试之间互相污染。
+    /// 锁中毒（持锁线程 panic）时取回内部值继续，不让一个失败级联成全红。
+    fn scale_guard() -> MutexGuard<'static, ()> {
+        let guard = SCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_ui_font_scale(1.0);
+        guard
+    }
 
     #[test]
     fn ui_font_scale_clamps_bounds() {
+        let _guard = scale_guard();
         set_ui_font_scale(0.5);
         assert_eq!(ui_font_scale(), 0.85);
         set_ui_font_scale(2.0);
@@ -164,8 +181,8 @@ mod tests {
 
     #[test]
     fn column_widths_follow_font_scale() {
+        let _guard = scale_guard();
         // 列宽必须跟随字号：否则最大档位下列头/时间会被压爆。
-        set_ui_font_scale(1.0);
         let base_size = col_size_width();
         let base_time = col_time_width();
         set_ui_font_scale(1.4);
