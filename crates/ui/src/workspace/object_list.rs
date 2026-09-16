@@ -873,7 +873,7 @@ impl WorkspaceView {
                                     })
                                     .on_click(cx.listener(
                                         move |this, event: &ClickEvent, _, cx| {
-                                            this.toggle_object_menu(
+                                            this.open_row_actions_menu(
                                                 &actions_key,
                                                 event.position(),
                                                 cx,
@@ -988,5 +988,87 @@ impl WorkspaceView {
             );
         }
         bar
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// 复刻「行 > 操作列包裹层 > ⋯ 按钮」的结构。
+    /// 目的：验证点 ⋯ **不会**触发行选中（行处理器必须收不到 mouse_down）。
+    struct Harness {
+        row_down: Rc<Cell<usize>>,
+        menu_opens: Rc<Cell<usize>>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let row_down = self.row_down.clone();
+            let menu_opens = self.menu_opens.clone();
+            div()
+                .id("row")
+                .size_full()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    row_down.set(row_down.get() + 1);
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .id("actions-wrap")
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new("actions-btn")
+                                .icon(Icon::new(IconName::Ellipsis))
+                                .ghost()
+                                .with_size(Size::Small)
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, _| {
+                                    menu_opens.set(menu_opens.get() + 1);
+                                }),
+                        ),
+                )
+        }
+    }
+
+    /// 返回 (行收到 mouse_down 的次数, 菜单被打开的次数)
+    fn probe(cx: &mut TestAppContext) -> (usize, usize) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::init(cx);
+        });
+        let row_down = Rc::new(Cell::new(0));
+        let menu_opens = Rc::new(Cell::new(0));
+        let (r, m) = (row_down.clone(), menu_opens.clone());
+        let (_view, cx) = cx.add_window_view(move |_window, _cx| Harness {
+            row_down: r,
+            menu_opens: m,
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // 点在 ⋯ 按钮上：包裹层 justify_end，按钮在窗口右端的 40px 内（窗口 1920 宽）
+        let at = point(px(1900.), px(540.));
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        (row_down.get(), menu_opens.get())
+    }
+
+    #[gpui::test]
+    fn clicking_the_action_button_does_not_select_the_row(cx: &mut TestAppContext) {
+        let (row_down, menu_opens) = probe(cx);
+        assert_eq!(
+            row_down, 0,
+            "点 ⋯ 不该触发行选中（行处理器收到了 mouse_down）"
+        );
+        assert_eq!(menu_opens, 1, "点 ⋯ 应当打开菜单");
     }
 }

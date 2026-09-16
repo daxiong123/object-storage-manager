@@ -716,6 +716,41 @@ fn entry_object(key: &str) -> ListingEntry {
 }
 
 #[test]
+fn menu_targets_follow_the_entry_point() {
+    // 右键入口（keep_selection = true）：open_object_menu 已按 Finder 语义把该行纳入
+    // 选择，所以目标就是选择集。
+    // ⋯ 入口（keep_selection = false）：**不改选择**，目标是这一行；若该行本就在多选里，
+    // 则整批仍是目标（批量操作语义不变）。
+    let selection: indexmap::IndexSet<String> =
+        ["a.txt", "b.txt"].iter().map(|s| s.to_string()).collect();
+
+    assert_eq!(
+        menu_targets_for("b.txt", &selection, true),
+        vec!["a.txt".to_string(), "b.txt".to_string()]
+    );
+
+    // ⋯ 点在「已在选择里」的行 → 整批（顺序保持）
+    assert_eq!(
+        menu_targets_for("b.txt", &selection, false),
+        vec!["a.txt".to_string(), "b.txt".to_string()]
+    );
+
+    // ⋯ 点在「没选中」的行 → 只有这一行。**这条是安全关键**：
+    // 若回落成选择集，菜单里的删除/下载会去打别的行。
+    assert_eq!(
+        menu_targets_for("c.txt", &selection, false),
+        vec!["c.txt".to_string()]
+    );
+
+    // 空选择 + ⋯ → 只有该行
+    let empty = indexmap::IndexSet::new();
+    assert_eq!(
+        menu_targets_for("c.txt", &empty, false),
+        vec!["c.txt".to_string()]
+    );
+}
+
+#[test]
 fn display_slot_accounts_for_directory_prefixes() {
     // 虚拟列表的 item 下标 = 显示顺序里的槽位；目录前缀也占槽位。
     // 这条守着键盘导航「把选中行滚进视野」不会滚错位置。

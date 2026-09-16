@@ -55,7 +55,7 @@ impl WorkspaceView {
             return; // 防重入
         }
         // 多选（≥2）走批量目录流程；单选维持原保存面板。
-        if self.selected_object_keys.len() > 1 {
+        if self.action_target_keys().len() > 1 {
             self.start_batch_download(window, cx);
             return;
         }
@@ -231,7 +231,7 @@ impl WorkspaceView {
         if self.downloading {
             return;
         }
-        let keys: Vec<String> = self.selected_object_keys.iter().cloned().collect();
+        let keys: Vec<String> = self.action_target_keys();
         if keys.len() < 2 {
             return;
         }

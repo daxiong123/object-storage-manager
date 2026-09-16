@@ -76,6 +76,31 @@ pub(super) fn about_kv(label: &'static str, value: &'static str, theme: &Theme) 
         )
 }
 
+/// 菜单动作的目标集合（纯函数，单测锁死）。
+///
+/// 两个入口的语义不同：
+/// - **右键菜单**（`keep_selection = true`）：`open_object_menu` 已按 Finder 语义把该行
+///   纳入选择，所以目标就是当前选择集。
+/// - **⋯ 入口**（`keep_selection = false`）：**不改选择**。点 ⋯ 不该把行选上（用户明确
+///   要求），但菜单动作也不能去打「别的已选行」——所以目标是**这一行**；若该行本就在
+///   多选里，则整批仍是目标（批量操作语义不变）。
+///
+/// 为什么必须显式算目标：菜单项的执行体历史上直接读 `selected_object_keys`，一旦入口
+/// 不再选中该行，动作就会落到以前的选中集上——那是「删错对象」级别的错。
+pub(super) fn menu_targets_for(
+    key: &str,
+    selection: &indexmap::IndexSet<String>,
+    keep_selection: bool,
+) -> Vec<String> {
+    if keep_selection {
+        return selection.iter().cloned().collect();
+    }
+    if selection.contains(key) {
+        return selection.iter().cloned().collect();
+    }
+    vec![key.to_string()]
+}
+
 impl WorkspaceView {
     /// 打开对象菜单。`at` 是触发这次打开的窗口坐标（右键位置），菜单以它为锚点。
     pub(super) fn open_object_menu(
@@ -87,6 +112,29 @@ impl WorkspaceView {
         if !self.selected_object_keys.contains(key) {
             self.select_object_for_row_action(key);
         }
+        self.object_menu_targets = menu_targets_for(key, &self.selected_object_keys, true);
+        self.object_menu_open = Some(key.to_string());
+        self.object_menu_at = Some(at);
+        self.preview_overlay_open = false;
+        self.details_overlay_open = false;
+        cx.notify();
+    }
+
+    /// ⋯ 入口（行末「操作」列）：**不改动选择**，只打开菜单并把动作目标设为该行。
+    pub(super) fn open_row_actions_menu(
+        &mut self,
+        key: &str,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.object_menu_open.as_deref() == Some(key) {
+            self.object_menu_open = None;
+            self.object_menu_at = None;
+            self.object_menu_targets.clear();
+            cx.notify();
+            return;
+        }
+        self.object_menu_targets = menu_targets_for(key, &self.selected_object_keys, false);
         self.object_menu_open = Some(key.to_string());
         self.object_menu_at = Some(at);
         self.preview_overlay_open = false;

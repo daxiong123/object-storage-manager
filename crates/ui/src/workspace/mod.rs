@@ -309,6 +309,9 @@ pub struct WorkspaceView {
     /// 「锚定元素所在容器的原点」——那个原点会随按钮所在的容器变化（按钮从
     /// 标题栏挪到内容区工具栏后就偏了），而窗口坐标与容器无关。
     top_more_menu_at: Option<Point<Pixels>>,
+    /// 对象菜单打开时记录的**动作目标集合**（见 `menu_targets_for`）。
+    /// 菜单关闭后清空；清空后动作回落为普通选择集。
+    object_menu_targets: Vec<String>,
     /// 传输面板是否展开（显示每任务明细）。收起态仅显示一行汇总。
     transfers_expanded: bool,
     /// 当前是否显示对象详情弹层。
@@ -619,6 +622,7 @@ impl WorkspaceView {
             object_menu_at: None,
             top_more_open: false,
             top_more_menu_at: None,
+            object_menu_targets: Vec::new(),
             transfers_expanded: false,
             details_overlay_open: false,
             about_overlay_open: false,

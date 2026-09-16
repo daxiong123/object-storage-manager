@@ -106,7 +106,7 @@ impl WorkspaceView {
         {
             return;
         }
-        let source_keys = self.selected_object_keys_vec();
+        let source_keys = self.action_target_keys();
         if source_keys.is_empty() {
             self.download_message = Some(DownloadMessage {
                 is_error: true,

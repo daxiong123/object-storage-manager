@@ -45,13 +45,9 @@ impl WorkspaceView {
             return;
         }
         // 多选集合（主选兼容：单选时两者一致）
-        let keys: Vec<String> = if self.selected_object_keys.is_empty() {
-            self.selected_cloud_object()
-                .map(|o| vec![o.key.clone()])
-                .unwrap_or_default()
-        } else {
-            self.selected_object_keys.iter().cloned().collect()
-        };
+        // 动作目标：菜单开着时是「菜单那一行（或它在多选里的整批）」，
+        // 否则是普通选择集。见 `action_target_keys` / `menu_targets_for`。
+        let keys: Vec<String> = self.action_target_keys();
         if keys.is_empty() {
             self.download_message = Some(DownloadMessage {
                 is_error: true,

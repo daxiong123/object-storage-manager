@@ -305,6 +305,25 @@ impl WorkspaceView {
     }
 
     /// ↑↓/←→ 按当前展示顺序移动主选；⇧ 扩选。预览打开时只换对象、不扩选，并重载预览。
+    /// 菜单/工具栏动作的目标集合。
+    ///
+    /// 菜单开着时用菜单记录的目标（见 `menu_targets_for`），否则就是普通选择集——
+    /// 菜单栏、命令面板、快捷键走的都是这条回落路径。
+    pub(super) fn action_target_keys(&self) -> Vec<String> {
+        // 自守：不仅要求菜单开着，还要求**记录的目标里包含菜单所指的那一行**。
+        // 这样即使哪条关闭路径忘了清空目标，也不会把陈旧目标当成动作对象——
+        // 代价只是一次线性查找，换掉的是「删错对象」这类错误。
+        if let Some(open) = self.object_menu_open.as_deref()
+            && self
+                .object_menu_targets
+                .iter()
+                .any(|candidate| candidate == open)
+        {
+            return self.object_menu_targets.clone();
+        }
+        self.selected_object_keys_vec()
+    }
+
     /// 行首复选框：切换单个对象的选中态（等同 ⌘Click）。
     ///
     /// 刻意复用 `apply_object_selection`，不在复选框里另写一份「加入/移出集合」：
