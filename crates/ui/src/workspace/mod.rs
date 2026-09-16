@@ -240,6 +240,10 @@ pub struct WorkspaceView {
     path_input: Option<Entity<InputState>>,
     /// 过滤命中缓存（render 时由 filter_entries 计算；None = 未开启过滤）。
     filtered_ix: Option<Vec<usize>>,
+    /// 上一次生效的过滤查询词（已 trim）。用来判断「查询词有没有变」——
+    /// 只有真变了才丢弃对象选择（见 `refresh_filter`）：该函数在数据重载/翻页后
+    /// 也会被调用，那时清选择是误伤。
+    filter_query: String,
     /// 对象列表排序方式（工具栏循环切换；Natural = 列举原序）。
     object_sort: ObjectSort,
     /// 当前帧的显示顺序（`entries` 下标序列，已应用排序与过滤）。
@@ -574,6 +578,7 @@ impl WorkspaceView {
             object_filter: None,
             path_input: None,
             filtered_ix: None,
+            filter_query: String::new(),
             object_sort: ObjectSort::default(),
             display_order: Vec::new(),
             object_list_scroll: UniformListScrollHandle::new(),

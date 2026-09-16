@@ -966,6 +966,27 @@ fn directory_mixed_reverse_shift_range_uses_object_indexes() {
 }
 
 #[test]
+fn filter_drops_selection_only_when_filtering_actually_changes() {
+    // 开始过滤 / 过滤条件变了 → 必须丢选择（否则搜索结果会带着旧选中底色，
+    // 而 ⌘⌫ 取的是选择全集，可能删掉当前看不见的对象）
+    assert!(filter_drops_selection("", "2025"));
+    assert!(filter_drops_selection("2025", "2026"));
+
+    // 过滤条件没变 → 不丢。`refresh_filter` 在数据重载/翻页后也会被调用，
+    // 那时丢选择是误伤（用户刚在过滤结果里选了几项，点「加载更多」不该清空）。
+    assert!(!filter_drops_selection("2025", "2025"));
+
+    // 清空查询 → 不丢：可见集回到全集，选中项全都看得见
+    assert!(!filter_drops_selection("2025", ""));
+
+    // 空白查询等同「没有过滤」（与 filter_entries 的处理一致）：
+    // 只敲空格不该被当成开始了过滤，也不该丢掉选择。比较按 trim 后进行。
+    assert!(!filter_drops_selection("", ""));
+    assert!(!filter_drops_selection("", " "));
+    assert!(!filter_drops_selection("  ", " "));
+}
+
+#[test]
 fn filter_entries_none_or_blank_keeps_all() {
     let entries = vec![
         ListingEntry::CommonPrefix("dir/".into()),
