@@ -131,21 +131,28 @@ impl WorkspaceView {
                             }),
                     ),
             )
-            .child(self.render_object_search(cx))
-            // 刷新放在搜索框右侧（参照实现的工具栏右端是 搜索 + ⟳）：
-            // 它是「重新拉取当前列表」，跟右侧这组读取类控件在一起更顺。
+            // 右端是**一组**：搜索 + 刷新必须紧挨着。
+            // 工具栏是 `justify_between`——如果把刷新直接加成工具栏的第三个子项，
+            // 它会顶到最右、把搜索留在中间，中间就空出一大块（踩过）。
             .child(
-                Button::new("toolbar-refresh")
-                    .icon(Icon::new(IconName::Replace))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .tooltip("刷新")
-                    .disabled(self.objects_state == AsyncState::Loading)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.handle_refresh(&Refresh, window, cx)
-                        }),
+                h_flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    .child(self.render_object_search(cx))
+                    .child(
+                        Button::new("toolbar-refresh")
+                            // `RotateCw` 是约定俗成的刷新图形（顺时针环箭头）；
+                            // 之前用的 `Replace` 是两个箭头互换，语义是「替换」不是「刷新」。
+                            .icon(Icon::new(IconName::RotateCw))
+                            .ghost()
+                            .with_size(Size::Small)
+                            .tooltip("刷新")
+                            .disabled(self.objects_state == AsyncState::Loading)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.handle_refresh(&Refresh, window, cx)
+                            })),
                     ),
             )
             .into_any_element()
