@@ -1,21 +1,19 @@
 cask "cloudstorage" do
-  version "0.2.0"
-  sha256 "2b65bf77c84afbba7c6e158337979db6a15519b1b4b26278e6efc8e1057da7cf"
+  version "0.3.0"
+  sha256 "ffd7232410334ff285f1ba6d7a016eef03e1cb4584ae08e4fcd72e7d480d059c"
 
-  url "https://github.com/daxiong123/object-storage-manager/releases/download/v#{version}/CloudStorage-#{version}-macos-arm64.zip",
-      verified: "github.com/daxiong123/object-storage-manager/"
+  url "https://github.com/daxiong123/object-storage-manager/releases/download/v#{version}/CloudStorage-v#{version}-macos-arm64.zip"
   name "CloudStorage"
-  desc "跨云对象存储管理客户端（阿里云 OSS / 七牛云 / S3 兼容存储）"
+  desc "Native object storage manager for Qiniu Kodo and Aliyun OSS"
   homepage "https://github.com/daxiong123/object-storage-manager"
 
-depends_on macos: :sonoma
+  depends_on arch: :arm64
+  depends_on macos: :sonoma
 
-  # 当前产物为 ad-hoc 签名：首次安装后需右键打开一次，
-  # 或改用 --no-quarantine 安装。后续正式发布将提供 Developer ID 签名与公证。
   app "CloudStorage.app"
 
-  zap trash: [
-    "~/Library/Application Support/CloudStorage",
-    "~/Library/Preferences/com.example.cloudstorage.plist",
-  ]
+  caveats <<~EOS
+    This release is ad-hoc signed and not notarized by Apple. If macOS blocks
+    the first launch, allow CloudStorage in System Settings > Privacy & Security.
+  EOS
 end

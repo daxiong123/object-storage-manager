@@ -7,7 +7,7 @@
 #   ./scripts/build-app.sh --no-build  # 仅用现有 target/release 二进制打包
 #
 # 产物：
-#   dist/CloudStorage-{version}-macos-{arch}.zip
+#   dist/CloudStorage-v{version}-macos-{arch}.zip
 # 脚本会打印该 zip 的 sha256，供 Homebrew cask 使用。
 set -euo pipefail
 
@@ -38,7 +38,9 @@ esac
 
 DIST_DIR="dist"
 APP_BUNDLE="$DIST_DIR/CloudStorage.app"
-ZIP_FILE="$DIST_DIR/CloudStorage-${VERSION}-macos-${ARCH}.zip"
+# 资产名带 `v`：Homebrew cask 的 URL 用的是 `CloudStorage-v#{version}-...`，
+# 三者（脚本产物 / release 资产 / cask URL）必须同名，否则 cask 会指向不存在的文件。
+ZIP_FILE="$DIST_DIR/CloudStorage-v${VERSION}-macos-${ARCH}.zip"
 
 echo "==> 版本 : $VERSION"
 echo "==> 架构 : $ARCH"
