@@ -117,6 +117,18 @@ impl WorkspaceView {
             return;
         }
         self.object_menu_targets = menu_targets_for(key, &self.selected_object_keys, false);
+        // **未选中任何对象时，把「主选」设为这一行**（不动多选集合）。
+        //
+        // 这样菜单里所有「按当前对象」的动作（详情 / 重命名 / 复制链接 / 下载 / 删除 /
+        // 复制到·移动到）都能直接拿到这一行的数据，不必再提示「请先选中对象」——
+        // 它们解析「当前对象」时都回落到主选（`selected_cloud_object()`，以及集合为空时
+        // 的 `selected_object_keys_vec()`）。
+        //
+        // 关键：**行高亮只认多选集合**（`selected_object_keys.contains(..)`），所以这样做
+        // 不会让这一行看起来被选中；而且主选在菜单关闭后仍然有效，动作路径不依赖菜单开着。
+        if self.selected_object_keys.is_empty() {
+            self.selected_object_key = Some(key.to_string());
+        }
         self.object_menu_open = Some(key.to_string());
         self.object_menu_at = Some(at);
         self.preview_overlay_open = false;
