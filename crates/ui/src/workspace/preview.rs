@@ -1,13 +1,21 @@
 //! 预览与本地副本：应用内预览、文本编辑保存、Open With / Reveal、签名链接。
 
 use super::*;
+// `upload` 不在父模块的 glob 列表里（它只含自由函数 + 方法，见 mod.rs 的模块说明），
+// 所以这里显式引入上传上限判据。
+use super::upload::{upload_cap_rejection_message, upload_exceeds_cap};
 
 // 弹层「卡片阻断两相冒泡」这条规范原先是这里的纯函数判据（已删除）：现在由
 // `overlay::surface()` 统一提供，构造即合规，不再需要靠测试断言去守。
+
+/// 应用内编辑器的文本上限：超过就不把整个文件读进内存，浮层改为给「系统预览」入口。
+const TEXT_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
 pub(super) fn provider_url_scheme(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Aliyun => "oss",
         ProviderKind::Qiniu => "kodo",
+        ProviderKind::Tencent => "cos",
     }
 }
 
@@ -30,9 +38,11 @@ pub(crate) fn cached_copy_matches(path: Option<&std::path::Path>, object_key: &s
         .is_some_and(|n| n.ends_with(name) && n.len() > name.len())
 }
 
-/// 七牛目录占位对象：key 以 `/` 结尾（size=0，mimeType 为
-/// `application/qiniu-object-manager`）。下载必 404，无预览/打开/URL 语义；
-/// 交互上应与 CommonPrefix 一致：点击 = 下钻。
+/// 目录占位对象：key 以 `/` 结尾、size=0 的「假文件」。
+///
+/// 七牛的 mimeType 是 `application/qiniu-object-manager`；腾讯云 COS 在控制台新建
+/// 目录时同样创建一个键为 `<前缀>/` 的空对象。两家都无法下载/预览/签名（必 404），
+/// 目录语义的唯一载体是 `CommonPrefix`；交互上应与它一致：点击 = 下钻。
 pub(super) fn is_directory_object(key: &str) -> bool {
     key.ends_with('/')
 }
@@ -55,56 +65,112 @@ pub(super) fn is_image_object(key: &str) -> bool {
     Img::extensions().iter().any(|candidate| *candidate == ext)
 }
 
-pub(super) fn syntax_language(key: &str) -> &'static str {
-    match key
-        .rsplit('.')
-        .next()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("json") => "json",
-        Some("js") => "javascript",
-        Some("ts") => "typescript",
-        Some("html" | "htm") => "html",
-        Some("css") => "css",
-        Some("md") => "markdown",
-        Some("xml") => "xml",
-        Some("yaml" | "yml") => "yaml",
-        Some("rs") => "rust",
-        Some("csv") | Some("txt") | None => "text",
-        _ => "text",
+/// 应用内文本预览的白名单：扩展名 → 语法高亮用的语言名。白名单与语言映射是同一张表，
+/// 不会出现「加了扩展名忘了配语言」两半各改一次；语言名在已启用的 grammar 集里找不到时，
+/// 高亮自动回落纯文本（`xml` 只有显示名，无 grammar）。
+const TEXT_EXTENSIONS: &[(&str, &str)] = &[
+    // 有 grammar
+    ("rs", "rust"),
+    ("py", "python"),
+    ("go", "go"),
+    ("java", "java"),
+    ("kt", "kotlin"),
+    ("swift", "swift"),
+    ("c", "c"),
+    ("h", "c"),
+    ("cpp", "cpp"),
+    ("hpp", "cpp"),
+    ("cs", "csharp"),
+    ("rb", "ruby"),
+    ("php", "php"),
+    ("lua", "lua"),
+    ("scala", "scala"),
+    ("zig", "zig"),
+    ("proto", "proto"),
+    ("graphql", "graphql"),
+    ("json", "json"),
+    ("js", "javascript"),
+    ("jsx", "javascript"),
+    ("ts", "typescript"),
+    ("tsx", "tsx"),
+    ("html", "html"),
+    ("htm", "html"),
+    ("css", "css"),
+    ("md", "markdown"),
+    ("yaml", "yaml"),
+    ("yml", "yaml"),
+    ("toml", "toml"),
+    ("sh", "bash"),
+    ("bash", "bash"),
+    ("zsh", "bash"),
+    ("sql", "sql"),
+    ("svelte", "svelte"),
+    ("astro", "astro"),
+    // 无 grammar：应用内可看/可改/可 ⌘S 回传，但不高亮
+    ("txt", "text"),
+    ("csv", "text"),
+    ("tsv", "text"),
+    ("log", "text"),
+    ("ini", "text"),
+    ("conf", "text"),
+    ("cfg", "text"),
+    ("env", "text"),
+    ("properties", "text"),
+    ("xml", "xml"),
+];
+
+/// 无扩展名（或点开头）的文件按名字识别，**点开头的名字要连点一起写**（`.env` 不是扩展名
+/// 为 `env` 的文件）。README 惯例是 Markdown，写成纯文本也会被正常当作段落显示。
+const TEXT_FILE_NAMES: &[(&str, &str)] = &[
+    ("makefile", "make"),
+    ("gnumakefile", "make"),
+    ("readme", "markdown"),
+    ("dockerfile", "text"),
+    ("license", "text"),
+    ("licence", "text"),
+    (".gitignore", "text"),
+    (".env", "text"),
+];
+
+/// object key 的最后一段
+fn basename(key: &str) -> &str {
+    key.rsplit('/').next().unwrap_or(key)
+}
+
+/// 小写扩展名。点开头的名字（`.env`、`.gitignore`）整名交给 `TEXT_FILE_NAMES`，
+/// 不把 `.` 后面的部分当扩展名。
+fn file_extension(key: &str) -> Option<String> {
+    match basename(key).rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => Some(ext.to_ascii_lowercase()),
+        _ => None,
     }
 }
 
+/// 文本预览的语言名；`None` = 不进应用内文本预览（图片走 `Img`，其余交系统）
+fn text_language(key: &str) -> Option<&'static str> {
+    let name = basename(key).to_ascii_lowercase();
+    if let Some((_, language)) = TEXT_FILE_NAMES.iter().find(|(file, _)| *file == name) {
+        return Some(language);
+    }
+    let extension = file_extension(key)?;
+    TEXT_EXTENSIONS
+        .iter()
+        .find(|(ext, _)| extension == *ext)
+        .map(|(_, language)| *language)
+}
+
+pub(super) fn syntax_language(key: &str) -> &'static str {
+    text_language(key).unwrap_or("text")
+}
+
 pub(super) fn is_text_object(key: &str) -> bool {
-    matches!(
-        key.rsplit('.')
-            .next()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some(
-            "txt"
-                | "json"
-                | "md"
-                | "html"
-                | "htm"
-                | "css"
-                | "js"
-                | "ts"
-                | "xml"
-                | "yaml"
-                | "yml"
-                | "csv"
-                | "toml"
-                | "rs"
-        )
-    )
+    text_language(key).is_some()
 }
 
 pub(super) fn preview_download_error_message(bucket: &str, key: &str, error: &str) -> String {
     let sanitized = sanitize_remote_error(error);
     format!(
-        "无法预览：{}\n\n请检查：\n1. 当前账号能否读取 `{}`；\n2. 七牛：Bucket `{bucket}` 的下载域名是否可用；\n3. 阿里云 OSS：Endpoint/区域和 RAM 权限是否正确。",
+        "无法预览：{}\n\n请检查：\n1. 当前账号能否读取 `{}`；\n2. 七牛：Bucket `{bucket}` 的下载域名是否可用；\n3. 阿里云 OSS：Endpoint/区域和 RAM 权限是否正确；\n4. 腾讯云 COS：Bucket `{bucket}` 的地域与存储桶权限是否正确。",
         sanitized,
         display_name(key)
     )
@@ -183,6 +249,7 @@ impl WorkspaceView {
         self.previewing = true;
         self.preview_path = None;
         self.preview_text = None;
+        self.preview_oversized = false;
         self.text_editor = None;
         self.download_message = None;
         cx.notify();
@@ -198,20 +265,25 @@ impl WorkspaceView {
                         .map_err(|e| {
                             preview_download_error_message(&bucket, &key, &e.to_string())
                         })?;
-                    let text = if is_text_object(&key) {
+                    let (text, oversized) = if is_text_object(&key) {
                         let metadata = std::fs::metadata(&path)
                             .map_err(|e| format!("读取预览文件信息失败：{e}"))?;
-                        if metadata.len() > 2 * 1024 * 1024 {
-                            return Err("文本对象超过 2 MiB，暂不在编辑器中打开".into());
+                        if metadata.len() > TEXT_PREVIEW_MAX_BYTES {
+                            // 不报错：超限只是「不在应用内打开」，浮层据此给出系统应用入口
+                            (None, true)
+                        } else {
+                            (
+                                Some(
+                                    std::fs::read_to_string(&path)
+                                        .map_err(|e| format!("文本对象不是有效 UTF-8：{e}"))?,
+                                ),
+                                false,
+                            )
                         }
-                        Some(
-                            std::fs::read_to_string(&path)
-                                .map_err(|e| format!("文本对象不是有效 UTF-8：{e}"))?,
-                        )
                     } else {
-                        None
+                        (None, false)
                     };
-                    Ok::<_, String>((path, text))
+                    Ok::<_, String>((path, text, oversized))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -220,21 +292,10 @@ impl WorkspaceView {
                 }
                 this.previewing = false;
                 match result {
-                    Ok((path, text)) => {
-                        this.preview_path = Some(path.clone());
+                    Ok((path, text, oversized)) => {
+                        this.preview_path = Some(path);
                         this.preview_text = text;
-                        if this.preview_open_quicklook {
-                            this.preview_open_quicklook = false;
-                            if let Some(key) = this.selected_object_key.as_deref()
-                                && preview_kind(key) == PreviewKind::System
-                                && let Err(error) = object_storage_macos::quick_look(&path)
-                            {
-                                this.download_message = Some(DownloadMessage {
-                                    is_error: true,
-                                    text: format!("打开 Quick Look 失败：{error}"),
-                                });
-                            }
-                        }
+                        this.preview_oversized = oversized;
                     }
                     Err(error) => {
                         this.download_message = Some(DownloadMessage {
@@ -460,6 +521,20 @@ impl WorkspaceView {
             return;
         };
         let text = editor.read(cx).value().to_string();
+        // 上传大小上限：**必须在 fs::write 之前判**。否则超限时本地预览缓存
+        // 已被改成新内容、preview_text 也被更新，而云端对象没变——磁盘缓存与
+        // 云端副本不一致，脏标记也跟着错乱。
+        let cap_mb = self.settings.max_upload_size_mb;
+        let size = text.len() as u64;
+        if upload_exceeds_cap(size, cap_mb) {
+            let name = display_name(&object).to_string();
+            self.download_message = Some(DownloadMessage {
+                is_error: true,
+                text: upload_cap_rejection_message(&[(name, size)], cap_mb),
+            });
+            cx.notify();
+            return;
+        }
         if let Err(error) = std::fs::write(&path, text.as_bytes()) {
             self.download_message = Some(DownloadMessage {
                 is_error: true,
@@ -659,7 +734,6 @@ impl WorkspaceView {
         self.preview_needs_focus = true;
         self.object_menu_open = None;
         self.details_overlay_open = false;
-        self.preview_open_quicklook = false;
         self.start_object_preview(cx);
     }
 
@@ -695,7 +769,11 @@ impl WorkspaceView {
         let kind = preview_kind(&object.key);
         let file_type = object.mime_type.clone().unwrap_or_else(|| match kind {
             PreviewKind::Image => "image/*".into(),
-            PreviewKind::Text => format!("text/{}", syntax_language(&object.key)),
+            PreviewKind::Text => match syntax_language(&object.key) {
+                // 语言名只是高亮用的标识，别拼成不存在的 `text/text`
+                "text" => "text/plain".into(),
+                language => format!("text/{language}"),
+            },
             PreviewKind::System => "未知类型".into(),
         });
         let error = self
@@ -786,6 +864,36 @@ impl WorkspaceView {
                         .child(text),
                 )
                 .into_any_element()
+        } else if self.preview_oversized {
+            v_flex()
+                .size_full()
+                .w_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_6()
+                .child(
+                    Icon::new(IconName::Info)
+                        .text_size(tokens::icon_sm())
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .text_size(tokens::heading())
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(format!(
+                            "文本对象超过 {} MiB",
+                            TEXT_PREVIEW_MAX_BYTES / (1024 * 1024)
+                        )),
+                )
+                .child(
+                    div()
+                        .max_w(tokens::text(420.))
+                        .text_size(tokens::label())
+                        .text_color(theme.muted_foreground)
+                        .child("超大文本不读进应用内编辑器，以免占满内存。可用下方「系统预览」查看，或先下载到本机。"),
+                )
+                .into_any_element()
         } else if kind == PreviewKind::Image {
             match self.preview_path.clone() {
                 Some(path) => div()
@@ -852,7 +960,9 @@ impl WorkspaceView {
                 .into_any_element()
         };
 
-        let can_open_system = kind == PreviewKind::System && self.preview_path.is_some();
+        // 超限文本也走系统预览：缓存文件已下好，等于零成本兜底
+        let can_open_system =
+            (kind == PreviewKind::System || self.preview_oversized) && self.preview_path.is_some();
         let meta_label = |label: &'static str| {
             div()
                 .w(tokens::text(110.))

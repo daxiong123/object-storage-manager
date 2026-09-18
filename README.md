@@ -1,6 +1,6 @@
 # CloudStorage
 
-**一款专为 macOS 打造的原生对象存储工作台** —— 一个窗口里管好七牛 Kodo 与阿里云 OSS。
+**一款专为 macOS 打造的原生对象存储工作台** —— 一个窗口里管好七牛 Kodo、阿里云 OSS 与腾讯云 COS。
 
 用 Rust + GPUI 从头构建，不含 Electron / Chromium / WebView。键盘优先、启动即用、内存占用低，把 Finder 的操作习惯搬到云端对象存储上，其余系统能力（Keychain、Quick Look、剪贴板、系统外观、文件面板）直接交给 macOS。
 
@@ -8,7 +8,7 @@
 |---|---|
 | 平台 | macOS 14 (Sonoma) 及以上，Apple Silicon (arm64) |
 | 当前版本 | 0.3.0 |
-| 支持的服务商 | 七牛 Kodo、阿里云 OSS |
+| 支持的服务商 | 七牛 Kodo、阿里云 OSS、腾讯云 COS |
 | 技术栈 | Rust 2024 · GPUI (`gpui-pre`) · gpui-component · Tokio · reqwest + rustls · SQLite |
 
 > 项目仍在活跃开发中：账号、浏览、传输、预览、设置等主链路已可用；尚未完成的部分集中列在下面的[已知边界](#已知边界)。
@@ -56,7 +56,7 @@ brew zap cloudstorage                # 连配置与缓存一起清理
 
 ## 快速上手
 
-1. 点侧栏「账户」分组里的 **+ 添加账号**（也可 ⌘N 或 ⌘K 搜索「添加账号」），选服务商（七牛 Kodo / 阿里云 OSS），填入 Access Key 与 Secret Key。
+1. 点侧栏「账户」分组里的 **+ 添加账号**（也可 ⌘N 或 ⌘K 搜索「添加账号」），选服务商（七牛 Kodo / 阿里云 OSS / 腾讯云 COS），填入 Access Key 与 Secret Key。
 2. 选中账号，侧栏下半段列出空间（Bucket）；选中空间，右侧列出对象。
 3. **双击目录下钻、双击文件预览**；⌘U 上传，选中后 ⌘⌫ 删除，Return 重命名。
 4. 记不住快捷键就按 ⌘K —— 菜单、工具栏、右键菜单里的动作都能在命令面板里找到。
@@ -67,7 +67,7 @@ Secret 只写入 macOS Keychain，SQLite 里只有账号元数据。
 
 ### 账号与凭据
 
-- 七牛 Kodo 与阿里云 OSS 可混用多账号，侧栏一键切换
+- 七牛 Kodo、阿里云 OSS 与腾讯云 COS 可混用多账号，侧栏一键切换
 - 账号元数据（含 Access Key）存 SQLite，Secret Key 只存 macOS Keychain
 - 创建账号时先写 Keychain 再写 SQLite，写库失败会回滚 Keychain 条目；删除幂等
 - SK 在会话内缓存，钥匙串授权弹窗只在「选中账号后的第一次操作」出现
@@ -117,7 +117,9 @@ Secret 只写入 macOS Keychain，SQLite 里只有账号元数据。
 
 ### 设置（⌘,）
 
-签名链接有效期、剪贴板自动清除秒数、外观模式（跟随系统 / 浅色 / 深色）、界面字体族与字号缩放、代码字体族与字号、传输并发数、默认下载目录。
+签名链接有效期、剪贴板自动清除秒数、外观模式（跟随系统 / 浅色 / 深色）、界面字体族与字号缩放、代码字体族与字号、传输并发数、默认下载目录、上传大小上限。
+
+**上传大小上限**限制的是**本地文件上传**（⌘U 上传文件、上传文件夹、Finder 拖放、⌘S 保存编辑后的文本）：超过上限的文件不会被加入队列，状态条会点名是哪些文件。`0` 表示不限制（默认）。云端复制 / 移动 / 重命名不受此限制。可设置的最大值是 **5119 MB**——必须小于 5 GB，因为 5 GB 是腾讯云 COS 简单上传的硬性上限。
 
 设置写入 `~/Library/Application Support/CloudStorage/settings.json`；文件损坏会显式报错，不会静默重置。
 
@@ -158,6 +160,7 @@ Secret 只写入 macOS Keychain，SQLite 里只有账号元数据。
 - 系统通知（UserNotifications）与自动更新尚未接入；更新流程只预留了架构边界
 - `crates/preview` 与 `crates/common` 目前是占位 crate，尚无实现
 - 七牛：**断点续传明确不做**；上传域名已按 Bucket 解析；拖出到 Finder 未做
+- 腾讯云 COS：**分块上传明确不做**，单个对象超过 5 GB（简单上传上限）会直接报错；暂不支持 STS 临时凭证
 - 仓库暂无 CI 工作流，验证在本地执行（见「本地开发」）
 
 ## 项目结构
@@ -171,6 +174,7 @@ crates/
   storage-core/     StorageProvider trait 与共享类型
   provider-qiniu/   七牛 Kodo 实现（V2 签名、区域上传域名解析）
   provider-aliyun/  阿里云 OSS 实现（V1 签名）
+  provider-tencent/ 腾讯云 COS 实现（签名 v5）
   transfer/         传输引擎：队列、状态机、并发上限、watch 事件订阅
   persistence/      SQLite（账号 / 传输任务）与 settings.json
   macos/            Keychain、系统事件、Quick Look、剪贴板、关于面板
@@ -182,6 +186,7 @@ docs/
   notes/gpui-api-notes.md       已在源码核实过的 GPUI API 事实与陷阱
   notes/qiniu-api-notes.md      七牛签名、上传域名与 API 行为
   notes/aliyun-api-notes.md     阿里云 OSS 签名、域名与 API 行为
+  notes/tencent-cos-api-notes.md 腾讯云 COS 签名 v5、端点、错误码与目录语义
 
 scripts/build-app.sh            构建 + 打包 .app + 生成 icns + 签名 + 出 zip
 Casks/cloudstorage.rb           Homebrew cask 定义
@@ -207,11 +212,14 @@ cargo test --workspace
 cargo build --release
 ```
 
-当前 `cargo test --workspace` 为 **188 passed / 1 ignored**——被忽略的那条是需要真实凭证的七牛联网用例，可这样单独跑：
+当前 `cargo test --workspace` 为 **220 passed / 2 ignored**——被忽略的两条是需要真实凭证的联网用例（七牛、腾讯云 COS），可这样单独跑：
 
 ```bash
 QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=yyy \
   cargo test -p object-storage-qiniu -- --ignored --nocapture
+
+TENCENT_SECRET_ID=xxx TENCENT_SECRET_KEY=yyy \
+  cargo test -p object-storage-tencent -- --ignored --nocapture
 ```
 
 UI 的单个视图可以离屏渲染后截图做视觉验收，不影响当前前台应用：
@@ -248,7 +256,7 @@ OSM_PREVIEW_VIEW=search cargo run -p object-storage-desktop --example view_previ
 - [`agents.md`](agents.md)：项目操作契约——平台与技术约束、关键决策及其根因、UX 硬标准、工程纪律
 - [`docs/spec/macos-platform-spec.md`](docs/spec/macos-platform-spec.md)：完整 macOS 平台规范（与契约冲突时以规范为准）
 - [`docs/notes/gpui-api-notes.md`](docs/notes/gpui-api-notes.md)：GPUI / gpui-component 已验证的 API 事实与踩坑记录
-- [`docs/notes/qiniu-api-notes.md`](docs/notes/qiniu-api-notes.md)、[`docs/notes/aliyun-api-notes.md`](docs/notes/aliyun-api-notes.md)：两家服务商的签名与接口行为
+- [`docs/notes/qiniu-api-notes.md`](docs/notes/qiniu-api-notes.md)、[`docs/notes/aliyun-api-notes.md`](docs/notes/aliyun-api-notes.md)、[`docs/notes/tencent-cos-api-notes.md`](docs/notes/tencent-cos-api-notes.md)：三家服务商的签名与接口行为
 
 ## License
 

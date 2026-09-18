@@ -5,10 +5,13 @@
 
 use super::*;
 
+/// 服务商各自的侧栏图标。三家必须互不相同——账号行里只显示账号名，
+/// 图标是区分服务商的唯一视觉线索。改动时同步 `tests.rs:provider_icon_distinguishes_vendors`。
 pub(super) fn provider_icon(kind: ProviderKind) -> IconName {
     match kind {
         ProviderKind::Qiniu => IconName::Globe,
         ProviderKind::Aliyun => IconName::Building2,
+        ProviderKind::Tencent => IconName::HardDrive,
     }
 }
 

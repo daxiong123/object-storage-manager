@@ -11,7 +11,8 @@ mod transfers;
 
 pub use accounts::{AccountRepository, PersistenceError, default_data_dir, default_db_path};
 pub use settings::{
-    AppearanceMode, CLIPBOARD_CLEAR_DEFAULT, CODE_FONT_SIZE_DEFAULT, SIGNED_URL_TTL_DEFAULT,
-    Settings, TRANSFER_CONCURRENCY_DEFAULT, UI_FONT_SCALE_DEFAULT, settings_path,
+    AppearanceMode, CLIPBOARD_CLEAR_DEFAULT, CODE_FONT_SIZE_DEFAULT, MAX_UPLOAD_SIZE_MB_CEILING,
+    MAX_UPLOAD_SIZE_MB_DEFAULT, SIGNED_URL_TTL_DEFAULT, Settings, TRANSFER_CONCURRENCY_DEFAULT,
+    UI_FONT_SCALE_DEFAULT, settings_path,
 };
 pub use transfers::PersistedTransfer;

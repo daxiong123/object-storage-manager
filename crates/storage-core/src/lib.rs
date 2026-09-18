@@ -1,7 +1,7 @@
 //! Provider abstraction：对象存储 Provider trait 与公共错误类型
 //!
-//! 抽象原则（agents.md §3 / spec §63）：为真实需求抽象——七牛与阿里云两个真实
-//! Provider 需要统一接口，而不是为不存在的平台做抽象。因此本 crate 只有：
+//! 抽象原则（agents.md §3 / spec §63）：为真实需求抽象——七牛 Kodo、阿里云 OSS、
+//! 腾讯云 COS 三个真实 Provider 需要统一接口，而不是为不存在的平台做抽象。因此本 crate 只有：
 //! - `StorageProvider` trait（async，按服务商枚举分发，不需要 dyn）
 //! - `StorageError` 统一错误
 //!

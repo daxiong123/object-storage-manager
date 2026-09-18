@@ -49,7 +49,7 @@ impl AddAccountModal {
     pub fn new(services: Arc<AppServices>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("如：个人七牛")
+                .placeholder("如：工作账号")
                 .clean_on_escape()
         });
         let access_key = cx.new(|cx| {
@@ -139,6 +139,9 @@ impl AddAccountModal {
                         ProviderKind::Aliyun => {
                             services.add_aliyun_account(&name, &access_key, &secret_key)
                         }
+                        ProviderKind::Tencent => {
+                            services.add_tencent_account(&name, &access_key, &secret_key)
+                        }
                     }
                 })
                 .await;
@@ -182,11 +185,11 @@ impl AddAccountModal {
             }))
     }
 
-    /// 服务商选择：一条分段控件（两个互斥选项）。
+    /// 服务商选择：一条分段控件（三个互斥选项）。
     ///
     /// 选中态必须**一眼看得出来**，这里是三处刻意决定：
     ///
-    /// - 用库自带的 `ButtonGroup` 而不是两个各自独立的 `Button`：它把两段并成一条
+    /// - 用库自带的 `ButtonGroup` 而不是几个各自独立的 `Button`：它把几段并成一条
     ///   分段控件，并给每个子按钮打 `.toggled(bool)` 无障碍标记（"这段是按下的"）。
     /// - 选中底色走 `ButtonVariant::Custom` 的 **`active`** 色 = `sidebar_accent`
     ///   （与侧栏、设置左导航选中行同一个 token）。`ButtonGroup` 的选中样式取
@@ -196,8 +199,10 @@ impl AddAccountModal {
     ///   于是「选了 Kodo 还是 OSS」肉眼分不出——这正是它原先不显眼的原因。
     /// - 选中项**另加对勾图标 + accent 文字色**：颜色不是唯一信号（不得只靠颜色表意）。
     ///
-    /// 宽度给固定档位（`tokens::text`，随字号缩放）而不是让内容撑开：两段等宽才像
-    /// 一条分段控件，而且切换时不会因为多了个对勾图标把另一段挤动。
+    /// 宽度给固定档位（`tokens::text`，随字号缩放）而不是让内容撑开：各段等宽才像
+    /// 一条分段控件，而且切换时不会因为多了个对勾图标把别的段挤动。
+    /// 三段等宽后总宽仍要留在卡片内容宽度内（`max_w(px(440.))` 减 `p_4`），
+    /// 加第四家时先看 `OSM_PREVIEW_VIEW=provider` 的截图再调。
     fn render_provider_picker(&self, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
         let variant = ButtonCustomVariant::new(cx)
             // 非选中段：不填色也不描边（Custom 变体的填充与边框同色，给透明即两者皆无），
@@ -236,6 +241,13 @@ impl AddAccountModal {
                         "provider-aliyun",
                         "阿里云 OSS",
                         ProviderKind::Aliyun,
+                    ))
+                    .child(self.provider_option(
+                        theme,
+                        cx,
+                        "provider-tencent",
+                        "腾讯云 COS",
+                        ProviderKind::Tencent,
                     )),
             )
     }
@@ -354,7 +366,7 @@ impl Render for AddAccountModal {
                 &theme,
                 "AccessKey",
                 &self.access_key,
-                Some("明文标识，保存在本机数据库"),
+                Some("明文标识（腾讯云为 SecretId），保存在本机数据库"),
             ))
             .child(self.render_field(
                 &theme,

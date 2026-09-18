@@ -1,0 +1,19 @@
+[package]
+name = "object-storage-tencent"
+description = "Tencent Cloud COS Provider：实现 StorageProvider trait（COS 签名 v5）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+object-storage-core = { workspace = true }
+object-storage-domain = { workspace = true }
+reqwest = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

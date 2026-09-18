@@ -175,6 +175,36 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 - `bool::then(|| self.render(&mut cx))` 这类写法会触发 E0524（两个闭包同时捕获 `&mut cx`）。
   改用普通 `if` 语句分分支构造。
 
+### Subscription 是 RAII：析构即退订（踩过，导致「系统切主题 App 不跟」）
+- `observe_window_appearance` / `observe` / `subscribe_in` 都返回 `Subscription`，
+  而 `Subscription::drop` 直接调 `unsubscribe()`（`subscription.rs:188`）。
+  **所以返回值必须被一个活得够久的宿主持有**，绑成局部变量等于立刻退订。
+- 踩坑现场：把订阅绑在 `cx.open_window(opts, |window, cx| { let _s = window.observe_window_appearance(..); .. })`
+  的闭包里——闭包一返回就析构，于是系统切换亮/暗再也不会触发回调，
+  主题只在启动和保存设置时更新过。实测探针输出：注册后**紧接着**就打印「订阅被丢弃」。
+- 官方测试的写法是把订阅**接到 `window.update(..)` 之外**：
+  ```rust
+  let _subscription = window.update(cx, { move |_, window, _| {
+      window.observe_window_appearance(move |window, _| { .. })
+  }}).unwrap();
+  ```
+  本仓库的做法是存进视图字段（`WorkspaceView::appearance_subscription`），
+  视图与窗口同生命周期。回归测试 `watch_window_appearance_is_retained_by_the_view`
+  把这条钉住（去掉存储就会红）。
+- 注意 `let _ = x` 与 `let _x = x` 都救不了：前者在语句末就 drop，后者在作用块末 drop。
+- 平台链路本身是通的（已核实）：macOS `viewDidChangeEffectiveAppearance`
+  → `on_appearance_changed` → `Window::appearance_changed` → 遍历 `appearance_observers`。
+  排查「外观事件不生效」时先怀疑订阅生命周期，别去查平台。
+
+### 强制切换外观以验证（不必改系统设置）
+- `App::set_window_appearance(Some(WindowAppearance::Light))` 可强制窗口外观，
+  它会触发与系统切换相同的 `viewDidChangeEffectiveAppearance` 路径，
+  适合自测「切主题」链路；传 `None` 恢复跟随系统。
+- **验证渲染时注意遮挡**：`screencapture -l <窗口号>` 抓的是窗口的 backing store，
+  窗口被别的 App 完全遮住时 macOS 不再合成它，抓到的是**上一次的陈旧画面**——
+  会得出「主题没切换」的错误结论（实测踩过）。要么确认目标 App 在最前，
+  要么改为在数据层验证（打印 `Theme::global(cx).mode` / `background`）。
+
 ## gpui-component 0.6.1
 
 ### 导入路径
@@ -228,7 +258,16 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 - 0.6.1 将单行 `Input`、多行 `Textarea`、代码 `Editor` 分成独立组件。
 - 文本对象预览/编辑使用 `EditorState::new(...).language(...).default_value(...)` +
   `Editor::new(...)`；普通表单继续用 `InputState` + `Input`。
-- 当前只启用 `tree-sitter` 基础 feature（保留 JSON 高亮）；没有真实格式需求前不引入整套语法 grammar。
+- 已启用 `tree-sitter-languages` 聚合 feature（30+ 语言 grammar，含 `tree-sitter` + `tree-sitter-json`），
+  取代早先只留 JSON 的 `tree-sitter`：**该聚合 feature 不包含 XML grammar**，所以 `syntax_language`
+  返回的 `xml` 只是显示名（mime 与预览标签），高亮回落纯文本。grammar 表由
+  `LanguageRegistry::singleton()`（`LazyLock`）在首次用到时才建，不参与冷启动。
+  `workspace/tests.rs` 的 `syntax_language_names_resolve_to_enabled_grammars` 把 feature 与映射绑在一起守。
+- 开这套 feature 会牵动解析结果：`tree-sitter-sql` → `tree-sitter-sequel` 的**构建依赖把 `cc` 钉在 `~1.2.1`**，
+  与 gpui-pre 经 `embed-resource` 引入的 `cc 1.4.x` 冲突（二者交集是 1.2.x）。解法是 `cargo update -p cc --precise 1.2.67`
+  把锁降到交集内，别去改 grammar 的依赖。release 二进制（strip 后）因此从 25.9 MB 涨到 62.8 MB；
+  只留映射表里用得到的语言（`tree-sitter` + javascript/typescript/html/css/markdown/yaml/rust/toml）是 29.4 MB，
+  为省体积时的替代方案。
 
 ### Command
 - 命令面板使用 `Command` + `CommandState`；组件原生提供大小写不敏感过滤、关键词、

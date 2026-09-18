@@ -158,6 +158,19 @@ impl AppServices {
             .add(name, ProviderKind::Aliyun, access_key, secret_key)?)
     }
 
+    /// 添加腾讯云 COS 账号（access_key 即 COS 侧的 SecretId）。
+    /// Secret 只入 Keychain，元数据只入 SQLite。
+    pub fn add_tencent_account(
+        &self,
+        name: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<Account, AppServicesError> {
+        Ok(self
+            .lock_accounts()
+            .add(name, ProviderKind::Tencent, access_key, secret_key)?)
+    }
+
     /// 列举某账号的全部 Bucket（首次触碰钥匙串可能弹授权；之后走会话缓存）。
     pub fn list_buckets(&self, account_id: &str) -> Result<Vec<Bucket>, AppServicesError> {
         let (_, provider) = self.build_provider(account_id)?;

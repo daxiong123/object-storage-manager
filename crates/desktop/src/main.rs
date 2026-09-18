@@ -101,13 +101,14 @@ fn main() {
         cx.spawn(async move |cx| {
             let bounds = cx.update(|app| Bounds::centered(None, size(px(1280.), px(820.)), app));
             cx.open_window(ui::window_options(bounds), |window, cx| {
-                // 外观默认跟随 System；设置为 Light/Dark 时外观事件不覆盖用户选择。
-                // Subscription 已在窗口存续期内保持订阅（窗口关闭即失效），
-                // 无需持有；忽略未使用警告。
-                let _subscription = window.observe_window_appearance(|window, cx| {
-                    ui::observe_appearance(window, cx);
-                });
                 let workspace = cx.new(|cx| WorkspaceView::new(Arc::clone(&services), cx));
+                // 外观默认跟随 System；设置为 Light/Dark 时外观事件不覆盖用户选择
+                // （判断在 theme::observe_appearance 里）。
+                // 订阅**必须**由视图持有：绑在这里的局部变量会在闭包返回时析构，
+                // 而 gpui 的 Subscription 析构即退订 → 系统切主题不再通知本 App。
+                workspace.update(cx, |view, _| {
+                    view.watch_window_appearance(window);
+                });
                 // 菜单 Action 经焦点链派发：初始焦点置于 Workspace 根节点。
                 window.focus(&workspace.focus_handle(cx), cx);
                 // 窗口第一层视图必须是 Root。

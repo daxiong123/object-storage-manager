@@ -13,6 +13,7 @@ object-storage-macos = { workspace = true }
 object-storage-core = { workspace = true }
 object-storage-qiniu = { workspace = true }
 object-storage-aliyun = { workspace = true }
+object-storage-tencent = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

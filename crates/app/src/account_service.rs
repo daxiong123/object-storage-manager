@@ -14,6 +14,7 @@ use object_storage_domain::{Account, ProviderKind};
 use object_storage_macos::KeychainCredentialStore;
 use object_storage_persistence::{AccountRepository, PersistedTransfer, PersistenceError};
 use object_storage_qiniu::{QiniuCredential, QiniuProvider};
+use object_storage_tencent::{TencentCredential, TencentProvider};
 
 use crate::provider::BuiltProvider;
 use std::path::Path;
@@ -217,6 +218,15 @@ impl AccountService {
                     BuiltProvider::Aliyun(AliyunProvider::new(credential)),
                 ))
             }
+            ProviderKind::Tencent => {
+                // COS 侧的 AK 叫 SecretId，语义与其余两家的 access_key 一致
+                let credential = TencentCredential::new(&account.access_key, &secret_key)
+                    .map_err(|e| AccountError::InvalidInput(e.to_string()))?;
+                Ok((
+                    account,
+                    BuiltProvider::Tencent(TencentProvider::new(credential)),
+                ))
+            }
         }
     }
 }
@@ -379,6 +389,21 @@ mod tests {
         assert_eq!(account.provider, ProviderKind::Aliyun);
         let (_, provider) = service.build_provider(&account.id).unwrap();
         assert_eq!(provider.kind(), ProviderKind::Aliyun);
+        service.delete(&account.id).unwrap();
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn add_tencent_account_builds_tencent_provider() {
+        let (service, dir) = temp_service("tencent");
+        let account = service
+            .add("cos", ProviderKind::Tencent, "AKIDsecretid", "secret-key")
+            .unwrap();
+        assert_eq!(account.provider, ProviderKind::Tencent);
+        let (_, provider) = service.build_provider(&account.id).unwrap();
+        assert_eq!(provider.kind(), ProviderKind::Tencent);
+        // Debug 不得泄露 SecretKey（storage-core 红线）
+        assert!(!format!("{provider:?}").contains("secret-key"));
         service.delete(&account.id).unwrap();
         cleanup_dir(&dir);
     }

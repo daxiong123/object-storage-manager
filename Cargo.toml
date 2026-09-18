@@ -12,7 +12,9 @@ repository = "https://github.com/daxiong123/object-storage-manager"
 # --- UI（macOS Only，GPUI 固定栈，见 agents.md §3）---
 gpui = { package = "gpui-pre", version = "0.3.1" }
 gpui-platform = { package = "gpui-pre-platform", version = "0.3.1", features = ["font-kit", "runtime_shaders"] }
-gpui-component = { version = "0.6.1", features = ["tree-sitter"] }
+# tree-sitter-languages = 聚合 feature（30+ 语言 grammar，含 tree-sitter-json）；文本预览高亮按
+# `EditorState::language(..)` 得到的语言名生效，扩展名→语言名的映射在 workspace/preview.rs 的 syntax_language
+gpui-component = { version = "0.6.1", features = ["tree-sitter-languages"] }
 gpui-kit-assets = "0.6.1"
 
 # --- 基础 ---
@@ -48,6 +50,7 @@ object-storage-domain = { path = "crates/domain" }
 object-storage-core = { path = "crates/storage-core" }
 object-storage-qiniu = { path = "crates/provider-qiniu" }
 object-storage-aliyun = { path = "crates/provider-aliyun" }
+object-storage-tencent = { path = "crates/provider-tencent" }
 object-storage-transfer = { path = "crates/transfer" }
 object-storage-persistence = { path = "crates/persistence" }
 object-storage-macos = { path = "crates/macos" }
