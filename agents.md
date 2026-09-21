@@ -7,10 +7,10 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | `0.3.0`（`Cargo.toml` 的 `[workspace.package] version`，发版时一处改） |
+| 版本 | `0.4.0`（`Cargo.toml` 的 `[workspace.package] version`，发版时一处改） |
 | 平台 | macOS 14+ / Apple Silicon（`aarch64-apple-darwin`） |
 | 语言与 UI | Rust 2024 + `gpui-pre`（声明 0.3.1，锁 0.3.4）+ `gpui-component` 0.6.1 + `gpui-kit-assets` 0.6.1 |
-| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **188 passed / 1 ignored**（被忽略的是需真实凭证的七牛联网用例）；无 UI 交互自动化，交互靠人肉验收 |
+| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **194 passed / 1 ignored**（被忽略的是需真实凭证的七牛联网用例）；无 UI 交互自动化，交互靠人肉验收 |
 | 已落地 | 账号与 Keychain、Bucket/对象浏览（前缀下钻/搜索/排序/分页/虚拟列表）、选择语义、上传下载删除重命名复制移动、传输引擎与系统事件、预览与 Quick Look、设置、命令面板、原生菜单 |
 | 未落地 | 见 §10（含明确不做的项） |
 
@@ -94,7 +94,7 @@ crates/ui/src/
         object_list.rs selection.rs sort.rs download.rs upload.rs delete.rs
         rename.rs folder.rs copy_move.rs preview.rs menus.rs transfers.rs
         settings.rs quit.rs palette.rs format.rs
-        tests.rs        #  61 个纯逻辑测试（ui 全 crate 共 94 个）
+        tests.rs        #  67 个纯逻辑测试（ui 全 crate 共 100 个）
     ui/                 # 跨视图复用的**基础件**（不放业务视图）
         mod.rs          #  icon_button / compact_search_field（附带大段形状说明）
         overlay.rs      #  mask / surface / fade_in（浮层规范的可执行版本）
@@ -191,6 +191,7 @@ crates/ui/src/
 | 行激活 | **列表行一律「单击选择、双击打开」**（Finder 语义，判据为纯函数 `row_activation`，单测锁死）：对象行双击打开预览（先 `select_object_for_row_action` scope 再 `open_preview_overlay`），目录行双击进入（`open_prefix`）；单击只做选择（含 ⌘/⇧ 语义），文件名不是独立点击目标，重命名弹层开着时不激活 |
 | ⌘F 前缀搜索（原「⌘F 过滤」已废弃） | 工具栏右端那个框是**服务端前缀搜索**（对齐 oss-browser2 的「文件前缀搜索」）：回车或点 🔍 **显式提交**（不是边打边筛），提交时把输入值经 `normalize_prefix_query` 规范化后作为 `ListObjectsRequest::prefix` **重新列举**——所以能查到还没加载出来的对象，本地过滤做不到。⌘F 只负责聚焦该框，Esc 清空（框是常驻控件，没有隐藏态）。**已删除本地过滤**（`filter_entries` / `filtered_ix` / `ToggleObjectFilter` / `workspace/filter.rs`）：旧的「本地过滤 + 选择集」组合有过安全隐患——⌘⌫/批量下载取选择**全集**且不含可见性判断，过滤后按 ⌘⌫ 会删掉「看不见的对象」（实测复现过：显示 5 行、实删 45 个）。现在改由**重新列举**代替：`reload_objects` 会清空 entries 与选择，那条隐患从根上消失（切桶/下钻/改每页条数同此纪律）。跳转 Bucket：带数据 Action `SelectBucketByName(String)`（`#[action(no_json)]`）保留作菜单/快捷键入口；**命令面板动态命令例外**——经 `WeakEntity<WorkspaceView>` 直调 `select_bucket`，避免面板关闭后向失效焦点 deferred 派发 Action |
 | 重命名弹层（`rename.rs`） | Return 打开**弹层**（照参照实现），仅单选；多选不弹、只在状态条报错。弹层内容：标题 + ✕ / 「原路径：」原文件名 / 「重命名：」预填新名的 Input / 目录影响说明 / 底部「取消 + 确认修改」。**校验即时反映在界面上**：`rename_validation_message` 不合法 → 输入框下方红字 + 确认置灰；名称未变（`RENAME_UNCHANGED`）→ 只置灰不报错（用户可能只是打开看一眼）。进行中（`renaming_busy`）禁止关闭（✕/取消/遮罩/Esc 全拒）——后台任务完成时要回写弹层；失败保持弹层打开、错误就地显示（不再丢进底部状态条）。Esc 走 context "Renaming" → `DismissRename`（Input **不设 clean_on_escape**，否则 Esc 被输入框吃掉冒泡不出来）。提交：`rename_target_key` 只改最后一段（含 `/`、`.`、`..` 拒绝，单测锁死）→ `AppServices::rename_object`（下载临时文件→上传新 key→删旧 key；上传失败旧对象保留，删旧失败报复合错误不静默）。**卡片外观在 `pub fn rename_dialog`**（与业务解耦，供离屏预览验收） |
+| 复制/移动同名冲突（`copy_move.rs`） | 目标目录已有同名对象时**自动改名后执行**（`name (1).ext` 顺延，批内占名继续顺延），不报错、不覆盖——旧实现只在「浏览到目标目录」时校验同名，手动输入路径会**静默覆盖**远端对象（数据安全隐患，已修）。复制到当前目录（目标 == 源）不再报错，按改名处理＝复制一份语义。检测在 commit 时后台按 `target_prefix + 文件名主干` 平铺列举（`collect_existing_target_keys`，含翻页；源对象若在目标目录内必被收进 existing，因此改名候选永不撞上本批另一源）；列举失败 Fail Fast 整批不执行。纯函数 `resolve_copy_move_name_conflicts` 单测锁死 |
 | 排序（`sort.rs`） | **目录恒排在对象前**（Finder 语义，参照实现亦然），组内才谈「原序 / 名称 / 大小 / 时间」。`Natural`（默认）也走这一步分组，只是组内保持 provider 返回顺序——它曾经直接 `return ix`，于是默认视图的顺序完全由 provider 决定（OSS 把对象排在 `CommonPrefix` 之前 → 目录被推到整张表最后），与函数自己的注释和 Finder 行为都矛盾。见 `sort_entries_natural_keeps_listing_order_within_groups_but_puts_dirs_first` |
 | 对象列表的列与行内动作 | 列＝勾选 / 名称 / 大小 / 最新修改时间 / **操作**。**表头必须给每一列同样的固定宽度占位**（含末尾「操作」列，`tokens::col_action_width`）——表头少一列时名称列（`flex_1`）会多吸收那部分宽度，后面几列整体右移（实测曾偏 55px）。行内动作＝**下载 + 更多**（参照实现是 ☆ ↻ ⤓ ⋯，我们只做有实际动作的两个）：行内下载先 `select_object_for_row_action` **把选择收敛到本行**再下载，所以未选中任何行时点它也是按本行来；其余动作留在 ⋯ 菜单（与右键菜单共用同一个菜单实体） |
 | 工具栏 | 左＝上传（主色 + ▾：上传文件… / 上传文件夹…）· 新建目录 · 下载 · 更多（▾）；右＝搜索（紧凑控件）+ 刷新。下拉菜单的状态是**单个枚举** `toolbar_menu: Option<ToolbarMenu>`（Upload/More），所以不可能两个菜单同时开着；锚定一律用触发点的窗口坐标（`position_mode(Window)` + `position`）。「上传文件夹」已从「更多」移到这里，不再两处重复 |
@@ -267,7 +268,7 @@ crates/ui/src/
   cargo build --release
   ```
 
-  基线：188 passed / 1 ignored（ignored 的是需真实凭证的七牛联网用例；跑法见 README）、clippy 无告警。
+  基线：194 passed / 1 ignored（ignored 的是需真实凭证的七牛联网用例；跑法见 README）、clippy 无告警。
 - 打包：`./scripts/build-app.sh` → `.app` Bundle（`scripts/Info.plist.in` + `app-icon.png` 生成的 `.icns`）→ ad-hoc 签名 → `dist/CloudStorage-v<版本>-macos-arm64.zip` + sha256。
 - 正式发布流程（尚未走完）：Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由 `daxiong123/homebrew-tap` 分发，仓内定义在 `Casks/cloudstorage.rb`（URL 资产名必须与脚本产物同名）。初期不做 App Store Sandbox。
 - UI 改动无法脚本化验证交互：改完用 `cargo run -p object-storage-desktop` 后台启动，请用户复现确认；单视图视觉走 §5.8 的离屏预览。
