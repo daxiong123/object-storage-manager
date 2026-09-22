@@ -214,8 +214,9 @@ impl TencentProvider {
                 Ok(region)
             }
             None => Err(StorageError::InvalidInput(format!(
-                "无法确定 Bucket `{bucket}` 的地域。请在侧栏重新加载空间列表后再试\
-                 （腾讯云 COS 的对象操作需要地域来构造访问域名）。"
+                "无法确定 Bucket `{bucket}` 的地域。请在侧栏重新加载空间列表后再试；\
+                 若账号无 cos:GetService 权限，可在「输入 Bucket 名称」时一并填写地域\
+                 （如 ap-beijing）。腾讯云 COS 的对象操作需要地域来构造访问域名。"
             ))),
         }
     }
@@ -234,6 +235,18 @@ impl TencentProvider {
             .lock()
             .expect("region_cache 锁毒化")
             .insert(bucket.to_string(), region.to_string());
+    }
+
+    /// 会话级地域回填：AppServices 每次操作都新建 provider 实例，实例内缓存
+    /// 活不过一次操作；列表阶段拿到的地域由它带给新实例（否则每个下载/上传/
+    /// 删除都要再查一次 service 端点，无 `cos:GetService` 权限的账号直接卡死）。
+    pub fn seed_region(&mut self, bucket: &str, region: &str) {
+        self.cache_region(bucket, region);
+    }
+
+    /// 某个 bucket 当前缓存的地域（观测/测试用）。
+    pub fn region_of(&self, bucket: &str) -> Option<String> {
+        self.cached_region(bucket)
     }
 
     async fn check_status(
@@ -1266,6 +1279,17 @@ mod tests {
             .block_on(provider.signed_get_url("b1", "a", 0))
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)), "实际 {err:?}");
+    }
+
+    /// 会话级地域回填：seed_region 写入的缓存要在新实例构建对象请求时可用
+    /// （不再查 service 端点）——resolve_region 的优先级里缓存先于 list_buckets。
+    #[test]
+    fn seed_region_populates_cache_used_by_resolve() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        assert!(provider.cached_region("b1").is_none());
+        let mut provider = provider;
+        provider.seed_region("b1", "ap-beijing");
+        assert_eq!(provider.cached_region("b1").as_deref(), Some("ap-beijing"));
     }
 
     #[test]

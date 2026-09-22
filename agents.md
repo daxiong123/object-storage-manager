@@ -10,7 +10,7 @@
 | 版本 | `0.4.0`（`Cargo.toml` 的 `[workspace.package] version`，发版时一处改） |
 | 平台 | macOS 14+ / Apple Silicon（`aarch64-apple-darwin`） |
 | 语言与 UI | Rust 2024 + `gpui-pre`（声明 0.3.1，锁 0.3.4）+ `gpui-component` 0.6.1 + `gpui-kit-assets` 0.6.1 |
-| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **233 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
+| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **235 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
 | 已落地 | 账号与 Keychain、Bucket/对象浏览（前缀下钻/搜索/排序/分页/虚拟列表）、选择语义、上传下载删除重命名复制移动、传输引擎与系统事件、预览与 Quick Look、设置、命令面板、原生菜单 |
 | 未落地 | 见 §10（含明确不做的项） |
 
@@ -148,7 +148,7 @@ crates/ui/src/
 | 七牛签名 | V2 请求签名逐字节核对自官方 SDK 源码并内置官方向量测试（V1 hello/world + V2 X-Qiniu-* 规范化排序）；坑：Base64 必须带 padding、签名用实际发送的原始 query 串、X-Qiniu-* 头名规范化为 Title-Case 后排序、putTime 单位 100ns。详见 `docs/notes/qiniu-api-notes.md`，勿凭记忆重写 |
 | 阿里云签名 | V1 签名，逐项核对官方文档并内置测试。坑：对象请求走 virtual-hosted 三级域名（`{bucket}.{location}.aliyuncs.com`，只有本地 mock 用 path-style）；**同时发送 `Date` 与 `x-oss-date`（同一 GMT 串）**——StringToSign 的 Date 行填该时间，并把 `x-oss-date` 列入 CanonicalizedOSSHeaders，Date 留空会 `SignatureDoesNotMatch`；ListObjects 的 CanonicalizedResource 是 `/{bucket}/`（服务端 StringToSign 只认这个）。详见 `docs/notes/aliyun-api-notes.md` |
 | 腾讯云 COS 签名 | 签名 v5（`q-sign-algorithm=sha1`），逐字节核对官方文档 + 五个官方 SDK 并内置三条可复现向量（含 Go SDK 的端到端向量）。**腾讯云没有官方 Rust SDK，只能照规范实现**。三个静默签错的坑：① `SignKey` 的**十六进制字符串当文本**用作下一层 HMAC 的 key（不是原始字节）；② `HttpString` 里的 `UriPathname` 必须是**解码后**的 UTF-8 路径（用线上百分号编码形式会得到一个服务端永远算不出的签名）；③ `HttpString` 用 LF 且**结尾换行必须有**，空分量保留空行。只签 `host`（上传加 `content-type`），不签 `date`/`content-length`。详见 `docs/notes/tencent-cos-api-notes.md` |
-| 腾讯云 COS 端点与地域 | 列举空间走全局 `https://service.cos.myqcloud.com`（**一次拿到全部地域的桶且带 `<Location>`**，但**它也分页**，容易漏）；对象操作走 `{bucket}.cos.{region}.myqcloud.com`。Bucket 标识是 `<名称>-<APPID>`（`examplebucket-1250000000`），**只写名称会得到 DNS 失败或 404、完全看不出原因**，故联网前用 `bucket_name_error` 挡住。地域缺失时回退查一次全局入口并缓存，仍拿不到就报错——**不蒙默认地域**（地域错了只会回 `SignatureDoesNotMatch`，无从判断）。限流是 **503 `SlowDown` 而非 429**（与阿里云的映射不同，不能照抄）；错误响应带 `RequestId`，签名类错误必须把它带进报错文案 |
+| 腾讯云 COS 端点与地域 | 列举空间走全局 `https://service.cos.myqcloud.com`（**一次拿到全部地域的桶且带 `<Location>`**，但**它也分页**，容易漏）；对象操作走 `{bucket}.cos.{region}.myqcloud.com`。Bucket 标识是 `<名称>-<APPID>`（`examplebucket-1250000000`），**只写名称会得到 DNS 失败或 404、完全看不出原因**，故联网前用 `bucket_name_error` 挡住。地域缺失时回退查一次全局入口并缓存，仍拿不到就报错——**不蒙默认地域**（地域错了只会回 `SignatureDoesNotMatch`，无从判断）。**地域会话缓存在 AppServices**（`(account_id, bucket) → region`，`list_buckets`/`list_objects` 成功后写入、`build_provider` 回填进新 Tencent 实例）——provider 实例内的缓存活不过单次操作，没有这层的话每次下载/上传都要查一次 service 端点，无 `cos:GetService` 权限的账号（手填 Bucket）会永远卡死；手填空间时 UI 可一并输入地域。限流是 **503 `SlowDown` 而非 429**（与阿里云的映射不同，不能照抄）；错误响应带 `RequestId`，签名类错误必须把它带进报错文案 |
 | 腾讯云 COS 上传 | 简单上传（`PUT /{key}`）**上限 5 GB**，超过即在联网前 Fail Fast 报错（**分块上传明确不做**，与七牛断点续传同一决定）；支持 `Transfer-Encoding: chunked`，故流式上传不预先声明 `Content-Length` |
 | 七牛区域上传 | 上传 host 按 bucket 经 UC `GET /v4/query?ak=&bucket=` 解析（**公开接口无 Authorization**；官方 Rust SDK `BucketRegionsQueryer` 同构），取 `hosts[0].up.domains[0]`，进程内缓存（host 级 ttl，缺省 86400），失败回退 `upload.qiniup.com`。测试模式（UC 指向 127.0.0.1）直接用注入 up_base，不做真实解析。**断点续传明确不做**（用户决定） |
 | 七牛目录占位对象 | key 以 `/` 结尾的占位对象（size=0、mimeType `application/qiniu-object-manager`）不是文件——下载/预览/签名 URL 必 404，目录语义的唯一载体是 `CommonPrefix`；因此在 entries 数据填充点**单点过滤**掉（单一真相源），不在各交互入口打拦截补丁。腾讯云 COS 在控制台建目录同样产生 `<前缀>/` 的空对象，同一条判据覆盖 |
@@ -274,7 +274,7 @@ crates/ui/src/
   cargo build --release
   ```
 
-  基线：233 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
+  基线：235 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
 - 打包：`./scripts/build-app.sh` → `.app` Bundle（`scripts/Info.plist.in` + `app-icon.png` 生成的 `.icns`）→ ad-hoc 签名 → `dist/CloudStorage-v<版本>-macos-arm64.zip` + sha256。
 - 正式发布流程（尚未走完）：Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由 `daxiong123/homebrew-tap` 分发，仓内定义在 `Casks/cloudstorage.rb`（URL 资产名必须与脚本产物同名）。初期不做 App Store Sandbox。
 - UI 改动无法脚本化验证交互：改完用 `cargo run -p object-storage-desktop` 后台启动，请用户复现确认；单视图视觉走 §5.8 的离屏预览。

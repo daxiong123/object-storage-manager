@@ -221,6 +221,8 @@ pub struct WorkspaceView {
     selected_bucket: Option<String>,
     /// RAM 子账号无 ListBuckets 时，手动输入空间名
     manual_bucket_input: Option<Entity<InputState>>,
+    /// 手填腾讯云空间时一并输入地域（可选；COS 对象操作需要地域）
+    manual_bucket_region_input: Option<Entity<InputState>>,
 
     // ---- 对象列表（Content；跟随选中桶异步加载，支持翻页与前缀下钻） ----
     entries: Vec<ListingEntry>,
@@ -600,6 +602,7 @@ impl WorkspaceView {
             buckets: Vec::new(),
             buckets_state: AsyncState::Idle,
             manual_bucket_input: None,
+            manual_bucket_region_input: None,
             selected_bucket: None,
             entries: Vec::new(),
             objects_state: AsyncState::Idle,

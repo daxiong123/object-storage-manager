@@ -18,11 +18,18 @@ impl WorkspaceView {
             .find(|account| Some(account.id.as_str()) == self.selected_account_id.as_deref())
             .map(|account| account.provider)
             .unwrap_or(object_storage_domain::ProviderKind::Aliyun);
+        // 腾讯云的对象操作需要地域；手填时一并带上可免去 service 端点解析
+        // （账号无 cos:GetService 权限时那是唯一出路）。
+        let region = self
+            .manual_bucket_region_input
+            .as_ref()
+            .map(|input| input.read(cx).value().trim().to_string())
+            .filter(|region| !region.is_empty());
         if !self.buckets.iter().any(|bucket| bucket.name == name) {
             self.buckets.push(Bucket {
                 name: name.clone(),
                 kind,
-                region: None,
+                region,
             });
         }
         self.buckets_state = AsyncState::Idle;

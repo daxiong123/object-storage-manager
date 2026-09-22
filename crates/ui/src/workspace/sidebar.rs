@@ -267,30 +267,51 @@ impl WorkspaceView {
                 ];
                 if msg.contains("填写") || msg.contains("Bucket") {
                     if let Some(input) = &self.manual_bucket_input {
+                        // 腾讯云的对象操作需要地域：手填时一并输入可免去
+                        // service 端点解析（无 cos:GetService 权限的唯一出路）
+                        let region_input = self
+                            .manual_bucket_region_input
+                            .as_ref()
+                            .filter(|_| {
+                                self.selected_provider_kind()
+                                    == Some(object_storage_domain::ProviderKind::Tencent)
+                            })
+                            .map(|input| {
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(tokens::caption())
+                                            .text_color(theme.muted_foreground)
+                                            .child("地域（可选，如 ap-beijing）"),
+                                    )
+                                    .child(Input::new(input))
+                            });
+                        let mut form = v_flex()
+                            .px_2()
+                            .pt_1()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(tokens::caption())
+                                    .text_color(theme.muted_foreground)
+                                    .child("空间名称"),
+                            )
+                            .child(Input::new(input));
+                        if let Some(region_input) = region_input {
+                            form = form.child(region_input);
+                        }
                         rows.push(
-                            v_flex()
-                                .px_2()
-                                .pt_1()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(tokens::caption())
-                                        .text_color(theme.muted_foreground)
-                                        .child("空间名称"),
-                                )
-                                .child(Input::new(input))
-                                .child(
-                                    Button::new("add-manual-bucket")
-                                        .label("添加空间")
-                                        .primary()
-                                        .with_size(Size::Small)
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.add_manual_bucket(cx)
-                                            }),
-                                        ),
-                                )
-                                .into_any_element(),
+                            form.child(
+                                Button::new("add-manual-bucket")
+                                    .label("添加空间")
+                                    .primary()
+                                    .with_size(Size::Small)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.add_manual_bucket(cx)),
+                                    ),
+                            )
+                            .into_any_element(),
                         );
                     } else {
                         rows.push(
@@ -306,6 +327,18 @@ impl WorkspaceView {
                                                 InputState::new(window, cx)
                                                     .placeholder("Bucket 名称")
                                             }));
+                                            if this.selected_provider_kind()
+                                                == Some(
+                                                    object_storage_domain::ProviderKind::Tencent,
+                                                )
+                                            {
+                                                this.manual_bucket_region_input =
+                                                    Some(cx.new(|cx| {
+                                                        InputState::new(window, cx).placeholder(
+                                                            "地域（可选，如 ap-beijing）",
+                                                        )
+                                                    }));
+                                            }
                                             cx.notify();
                                         })),
                                 )

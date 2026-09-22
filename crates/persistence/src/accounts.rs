@@ -91,7 +91,17 @@ pub(crate) fn migrate_accounts_allow_tencent(conn: &Connection) -> Result<(), Pe
     if sql.contains("'tencent'") {
         return Ok(());
     }
-    conn.execute_batch(&format!(
+    // 整个重建必须在一个事务里：若进程在 rename 之后、copy 完成之前中断，
+    // 无事务的各语句已各自提交——下次启动时 SQL_SCHEMA 会建出一张带
+    // 'tencent' 的新空表，本函数提前返回，旧账号永久困在 accounts_mig_old。
+    // （Codex PR review P2）
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|source| PersistenceError::Query {
+            op: "开启 accounts 迁移事务",
+            source,
+        })?;
+    tx.execute_batch(&format!(
         "
         ALTER TABLE accounts RENAME TO accounts_mig_old;
         CREATE TABLE accounts (
@@ -108,6 +118,10 @@ pub(crate) fn migrate_accounts_allow_tencent(conn: &Connection) -> Result<(), Pe
     ))
     .map_err(|source| PersistenceError::Query {
         op: "升级 accounts 表允许 tencent",
+        source,
+    })?;
+    tx.commit().map_err(|source| PersistenceError::Query {
+        op: "提交 accounts 迁移事务",
         source,
     })?;
     Ok(())
