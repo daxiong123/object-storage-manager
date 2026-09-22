@@ -29,13 +29,11 @@ pub(super) fn copy_move_target_keys(
     target_prefix: &str,
 ) -> Result<Vec<(String, String)>, String> {
     let prefix = normalize_copy_move_target_prefix(target_prefix)?;
+    // 目标 == 源（复制到当前目录）不再报错：提交时按同名冲突自动改名（复制一份语义）。
     let targets: Vec<(String, String)> = source_keys
         .iter()
         .map(|source| (source.clone(), copy_move_target_key(source, &prefix)))
         .collect();
-    if let Some((source, _)) = targets.iter().find(|(source, target)| source == target) {
-        return Err(format!("目标路径与源路径相同：{source}"));
-    }
     let mut seen = std::collections::HashSet::new();
     if let Some((_, target)) = targets
         .iter()
@@ -47,6 +45,99 @@ pub(super) fn copy_move_target_keys(
         ));
     }
     Ok(targets)
+}
+
+/// 拆出「主干 + 扩展名」：扩展名是最后一个 '.' 之后的部分且 '.' 不在首位
+/// （`.gitignore`、`README` 视为无扩展名，避免改名成 `. (1)gitignore`）。
+fn split_conflict_rename(name: &str) -> (&str, Option<&str>) {
+    match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
+        _ => (name, None),
+    }
+}
+
+/// 同名冲突时的候选名：在扩展名前插入 ` (N)`，无扩展名则追加在末尾。
+pub(super) fn conflict_rename_candidate(name: &str, n: u32) -> String {
+    match split_conflict_rename(name) {
+        (stem, Some(ext)) => format!("{stem} ({n}){ext}"),
+        (stem, None) => format!("{stem} ({n})"),
+    }
+}
+
+/// 目标目录里已有同名对象时自动改名：`name (1).ext`、`name (2).ext` …，
+/// 同时避开本次批量内已分配出去的名字。返回（最终目标，改名个数）。
+/// 源对象若在目标目录内，必然被 `collect_existing_target_keys` 收进 existing，
+/// 因此改名候选永远不会撞上本批另一个源对象的 key。
+pub(super) fn resolve_copy_move_name_conflicts(
+    targets: Vec<(String, String)>,
+    existing: &std::collections::BTreeSet<String>,
+) -> (Vec<(String, String)>, usize) {
+    let mut assigned = std::collections::HashSet::new();
+    let mut renamed = 0usize;
+    let mut resolved = Vec::with_capacity(targets.len());
+    for (source, target) in targets {
+        let mut final_target = target.clone();
+        if existing.contains(&target) || assigned.contains(&target) {
+            renamed += 1;
+            let name = display_name(&target);
+            let dir = &target[..target.len() - name.len()];
+            let mut n = 1u32;
+            loop {
+                let candidate = format!("{dir}{}", conflict_rename_candidate(name, n));
+                if !existing.contains(&candidate) && !assigned.contains(&candidate) {
+                    final_target = candidate;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        assigned.insert(final_target.clone());
+        resolved.push((source, final_target));
+    }
+    (resolved, renamed)
+}
+
+/// 收集目标目录下与「目标名主干」相关的已存在 key：对每个主干按
+/// `target_prefix + 主干` 平铺列举（含翻页），只保留直接位于目标目录内的
+/// 对象（其余段不含 `/`）。主干前缀同时覆盖精确名与全部 ` (N)` 候选。
+fn collect_existing_target_keys(
+    services: &AppServices,
+    account_id: &str,
+    bucket: &str,
+    region: Option<String>,
+    target_prefix: &str,
+    stems: &std::collections::BTreeSet<String>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut existing = std::collections::BTreeSet::new();
+    for stem in stems {
+        let mut marker: Option<String> = None;
+        loop {
+            let request = ListObjectsRequest {
+                bucket: bucket.to_string(),
+                prefix: Some(format!("{target_prefix}{stem}")),
+                delimiter: None,
+                marker: marker.clone(),
+                limit: OBJECTS_PAGE_LIMIT,
+                region: region.clone(),
+            };
+            let page = services
+                .list_objects(account_id, request)
+                .map_err(|error| error.to_string())?;
+            for entry in &page.entries {
+                if let ListingEntry::Object(object) = entry
+                    && let Some(rest) = object.key.strip_prefix(target_prefix)
+                    && !rest.contains('/')
+                {
+                    existing.insert(object.key.clone());
+                }
+            }
+            if !page.has_more() {
+                break;
+            }
+            marker = page.next_marker;
+        }
+    }
+    Ok(existing)
 }
 
 pub(super) fn prepare_copy_move_directory_load(
@@ -71,14 +162,20 @@ pub(super) fn can_commit_copy_move(
 pub(super) fn copy_move_summary(
     mode: CopyMoveMode,
     success: usize,
+    renamed: usize,
     failures: &[(String, String)],
 ) -> String {
     let action = match mode {
         CopyMoveMode::Copy => "复制",
         CopyMoveMode::Move => "移动",
     };
+    let rename_note = if renamed > 0 {
+        format!("（{renamed} 个因同名自动改名）")
+    } else {
+        String::new()
+    };
     if failures.is_empty() {
-        return format!("已{action} {success} 个对象");
+        return format!("已{action} {success} 个对象{rename_note}");
     }
     let detail = failures
         .iter()
@@ -87,7 +184,7 @@ pub(super) fn copy_move_summary(
         .collect::<Vec<_>>()
         .join("；");
     format!(
-        "{action}完成 {success} 个，失败 {} 个：{detail}",
+        "{action}完成 {success} 个{rename_note}，失败 {} 个：{detail}",
         failures.len()
     )
 }
@@ -243,16 +340,9 @@ impl WorkspaceView {
             Ok(prefix) => prefix,
             Err(message) => return Some(message),
         };
-        let targets = match copy_move_target_keys(&state.source_keys, &target_prefix) {
-            Ok(targets) => targets,
-            Err(message) => return Some(message),
-        };
-        if target_prefix == state.target_prefix
-            && let Some((_, target)) = targets
-                .iter()
-                .find(|(_, target)| object_key_exists(&state.entries, target))
-        {
-            return Some(format!("目标对象已存在：{target}"));
+        // 同名冲突不再阻止提交：commit 时检测并自动改名（resolve_copy_move_name_conflicts）。
+        if let Err(message) = copy_move_target_keys(&state.source_keys, &target_prefix) {
+            return Some(message);
         }
         None
     }
@@ -320,6 +410,11 @@ impl WorkspaceView {
             return;
         };
         let mode = state.mode;
+        let region = self
+            .buckets
+            .iter()
+            .find(|b| b.name == bucket)
+            .and_then(|b| b.region.clone());
         let target_prefix = match self.copy_move_target_prefix(cx) {
             Ok(prefix) => prefix,
             Err(message) => {
@@ -351,6 +446,28 @@ impl WorkspaceView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    // 先查目标目录同名对象（查不到就 Fail Fast，绝不静默覆盖），
+                    // 再解析自动改名，最后逐项执行。
+                    let stems: std::collections::BTreeSet<String> = targets
+                        .iter()
+                        .map(|(_, target)| {
+                            split_conflict_rename(display_name(target)).0.to_string()
+                        })
+                        .collect();
+                    let existing = match collect_existing_target_keys(
+                        &services,
+                        &account_id,
+                        &bucket,
+                        region,
+                        &target_prefix,
+                        &stems,
+                    ) {
+                        Ok(existing) => existing,
+                        Err(error) => {
+                            return Err(format!("检查目标目录同名对象失败：{error}"));
+                        }
+                    };
+                    let (targets, renamed) = resolve_copy_move_name_conflicts(targets, &existing);
                     let mut success = 0usize;
                     let mut failures = Vec::new();
                     for (source, target) in targets {
@@ -367,17 +484,20 @@ impl WorkspaceView {
                             Err(error) => failures.push((source, error.to_string())),
                         }
                     }
-                    (success, failures)
+                    Ok((success, renamed, failures))
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.copy_move_busy = false;
                 this.copy_move = None;
-                let (success, failures) = result;
-                this.download_message = Some(DownloadMessage {
-                    is_error: !failures.is_empty(),
-                    text: copy_move_summary(mode, success, &failures),
-                });
+                let (is_error, text) = match result {
+                    Ok((success, renamed, failures)) => (
+                        !failures.is_empty(),
+                        copy_move_summary(mode, success, renamed, &failures),
+                    ),
+                    Err(message) => (true, message),
+                };
+                this.download_message = Some(DownloadMessage { is_error, text });
                 this.reload_objects(cx);
                 cx.notify();
             })
@@ -615,7 +735,7 @@ impl WorkspaceView {
                                     .text_size(tokens::label())
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{} 个对象", state.source_keys.len()))
-                                    .child("遇到同名文件：询问"),
+                                    .child("遇到同名文件：自动改名"),
                             )
                             .child(
                                 h_flex()

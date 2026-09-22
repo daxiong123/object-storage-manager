@@ -433,7 +433,7 @@ fn copy_move_target_prefix_normalizes_and_rejects_invalid_paths() {
 }
 
 #[test]
-fn copy_move_target_keys_keep_file_names_and_reject_same_target() {
+fn copy_move_target_keys_keep_file_names_and_allow_same_directory() {
     let keys = vec!["a/avatar.jpg".to_string(), "b/config.json".to_string()];
     assert_eq!(
         copy_move_target_keys(&keys, "backup").unwrap(),
@@ -445,7 +445,11 @@ fn copy_move_target_keys_keep_file_names_and_reject_same_target() {
             ),
         ]
     );
-    assert!(copy_move_target_keys(&["avatar.jpg".to_string()], "").is_err());
+    // 目标 == 源（复制到当前目录）放行：提交时按同名冲突自动改名。
+    assert_eq!(
+        copy_move_target_keys(&["avatar.jpg".to_string()], "").unwrap(),
+        vec![("avatar.jpg".to_string(), "avatar.jpg".to_string())]
+    );
     assert!(
         copy_move_target_keys(&keys, "backup/flat/")
             .expect("different display names are safe")
@@ -588,17 +592,114 @@ fn single_download_confirm_texts_match_batch_structure() {
 #[test]
 fn copy_move_summary_lists_partial_failures() {
     assert_eq!(
-        copy_move_summary(CopyMoveMode::Copy, 2, &[]),
+        copy_move_summary(CopyMoveMode::Copy, 2, 0, &[]),
         "已复制 2 个对象"
+    );
+    assert_eq!(
+        copy_move_summary(CopyMoveMode::Copy, 2, 1, &[]),
+        "已复制 2 个对象（1 个因同名自动改名）"
     );
     assert_eq!(
         copy_move_summary(
             CopyMoveMode::Move,
             1,
+            0,
             &[("a/b.txt".to_string(), "无权限".to_string())]
         ),
         "移动完成 1 个，失败 1 个：b.txt：无权限"
     );
+}
+
+#[test]
+fn conflict_rename_candidate_inserts_before_extension() {
+    assert_eq!(conflict_rename_candidate("photo.jpg", 1), "photo (1).jpg");
+    assert_eq!(conflict_rename_candidate("photo.jpg", 12), "photo (12).jpg");
+    assert_eq!(conflict_rename_candidate("README", 2), "README (2)");
+    assert_eq!(conflict_rename_candidate(".gitignore", 1), ".gitignore (1)");
+}
+
+#[test]
+fn resolve_copy_move_name_conflicts_keep_free_targets() {
+    let (resolved, renamed) = resolve_copy_move_name_conflicts(
+        vec![("x/a.txt".to_string(), "dir/a.txt".to_string())],
+        &std::collections::BTreeSet::new(),
+    );
+    assert_eq!(
+        resolved,
+        vec![("x/a.txt".to_string(), "dir/a.txt".to_string())]
+    );
+    assert_eq!(renamed, 0);
+}
+
+#[test]
+fn resolve_copy_move_name_conflicts_rename_until_free() {
+    let existing = ["dir/a.txt", "dir/a (1).txt"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (resolved, renamed) = resolve_copy_move_name_conflicts(
+        vec![("x/a.txt".to_string(), "dir/a.txt".to_string())],
+        &existing,
+    );
+    assert_eq!(
+        resolved,
+        vec![("x/a.txt".to_string(), "dir/a (2).txt".to_string())]
+    );
+    assert_eq!(renamed, 1);
+}
+
+#[test]
+fn resolve_copy_move_name_conflicts_copy_into_same_directory_renames() {
+    // 复制到当前目录：目标 == 源（源必然存在于目标目录）→ 复制一份语义。
+    let existing = ["dir/a.txt"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (resolved, renamed) = resolve_copy_move_name_conflicts(
+        vec![("dir/a.txt".to_string(), "dir/a.txt".to_string())],
+        &existing,
+    );
+    assert_eq!(
+        resolved,
+        vec![("dir/a.txt".to_string(), "dir/a (1).txt".to_string())]
+    );
+    assert_eq!(renamed, 1);
+}
+
+#[test]
+fn resolve_copy_move_name_conflicts_avoid_names_taken_by_this_batch() {
+    // 第二个源的目标名虽不在远端，但已被本批第一个改名占走 → 继续顺延。
+    let existing = ["dir/a.txt"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (resolved, renamed) = resolve_copy_move_name_conflicts(
+        vec![
+            ("x/a.txt".to_string(), "dir/a.txt".to_string()),
+            ("y/a (1).txt".to_string(), "dir/a (1).txt".to_string()),
+        ],
+        &existing,
+    );
+    assert_eq!(resolved[0].1, "dir/a (1).txt");
+    assert_eq!(resolved[1].1, "dir/a (1) (1).txt");
+    assert_eq!(renamed, 2);
+}
+
+#[test]
+fn resolve_copy_move_name_conflicts_rename_without_extension() {
+    let existing = ["dir/README"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (resolved, renamed) = resolve_copy_move_name_conflicts(
+        vec![("x/README".to_string(), "dir/README".to_string())],
+        &existing,
+    );
+    assert_eq!(
+        resolved,
+        vec![("x/README".to_string(), "dir/README (1)".to_string())]
+    );
+    assert_eq!(renamed, 1);
 }
 
 #[test]
