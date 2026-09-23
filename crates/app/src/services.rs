@@ -109,12 +109,21 @@ impl AppServices {
             .expect("地域缓存锁已毒化：持锁线程曾 panic")
     }
 
-    /// 记录腾讯云 bucket 的地域（列表阶段取得；失效无害，覆盖写）。
-    fn remember_bucket_region(&self, account_id: &str, bucket: &str, region: &str) {
+    /// 记录腾讯云 bucket 的地域（覆盖写）。公开给 UI：恢复持久化传输队列时
+    /// 把落盘的地域回填进缓存，重启后的第一个任务也能直接解析地域。
+    pub fn remember_bucket_region(&self, account_id: &str, bucket: &str, region: &str) {
         self.lock_bucket_regions().insert(
             (account_id.to_string(), bucket.to_string()),
             region.to_string(),
         );
+    }
+
+    /// 读取某账号某 bucket 已缓存的地域（公开给 UI：⌘Q 落盘传输队列时随行
+    /// 持久化，见 `PersistedTransfer::region`）。
+    pub fn bucket_region(&self, account_id: &str, bucket: &str) -> Option<String> {
+        self.lock_bucket_regions()
+            .get(&(account_id.to_string(), bucket.to_string()))
+            .cloned()
     }
 
     /// 把会话缓存里的地域回填进刚构建的 Tencent provider（跨实例延续，
@@ -564,6 +573,7 @@ mod tests {
             dest: "/tmp/k.bin".into(),
             display_name: "k.bin".into(),
             state: "paused".into(),
+            region: None,
             enqueued_at_millis: 1,
         };
         services
@@ -581,6 +591,7 @@ mod tests {
                 dest: "/tmp/k.bin".into(),
                 display_name: "k.bin".into(),
                 state: "queued".into(),
+                region: None,
                 enqueued_at_millis: 1,
             }])
             .unwrap();

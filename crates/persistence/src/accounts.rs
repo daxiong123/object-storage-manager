@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS transfers (
     dest                TEXT NOT NULL,
     display_name        TEXT NOT NULL,
     state               TEXT NOT NULL CHECK (state IN ('queued', 'paused')),
+    region              TEXT,
     enqueued_at_millis  INTEGER NOT NULL
 );
 ";
@@ -185,6 +186,7 @@ impl AccountRepository {
             })?;
         migrate_accounts_allow_tencent(&conn)?;
         crate::transfers::migrate_transfers_allow_upload(&conn)?;
+        crate::transfers::migrate_transfers_add_region(&conn)?;
         Ok(Self { conn })
     }
 
@@ -200,6 +202,7 @@ impl AccountRepository {
             })?;
         migrate_accounts_allow_tencent(&conn)?;
         crate::transfers::migrate_transfers_allow_upload(&conn)?;
+        crate::transfers::migrate_transfers_add_region(&conn)?;
         Ok(Self { conn })
     }
 

@@ -10,7 +10,7 @@
 | 版本 | `0.4.0`（`Cargo.toml` 的 `[workspace.package] version`，发版时一处改） |
 | 平台 | macOS 14+ / Apple Silicon（`aarch64-apple-darwin`） |
 | 语言与 UI | Rust 2024 + `gpui-pre`（声明 0.3.1，锁 0.3.4）+ `gpui-component` 0.6.1 + `gpui-kit-assets` 0.6.1 |
-| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **235 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
+| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **239 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
 | 已落地 | 账号与 Keychain、Bucket/对象浏览（前缀下钻/搜索/排序/分页/虚拟列表）、选择语义、上传下载删除重命名复制移动、传输引擎与系统事件、预览与 Quick Look、设置、命令面板、原生菜单 |
 | 未落地 | 见 §10（含明确不做的项） |
 
@@ -135,7 +135,7 @@ crates/ui/src/
 | Keychain key | `service = com.example.cloudstorage.credentials`（**占位 bundle id，定稿后统一替换**），`account = <account_uuid>`（不用账号名）；service 名集中在 `crates/macos/src/keychain.rs` 的 `KEYCHAIN_SERVICE`，只改一处；实现用 security-framework 3 的 generic password 三函数（`set/get/delete_generic_password`，get 返回 `Vec<u8>`，not-found 用 `err.code() == errSecItemNotFound` 归一化为正常分支） |
 | 账号编排 | `AccountService`（crates/app）：Secret 只入 Keychain，元数据（含 AK，AK 非 Secret）只入 SQLite；一致性顺序 —— add 先 Keychain 后 SQLite（失败补偿删 Keychain，补偿再失败报复合错误不吞）；delete 先 SQLite 后 Keychain（幂等）；Keychain 条目缺失报 `MissingSecret` 不静默。本层无状态：`load_secret`/`build_provider(_with_secret)` 分离，Secret 可由调用方提供 |
 | SK 会话缓存 | 钥匙串授权弹窗只在「选中账号后的第一次操作」出现：`AppServices.build_provider`（crates/app/src/services.rs）优先用单条会话缓存 `cached_secret`（最近使用账号的 SK，内存驻留、不落盘不进日志），未命中才现取钥匙串并写缓存；切换账号即置换淘汰。账号删除后缓存可能残留，但任何使用都因元数据缺失报 NotFound（不复活）。缓存锁与账号锁永不嵌套 |
-| SQLite schema | `accounts` 表列固定为 `id/name/provider/access_key/created_at_millis`；`transfers` 表（⌘Q 暂停并退出）列为 `id/kind/account_id/bucket/object_key/dest/display_name/state/enqueued_at_millis`，kind/state 有 CHECK。两表均有「无 Secret 列」回归测试把守；provider/kind/state 用 CHECK 在 DB 层 Fail Fast |
+| SQLite schema | `accounts` 表列固定为 `id/name/provider/access_key/created_at_millis`；`transfers` 表（⌘Q 暂停并退出）列为 `id/kind/account_id/bucket/object_key/dest/display_name/state/region/enqueued_at_millis`（region 可空，腾讯云任务随行落盘地域供重启后回填会话缓存），kind/state 有 CHECK。两表均有「无 Secret 列」回归测试把守；provider/kind/state 用 CHECK 在 DB 层 Fail Fast |
 | 本地路径 | `PathBuf`；Cloud Object Key：`String` + `/`。两者严格区分 |
 | 设置（⌘,） | `Settings`（crates/persistence/src/settings.rs）存 `settings.json`（Application Support/CloudStorage/，spec §58；永不存 Secret），损坏显式报错不静默重置（Fail Fast）；新增字段必须 serde default，旧配置缺字段正常补默认（`load_old_settings_file_fills_new_defaults` 用已删除字段 `theme_style` 把这条兜底变成可证伪的）。可配：签名链接 TTL、复制后清剪贴板秒数（0=关闭）、外观模式（System/Light/Dark）、界面字体族/字号缩放、代码字体族/字号、传输并发数（1..8）、默认下载目录（单/批量下载交互一致：设置了有效默认目录先弹确认 sheet「使用默认目录/另存为…或另选目录/取消」；单文件另存为面板以默认目录为初始目录；不自动回写）、**上传大小上限（MB，0 = 不限制，可设上限 5119 MB——严格小于 5 GB，因为 5 GB 是 COS 简单上传的硬顶，不是用户可调项）**。运行时值在 `WorkspaceView.settings`，改动经 `SettingsModal`（自建 overlay，同 AddAccountModal 机制）保存后即时生效；`copy_object_url_request` 的 TTL 是运行时参数，禁止退回编译期常量。Transfer 列表：进度条 + 百分比 + 字节；失败原因完整换行展示（不 truncate） |
 | 上传大小上限的作用面 | **只管本地→云的上传**：⌘U 上传文件、上传文件夹、Finder 拖放、⌘S 保存编辑后的文本。**不拦云端复制/移动/重命名**——它们在本 App 里虽是「下载到临时文件再上传」，但用户心智是「搬运已有对象」而非「上传」，按上限拒掉会像 bug。判据是纯函数 `upload::upload_exceeds_cap`（`cap_mb == 0` = 不限制；`size == cap` **放行**，上限是闭区间上界），四处入口共用，超限**逐文件跳过后在状态条点名**（最多 3 个），不整批拒绝。目录上传的大小在 `walk_folder` 后台递归时随 `FolderUploadFile::size` 采集，避免为了判大小回 UI 线程再 stat 一遍。COS 自己的 5 GB 硬顶（`MAX_SIMPLE_UPLOAD_BYTES`）与用户设置无关，保留作最后一道防线 |
@@ -274,7 +274,7 @@ crates/ui/src/
   cargo build --release
   ```
 
-  基线：235 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
+  基线：239 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
 - 打包：`./scripts/build-app.sh` → `.app` Bundle（`scripts/Info.plist.in` + `app-icon.png` 生成的 `.icns`）→ ad-hoc 签名 → `dist/CloudStorage-v<版本>-macos-arm64.zip` + sha256。
 - 正式发布流程（尚未走完）：Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由 `daxiong123/homebrew-tap` 分发，仓内定义在 `Casks/cloudstorage.rb`（URL 资产名必须与脚本产物同名）。初期不做 App Store Sandbox。
 - UI 改动无法脚本化验证交互：改完用 `cargo run -p object-storage-desktop` 后台启动，请用户复现确认；单视图视觉走 §5.8 的离屏预览。

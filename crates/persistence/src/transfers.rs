@@ -7,6 +7,35 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::accounts::{AccountRepository, PersistenceError};
 
+/// 已有库的 transfers 表可能没有 `region` 列（0.4.0 之前）。ALTER TABLE
+/// ADD COLUMN 即可（无需整表重建）；重复执行由列存在性检查挡住。
+pub(crate) fn migrate_transfers_add_region(conn: &Connection) -> Result<(), PersistenceError> {
+    let has_region: bool = conn
+        .prepare("PRAGMA table_info(transfers)")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .map(|rows| {
+                    rows.filter_map(|r| r.ok())
+                        .any(|name| name.eq_ignore_ascii_case("region"))
+                })
+        })
+        .optional()
+        .map_err(|source| PersistenceError::Query {
+            op: "检查 transfers region 列",
+            source,
+        })?
+        .unwrap_or(false);
+    if has_region {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE transfers ADD COLUMN region TEXT", [])
+        .map_err(|source| PersistenceError::Query {
+            op: "transfers 表增加 region 列",
+            source,
+        })?;
+    Ok(())
+}
+
 /// 已有库的 transfers 表 CHECK 可能只有 `download`。SQLite 不能 ALTER CHECK，
 /// 检测到旧 schema 就整表重建（数据原样搬迁）。
 pub(crate) fn migrate_transfers_allow_upload(conn: &Connection) -> Result<(), PersistenceError> {
@@ -68,13 +97,17 @@ pub struct PersistedTransfer {
     pub dest: String,
     pub display_name: String,
     pub state: String,
+    /// 腾讯云 COS 的 bucket 地域（其余服务商为 None）。恢复队列时回填进
+    /// AppServices 的地域会话缓存：手填 Bucket 且无 `cos:GetService` 权限的
+    /// 账号，重启后第一个传输任务不再因解析不了地域而失败。
+    pub region: Option<String>,
     pub enqueued_at_millis: i64,
 }
 
-const SQL_COLUMNS: &str = "SELECT kind, account_id, bucket, object_key, dest, display_name, state, enqueued_at_millis FROM transfers ORDER BY id";
+const SQL_COLUMNS: &str = "SELECT kind, account_id, bucket, object_key, dest, display_name, state, region, enqueued_at_millis FROM transfers ORDER BY id";
 
 #[cfg(test)]
-const TRANSFER_COLUMNS: [&str; 9] = [
+const TRANSFER_COLUMNS: [&str; 10] = [
     "id",
     "kind",
     "account_id",
@@ -83,6 +116,7 @@ const TRANSFER_COLUMNS: [&str; 9] = [
     "dest",
     "display_name",
     "state",
+    "region",
     "enqueued_at_millis",
 ];
 
@@ -95,7 +129,8 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedTransfer> {
         dest: row.get(4)?,
         display_name: row.get(5)?,
         state: row.get(6)?,
-        enqueued_at_millis: row.get(7)?,
+        region: row.get(7)?,
+        enqueued_at_millis: row.get(8)?,
     })
 }
 
@@ -152,8 +187,8 @@ impl AccountRepository {
             })?;
         for item in items {
             tx.execute(
-                "INSERT INTO transfers (kind, account_id, bucket, object_key, dest, display_name, state, enqueued_at_millis)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO transfers (kind, account_id, bucket, object_key, dest, display_name, state, region, enqueued_at_millis)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     item.kind,
                     item.account_id,
@@ -162,6 +197,7 @@ impl AccountRepository {
                     item.dest,
                     item.display_name,
                     item.state,
+                    item.region,
                     item.enqueued_at_millis
                 ],
             )
@@ -229,8 +265,87 @@ mod tests {
             dest: format!("/tmp/{name}"),
             display_name: name.into(),
             state: state.into(),
+            region: None,
             enqueued_at_millis: 1_700_000_000_000,
         }
+    }
+
+    /// region 列回环：腾讯云任务的地域必须原样落盘、原样读回
+    #[test]
+    fn region_round_trips() {
+        let repo = AccountRepository::open_in_memory().unwrap();
+        let mut a = sample("a.bin", "queued");
+        a.region = Some("ap-beijing".into());
+        repo.replace_transfers(&[a.clone()]).unwrap();
+        assert_eq!(repo.list_transfers().unwrap()[0].region, a.region);
+        assert_eq!(repo.take_transfers().unwrap()[0].region, a.region);
+    }
+
+    /// 0.4.0 之前的库（transfers 无 region 列）必须能原地升级，且老行保留
+    #[test]
+    fn transfers_without_region_column_are_migrated() {
+        const OLD_SCHEMA: &str = "
+            CREATE TABLE transfers (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind                TEXT NOT NULL CHECK (kind IN ('download', 'upload')),
+                account_id          TEXT NOT NULL,
+                bucket              TEXT NOT NULL,
+                object_key          TEXT NOT NULL,
+                dest                TEXT NOT NULL,
+                display_name        TEXT NOT NULL,
+                state               TEXT NOT NULL CHECK (state IN ('queued', 'paused')),
+                enqueued_at_millis  INTEGER NOT NULL
+            );
+        ";
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-transfers-mig-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite");
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(OLD_SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO transfers (kind, account_id, bucket, object_key, dest, display_name, state, enqueued_at_millis)
+                 VALUES ('download', 'acc', 'bkt', 'k', '/tmp/k', 'k', 'queued', 1)",
+                [],
+            )
+            .unwrap();
+            // 前提校验：旧库此刻确实没有 region 列
+            let has_region: bool = conn
+                .prepare("PRAGMA table_info(transfers)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .any(|name| name == "region");
+            assert!(!has_region, "前提不成立：旧 schema 已含 region 列");
+        }
+
+        let repo = AccountRepository::open(&path).unwrap();
+        let taken = repo.take_transfers().unwrap();
+        assert_eq!(taken.len(), 1, "迁移不能丢任务");
+        assert_eq!(taken[0].region, None, "旧行的 region 应为空");
+
+        // 升级后 region 可写
+        let mut item = sample("new.bin", "queued");
+        item.region = Some("ap-shanghai".into());
+        repo.replace_transfers(&[item.clone()]).unwrap();
+        assert_eq!(repo.list_transfers().unwrap(), vec![item]);
+
+        // 再打开一次：幂等
+        drop(repo);
+        let repo = AccountRepository::open(&path).unwrap();
+        assert_eq!(repo.list_transfers().unwrap().len(), 1);
+
+        drop(repo);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

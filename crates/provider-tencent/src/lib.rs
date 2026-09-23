@@ -146,6 +146,8 @@ impl TencentProvider {
         } else {
             format!("/{encoded}")
         };
+        // 注：含独立 `.` / `..` 段的 key 走不到这里——require_bucket_and_key
+        // 已拒绝（URL 归一化会把这类路径改写成名不副实的请求，见 dot_segment_error）
         url.set_path(&path);
         url.set_query(None);
         Ok(url)
@@ -345,13 +347,17 @@ impl TencentProvider {
         }
     }
 
-    /// 空 bucket / 空 key 一律先于网络拒绝（下载/上传/删除/签名共用）
+    /// 空 bucket / 空 key 一律先于网络拒绝（下载/上传/删除/签名共用）；
+    /// 含独立 `.` / `..` 段的 key 同样上网前拒绝（见 [`dot_segment_error`]）
     fn require_bucket_and_key(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
         if bucket.is_empty() {
             return Err(StorageError::InvalidInput("bucket 不能为空".into()));
         }
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+        if let Some(message) = dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
         }
         self.require_bucket_shape(bucket)
     }
@@ -679,6 +685,27 @@ fn encode_query(params: &[(String, String)]) -> String {
         .join("&")
 }
 
+/// key 含**独立成段**的 `.` / `..` 时给出可操作的报错。
+///
+/// 为什么是拒绝而不是编码绕过：reqwest 的 URL 模型（url crate）在解析与
+/// 序列化时会做点段归一化，且 URL 标准把 `%2e` 也视为点段——实测
+/// `set_path`、`path_segments_mut` 全部把 `a/../b` 改写成 `/b`，把预编码的
+/// `%2E%2E` 双编码成 `%252E`。即**任何编码形式都无法按字面寻址**这类对象；
+/// 静默发出一个指向别的对象的请求是数据安全隐患，不如上网前 Fail Fast。
+/// （Codex PR review；UI 的重命名校验本就拒绝 `.` / `..` 段，此处兜住
+/// 控制台/API 侧创建的同类对象。）
+fn dot_segment_error(key: &str) -> Option<String> {
+    key.split('/')
+        .any(|segment| segment == "." || segment == "..")
+        .then(|| {
+            format!(
+                "对象 key `{key}` 含独立的 `.` / `..` 路径段。HTTP 客户端无法按字面寻址这类对象\
+                 （URL 点段归一化会改变请求路径），本应用拒绝操作以免误伤其它对象；\
+                 如需处理请在腾讯云控制台操作"
+            )
+        })
+}
+
 async fn text_or_invalid(resp: reqwest::Response, context: &str) -> Result<String, StorageError> {
     resp.text()
         .await
@@ -693,12 +720,36 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// 单遍 XML 实体解码：扫到 `&` 后**一次**匹配一个命名实体，`&amp;` 与其它
+/// 实体同轮竞争——`&amp;lt;` 解成字面 `&lt;`，不会先解 `&amp;` 再把结果
+/// 又当实体解一次（双重解码会让 UI 拿到错误的 key，后续操作打到别的对象上）。
 fn xml_unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
+    const ENTITIES: [(&str, &str); 5] = [
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&apos;", "'"),
+        ("&amp;", "&"),
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        match ENTITIES.iter().find(|(name, _)| rest.starts_with(name)) {
+            Some((name, value)) => {
+                out.push_str(value);
+                rest = &rest[name.len()..];
+            }
+            // 不认识的实体（或孤立 `&`）按字面保留，不做猜测
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn xml_first(hay: &str, tag: &str) -> Option<String> {
@@ -1290,6 +1341,52 @@ mod tests {
         let mut provider = provider;
         provider.seed_region("b1", "ap-beijing");
         assert_eq!(provider.cached_region("b1").as_deref(), Some("ap-beijing"));
+    }
+
+    /// 含独立 `.` / `..` 段的 key 必须上网前拒绝：URL 归一化（连 `%2e` 也算
+    /// 点段）让这类路径无法按字面寻址，静默发请求会打到别的对象。
+    #[test]
+    fn dot_segment_keys_rejected_before_network() {
+        let provider = test_provider("127.0.0.1:9".parse().unwrap());
+        for key in ["a/../b", "./a", "a/./b", "..", "."] {
+            let err = tokio()
+                .block_on(provider.delete_object("b1", key))
+                .unwrap_err();
+            match err {
+                StorageError::InvalidInput(message) => {
+                    assert!(message.contains(".."), "key={key} 实际: {message}");
+                }
+                other => panic!("key={key} 应报 InvalidInput，实际 {other:?}"),
+            }
+        }
+        // 普通含点的 key 不受影响（校验通过，走到网络层报连接失败）
+        let err = tokio()
+            .block_on(provider.delete_object("b1", "v1.2/x.tar.gz"))
+            .unwrap_err();
+        assert!(
+            !matches!(err, StorageError::InvalidInput(_)),
+            "普通含点 key 不应被点段校验拒绝，实际 {err:?}"
+        );
+        // 纯函数边界
+        assert!(dot_segment_error("archive/../data").is_some());
+        assert!(dot_segment_error("v1.2/file.tar.gz").is_none());
+    }
+
+    /// XML 实体只解一次：字面 `&amp;lt;`（线上编码为 `&amp;amp;lt;`）解完
+    /// 应是 `&lt;`，而不是被二次解码成 `<`——否则后续操作会打到别的对象。
+    #[test]
+    fn xml_unescape_decodes_entities_exactly_once() {
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
+        assert_eq!(xml_unescape("&amp;amp;"), "&amp;");
+        assert_eq!(
+            xml_unescape("a &lt; b &amp;&amp; c &quot;d&quot; &apos;e&apos; &gt; f"),
+            "a < b && c \"d\" 'e' > f"
+        );
+        assert_eq!(xml_unescape("普通&文本"), "普通&文本");
+        assert_eq!(
+            xml_unescape("stray &unknown; & tail"),
+            "stray &unknown; & tail"
+        );
     }
 
     #[test]

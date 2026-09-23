@@ -50,7 +50,11 @@ impl WorkspaceView {
             match answer {
                 0 => {
                     engine.suspend_all();
-                    let items = persistable_from_snapshot(&engine.snapshot());
+                    let services_for_regions = Arc::clone(&services);
+                    let items =
+                        persistable_from_snapshot(&engine.snapshot(), |account_id, bucket| {
+                            services_for_regions.bucket_region(account_id, bucket)
+                        });
                     let services = Arc::clone(&services);
                     let result = cx
                         .background_executor()

@@ -195,3 +195,19 @@ COS 没有真实目录。在控制台「新建文件夹」实际是**创建一�
 UI 把它随手填进 `ListObjectsRequest::region`。缺失时（只有「手填桶名」那条路径会缺）
 回退查一次全局入口并缓存，仍拿不到才报错——**不蒙默认地域**：地域错了服务端只会回
 `SignatureDoesNotMatch`，用户完全无从判断。
+
+## 7. 对象 key 含独立的 `.` / `..` 路径段：reqwest/url 无法按字面寻址
+
+key 里含独立成段的 `.` / `..`（如 `archive/../data`）时，reqwest 的 URL 模型
+（url crate）**任何编码形式都发不出字面路径**——实测（0.6.1 配套 url 2.x）：
+
+- `Url::set_path("/a/../b")` → 归一化成 `/b`；
+- `path_segments_mut().push("..")` → 同样归一化；
+- 预编码 `%2E%2E` → 被 URL 标准视为点段（"single/double dot path segment"
+  明确包含 `%2e`，大小写不敏感）照样归一化，或被双编码成 `%252E`。
+
+服务端按请求路径解码出的 `UriPathname` 与签名（按解码后的原 key 计算）对不上，
+或者更糟：请求静默指向另一个对象。因此本项目对这类 key **上网前 Fail Fast**
+（`crates/provider-tencent/src/lib.rs` 的 `dot_segment_error`，挂在
+`require_bucket_and_key`，下载/上传/删除/签名 URL 四条路径共用）；UI 的重命名
+校验本就拒绝 `.` / `..` 段，这里兜住控制台/API 侧创建的同类对象。
