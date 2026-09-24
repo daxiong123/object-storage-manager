@@ -25,7 +25,11 @@ impl WorkspaceView {
             .as_ref()
             .map(|input| input.read(cx).value().trim().to_string())
             .filter(|region| !region.is_empty());
-        if !self.buckets.iter().any(|bucket| bucket.name == name) {
+        // 同名桶已存在（上次地域留空/填错）时刷新它的地域，而不是原样跳过——
+        // 否则修正后的地域永远进不来，手填路径一直不可用（Codex PR review）
+        if let Some(existing) = self.buckets.iter_mut().find(|bucket| bucket.name == name) {
+            existing.region = region;
+        } else {
             self.buckets.push(Bucket {
                 name: name.clone(),
                 kind,
