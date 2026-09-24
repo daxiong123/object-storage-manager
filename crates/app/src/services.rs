@@ -9,6 +9,7 @@
 //! 红线：本层方法全部阻塞（含网络 IO），**只能在后台线程调用**，不得在 gpui
 //! 主线程/UI 渲染路径上直接调用。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -42,6 +43,15 @@ struct CachedSecret {
     secret_key: String,
 }
 
+/// 腾讯云 COS 的 bucket → 地域 会话缓存（键为 `(account_id, bucket)`）。
+///
+/// 为什么必须在 AppServices 层：COS 的对象操作需要地域，而地域来自
+/// ListBuckets；provider 实例内的地域缓存活不过一次操作（每次操作都重新
+/// `build_provider`），没有这层缓存的话，每次下载/上传/删除都要再查一次
+/// service 端点——无 `cos:GetService` 权限的账号（手填 Bucket 那条路径）
+/// 会永远卡在 AccessDenied。不落盘、不进日志；失效无害（provider 会重新解析）。
+type BucketRegions = Mutex<HashMap<(String, String), String>>;
+
 /// 组装好的应用服务。UI 以 `Arc<AppServices>` 共享，每个后台任务克隆一份 Arc。
 ///
 /// 线程模型：`AccountService` 内含 rusqlite `Connection`（内部 RefCell，非 Sync），
@@ -57,6 +67,8 @@ pub struct AppServices {
     runtime: Runtime,
     /// 单条 SK 会话缓存（设计见类型注释与本方法族文档）
     cached_secret: Mutex<Option<CachedSecret>>,
+    /// 腾讯云 bucket → 地域 会话缓存（见 `BucketRegions` 注释）
+    bucket_regions: BucketRegions,
 }
 
 impl AppServices {
@@ -72,6 +84,7 @@ impl AppServices {
             accounts: Mutex::new(AccountService::open(db_path)?),
             runtime: Runtime::new().map_err(|e| AppServicesError::Runtime(e.to_string()))?,
             cached_secret: Mutex::new(None),
+            bucket_regions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -87,6 +100,44 @@ impl AppServices {
         self.cached_secret
             .lock()
             .expect("Secret 缓存锁已毒化：持锁线程曾 panic")
+    }
+
+    /// 锁定地域缓存。毒化即 panic（同上）。
+    fn lock_bucket_regions(&self) -> MutexGuard<'_, HashMap<(String, String), String>> {
+        self.bucket_regions
+            .lock()
+            .expect("地域缓存锁已毒化：持锁线程曾 panic")
+    }
+
+    /// 记录腾讯云 bucket 的地域（覆盖写）。公开给 UI：恢复持久化传输队列时
+    /// 把落盘的地域回填进缓存，重启后的第一个任务也能直接解析地域。
+    pub fn remember_bucket_region(&self, account_id: &str, bucket: &str, region: &str) {
+        self.lock_bucket_regions().insert(
+            (account_id.to_string(), bucket.to_string()),
+            region.to_string(),
+        );
+    }
+
+    /// 读取某账号某 bucket 已缓存的地域（公开给 UI：⌘Q 落盘传输队列时随行
+    /// 持久化，见 `PersistedTransfer::region`）。
+    pub fn bucket_region(&self, account_id: &str, bucket: &str) -> Option<String> {
+        self.lock_bucket_regions()
+            .get(&(account_id.to_string(), bucket.to_string()))
+            .cloned()
+    }
+
+    /// 把会话缓存里的地域回填进刚构建的 Tencent provider（跨实例延续，
+    /// 避免每次对象操作都去查 service 端点）。其余服务商无此需求，直接跳过。
+    fn seed_tencent_regions(&self, account_id: &str, provider: &mut BuiltProvider) {
+        let BuiltProvider::Tencent(tencent) = provider else {
+            return;
+        };
+        let regions = self.lock_bucket_regions();
+        for ((region_account, bucket), region) in regions.iter() {
+            if region_account == account_id {
+                tencent.seed_region(bucket, region);
+            }
+        }
     }
 
     /// 构建可用的 Provider：优先用会话缓存的 SK（不碰钥匙串）；未命中才现取
@@ -110,16 +161,19 @@ impl AppServices {
                 .map(|c| c.secret_key.clone())
         };
         if let Some(secret) = cached {
-            return Ok(self
+            let mut built = self
                 .lock_accounts()
-                .build_provider_with_secret(account_id, secret)?);
+                .build_provider_with_secret(account_id, secret)?;
+            self.seed_tencent_regions(account_id, &mut built.1);
+            return Ok(built);
         }
 
         // 2) 未命中：SQLite 校验 + 钥匙串现取（可能弹授权，每账号每会话至多一次）
         let secret = self.lock_accounts().load_secret(account_id)?;
-        let result = self
+        let mut result = self
             .lock_accounts()
             .build_provider_with_secret(account_id, secret.clone())?;
+        self.seed_tencent_regions(account_id, &mut result.1);
 
         // 3) 写缓存（单条置换）
         *self.lock_cached_secret() = Some(CachedSecret {
@@ -158,18 +212,42 @@ impl AppServices {
             .add(name, ProviderKind::Aliyun, access_key, secret_key)?)
     }
 
+    /// 添加腾讯云 COS 账号（access_key 即 COS 侧的 SecretId）。
+    /// Secret 只入 Keychain，元数据只入 SQLite。
+    pub fn add_tencent_account(
+        &self,
+        name: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<Account, AppServicesError> {
+        Ok(self
+            .lock_accounts()
+            .add(name, ProviderKind::Tencent, access_key, secret_key)?)
+    }
+
     /// 列举某账号的全部 Bucket（首次触碰钥匙串可能弹授权；之后走会话缓存）。
+    /// 成功后把每个 bucket 的地域写进会话缓存（COS 的对象操作要用）。
     pub fn list_buckets(&self, account_id: &str) -> Result<Vec<Bucket>, AppServicesError> {
         let (_, provider) = self.build_provider(account_id)?;
-        Ok(self.runtime.block_on(provider.list_buckets())?)
+        let buckets = self.runtime.block_on(provider.list_buckets())?;
+        for bucket in &buckets {
+            if let Some(region) = &bucket.region {
+                self.remember_bucket_region(account_id, &bucket.name, region);
+            }
+        }
+        Ok(buckets)
     }
 
     /// 列举 Bucket 内对象（单页；翻页由调用方以 `ObjectPage::next_marker` 驱动）。
+    /// 请求自带地域时一并写进会话缓存（覆盖手填 Bucket 那条路径）。
     pub fn list_objects(
         &self,
         account_id: &str,
         request: ListObjectsRequest,
     ) -> Result<ObjectPage, AppServicesError> {
+        if let Some(region) = request.region.as_deref().filter(|s| !s.is_empty()) {
+            self.remember_bucket_region(account_id, &request.bucket, region);
+        }
         let (_, provider) = self.build_provider(account_id)?;
         Ok(self.runtime.block_on(provider.list_objects(request))?)
     }
@@ -495,6 +573,7 @@ mod tests {
             dest: "/tmp/k.bin".into(),
             display_name: "k.bin".into(),
             state: "paused".into(),
+            region: None,
             enqueued_at_millis: 1,
         };
         services
@@ -512,6 +591,7 @@ mod tests {
                 dest: "/tmp/k.bin".into(),
                 display_name: "k.bin".into(),
                 state: "queued".into(),
+                region: None,
                 enqueued_at_millis: 1,
             }])
             .unwrap();
@@ -529,6 +609,42 @@ mod tests {
             .rename_object("no-such-account", "b", "a.txt", "a.txt")
             .unwrap_err();
         assert!(err.to_string().contains("新名称与原名称相同"), "实际 {err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 腾讯云地域会话缓存：列表阶段记下的地域要在**后续每次新建的 provider
+    /// 实例**里可用（否则每次下载/上传都要再查 service 端点），且不跨账号串号。
+    #[test]
+    fn tencent_bucket_regions_survive_provider_rebuild() {
+        let (db, dir) = temp_db("regions");
+        let services = AppServices::open_at(&db).unwrap();
+        let account = services
+            .add_tencent_account("cos", "AKID-region", "sk-region")
+            .unwrap();
+        let bucket = "b1-1250000000";
+
+        // 模拟 list_buckets / list_objects 的写入点
+        services.remember_bucket_region(&account.id, bucket, "ap-beijing");
+
+        let (_, provider) = services.build_provider(&account.id).unwrap();
+        match &provider {
+            crate::provider::BuiltProvider::Tencent(p) => {
+                assert_eq!(p.region_of(bucket).as_deref(), Some("ap-beijing"));
+            }
+            other => panic!("应构建 Tencent provider，实际 {:?}", other.kind()),
+        }
+
+        // 另一个账号的地域缓存不得串号
+        let account2 = services
+            .add_tencent_account("cos-2", "AKID-region-2", "sk-region-2")
+            .unwrap();
+        let (_, provider2) = services.build_provider(&account2.id).unwrap();
+        if let crate::provider::BuiltProvider::Tencent(p) = &provider2 {
+            assert_eq!(p.region_of(bucket), None, "地域缓存跨账号串号");
+        }
+
+        services.lock_accounts().delete(&account.id).unwrap();
+        services.lock_accounts().delete(&account2.id).unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 }

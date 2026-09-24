@@ -4,7 +4,13 @@ use super::*;
 
 /// 活动任务 → 持久化行。Running/Waiting/Queued 落成 queued（下次自动继续），
 /// 用户暂停保持 paused。终态任务不落盘。
-pub(super) fn persistable_from_snapshot(tasks: &[TransferTask]) -> Vec<PersistedTransfer> {
+/// `region_of` 从 AppServices 会话缓存取腾讯云 bucket 的地域随行落盘——
+/// 否则重启后恢复的任务在列表发生前就要解析地域，手填 Bucket 且无
+/// `cos:GetService` 权限的账号会立刻失败。
+pub(super) fn persistable_from_snapshot(
+    tasks: &[TransferTask],
+    region_of: impl Fn(&str, &str) -> Option<String>,
+) -> Vec<PersistedTransfer> {
     tasks
         .iter()
         .filter(|t| t.state.is_active())
@@ -35,6 +41,7 @@ pub(super) fn persistable_from_snapshot(tasks: &[TransferTask]) -> Vec<Persisted
                     source.clone(),
                 ),
             };
+            let region = region_of(&account_id, &bucket);
             let state = if t.state == TransferState::Paused {
                 "paused"
             } else {
@@ -48,6 +55,7 @@ pub(super) fn persistable_from_snapshot(tasks: &[TransferTask]) -> Vec<Persisted
                 dest: local.to_string_lossy().into_owned(),
                 display_name: t.display_name.clone(),
                 state: state.into(),
+                region,
                 enqueued_at_millis: t.enqueued_at_millis as i64,
             }
         })
@@ -60,16 +68,27 @@ impl WorkspaceView {
     pub(super) fn restore_persisted_transfers(&mut self, cx: &mut Context<Self>) {
         let services = Arc::clone(&self.services);
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { services.take_transfers() })
-                .await;
+            let taken = {
+                let services = Arc::clone(&services);
+                cx.background_executor()
+                    .spawn(async move { services.take_transfers() })
+                    .await
+            };
             this.update(cx, |this, cx| {
-                match result {
+                match taken {
                     Ok(items) if !items.is_empty() => {
                         // 不 suspend/resume：尊重网络监视器当前挂起标志。
                         // 引擎已挂起时入队停在 Queued；未挂起则按并发上限启动。
                         for item in items {
+                            // 落盘的地域先回填进会话缓存：恢复的任务构建
+                            // provider 时直接带上，不再触碰 service 端点
+                            if let Some(region) = &item.region {
+                                services.remember_bucket_region(
+                                    &item.account_id,
+                                    &item.bucket,
+                                    region,
+                                );
+                            }
                             let local = PathBuf::from(item.dest);
                             let id = if item.kind == "upload" {
                                 this.engine.enqueue_upload(

@@ -13,6 +13,8 @@ pub enum ProviderKind {
     Qiniu,
     /// 阿里云 OSS
     Aliyun,
+    /// 腾讯云 COS
+    Tencent,
 }
 
 impl ProviderKind {
@@ -20,6 +22,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Qiniu => "七牛 Kodo",
             ProviderKind::Aliyun => "阿里云 OSS",
+            ProviderKind::Tencent => "腾讯云 COS",
         }
     }
 
@@ -28,6 +31,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Qiniu => "qiniu",
             ProviderKind::Aliyun => "aliyun",
+            ProviderKind::Tencent => "tencent",
         }
     }
 
@@ -36,6 +40,7 @@ impl ProviderKind {
         match value {
             "qiniu" => Some(ProviderKind::Qiniu),
             "aliyun" => Some(ProviderKind::Aliyun),
+            "tencent" => Some(ProviderKind::Tencent),
             _ => None,
         }
     }
@@ -48,7 +53,7 @@ pub struct Bucket {
     pub name: String,
     /// 所属服务商
     pub kind: ProviderKind,
-    /// 区域（如七牛 z0 / OSS cn-hangzhou），列表 API 可能不返回，故为 Option
+    /// 区域（如七牛 z0 / OSS cn-hangzhou / COS ap-guangzhou），列表 API 可能不返回，故为 Option
     pub region: Option<String>,
 }
 
@@ -111,7 +116,10 @@ pub struct ListObjectsRequest {
     pub marker: Option<String>,
     /// 单页条数上限（Provider 负责校验合法范围）
     pub limit: u32,
-    /// 阿里云地域（如 `oss-cn-shanghai`）。ListBuckets 已返回时带上，避免再查 Location。
+    /// 地域（阿里云如 `oss-cn-shanghai`，腾讯云 COS 如 `ap-guangzhou`）。
+    ///
+    /// 由 `ListBuckets` 的返回带上，避免 provider 再去查一次 Location；
+    /// 七牛不用它（上传/下载域名走 UC 解析）。为空时由 provider 自行兜底解析。
     pub region: Option<String>,
 }
 
@@ -176,12 +184,27 @@ mod tests {
 
     #[test]
     fn provider_kind_persistence_roundtrip() {
-        for kind in [ProviderKind::Qiniu, ProviderKind::Aliyun] {
+        for kind in [
+            ProviderKind::Qiniu,
+            ProviderKind::Aliyun,
+            ProviderKind::Tencent,
+        ] {
             assert_eq!(ProviderKind::from_str_opt(kind.as_str()), Some(kind));
         }
         assert_eq!(ProviderKind::from_str_opt("gcp"), None);
         assert_eq!(ProviderKind::from_str_opt(""), None);
         assert_eq!(ProviderKind::Qiniu.as_str(), "qiniu");
         assert_eq!(ProviderKind::Aliyun.as_str(), "aliyun");
+        assert_eq!(ProviderKind::Tencent.as_str(), "tencent");
+    }
+
+    #[test]
+    fn provider_display_names_are_distinct() {
+        let names = [
+            ProviderKind::Qiniu.display_name(),
+            ProviderKind::Aliyun.display_name(),
+            ProviderKind::Tencent.display_name(),
+        ];
+        assert_eq!(names, ["七牛 Kodo", "阿里云 OSS", "腾讯云 COS"]);
     }
 }

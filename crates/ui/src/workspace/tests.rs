@@ -12,6 +12,46 @@ use super::sidebar::*;
 use super::titlebar::*;
 use super::upload::*;
 use super::*;
+// `IconName::path()` 来自 gpui-component 的 `IconNamed`（crate 根 `pub use icon::*`）
+use gpui_component::IconNamed as _;
+use object_storage_persistence::MAX_UPLOAD_SIZE_MB_CEILING;
+
+/// 回归测试：外观订阅必须被**视图持有**，不能是调用点里的局部变量。
+///
+/// gpui 的 `Subscription` 析构即退订，所以只要 `watch_window_appearance`
+/// 忘了把返回值存进 `appearance_subscription`（或有人把订阅挪回窗口创建闭包
+/// 里当局部变量），系统切换亮/暗就再也不会通知本 App——主题只在启动和保存
+/// 设置时更新过。这个 bug 曾经真实存在。
+#[gpui::test]
+fn watch_window_appearance_is_retained_by_the_view(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::init(cx);
+    });
+
+    let db = std::env::temp_dir().join(format!(
+        "cloudstorage-appearance-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let services = Arc::new(AppServices::open_at(&db).expect("打开临时库"));
+
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        let mut view = WorkspaceView::new(services, cx);
+        view.watch_window_appearance(window);
+        view
+    });
+
+    assert!(
+        view.read_with(cx, |view, _| view.appearance_subscription.is_some()),
+        "外观订阅没有被视图持有：系统切换亮/暗将不再生效"
+    );
+
+    std::fs::remove_file(&db).ok();
+}
 
 #[test]
 fn format_size_human_readable() {
@@ -75,7 +115,8 @@ fn collect_folder_uploads_nested_and_skips_junk() {
     let nested = dir.join("photos").join("a");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(dir.join("photos").join("root.jpg"), b"r").unwrap();
-    std::fs::write(nested.join("cat.jpg"), b"c").unwrap();
+    // 4 字节，用于断言收集时把大小带了出来（上传上限要靠它判断）
+    std::fs::write(nested.join("cat.jpg"), b"cat!").unwrap();
     std::fs::write(dir.join("photos").join(".DS_Store"), b"x").unwrap();
     std::fs::write(dir.join("photos").join(".localized"), b"x").unwrap();
     std::fs::write(dir.join("photos").join("._hidden"), b"x").unwrap();
@@ -86,6 +127,9 @@ fn collect_folder_uploads_nested_and_skips_junk() {
     let keys: Vec<_> = files.iter().map(|f| f.relative_key.as_str()).collect();
     assert_eq!(keys, ["photos/a/cat.jpg", "photos/root.jpg"]);
     assert_eq!(files[0].display_name, "cat.jpg");
+    // 大小必须在目录递归时一并采集，否则上限判据在入队前拿不到值
+    assert_eq!(files[0].size, 4, "cat.jpg 应为 4 字节");
+    assert_eq!(files[1].size, 1, "root.jpg 应为 1 字节");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -96,6 +140,57 @@ fn collect_folder_uploads_rejects_file() {
     let err = collect_folder_uploads(&path).unwrap_err();
     assert!(err.contains("不是目录"), "实际 {err}");
     std::fs::remove_file(&path).unwrap();
+}
+
+const MB: u64 = 1024 * 1024;
+
+/// 上传大小上限的边界：0 = 不限制，且「上限」是**闭区间上界**（正好等于上限要放行）。
+#[test]
+fn upload_cap_boundary() {
+    // 0 = 不限制：任何大小都放行（含 u64::MAX，且不能因乘法溢出而 panic）
+    assert!(!upload_exceeds_cap(0, 0));
+    assert!(!upload_exceeds_cap(10 * 1024 * MB, 0));
+    assert!(!upload_exceeds_cap(u64::MAX, 0));
+
+    // 闭区间上界：正好等于上限放行，多 1 字节才拦
+    assert!(!upload_exceeds_cap(100 * MB, 100));
+    assert!(upload_exceeds_cap(100 * MB + 1, 100));
+    assert!(!upload_exceeds_cap(100 * MB - 1, 100));
+
+    // 上限可设的最大值 5119 MB（严格小于 5 GB）
+    assert!(!upload_exceeds_cap(
+        MAX_UPLOAD_SIZE_MB_CEILING * MB,
+        MAX_UPLOAD_SIZE_MB_CEILING
+    ));
+    assert!(upload_exceeds_cap(
+        MAX_UPLOAD_SIZE_MB_CEILING * MB + 1,
+        MAX_UPLOAD_SIZE_MB_CEILING
+    ));
+
+    // 小上限下的大文件
+    assert!(upload_exceeds_cap(2 * MB, 1));
+    assert!(!upload_exceeds_cap(1023 * 1024, 1));
+}
+
+#[test]
+fn upload_cap_rejection_message_names_files_and_cap() {
+    let single = upload_cap_rejection_message(&[("big.zip".into(), 2048 * MB)], 1024);
+    assert!(single.contains("big.zip"), "{single}");
+    assert!(single.contains("未上传"), "{single}");
+    // 上限以人类可读形式出现
+    assert!(
+        single.contains("1.0 GB") || single.contains("1024.0 MB"),
+        "{single}"
+    );
+
+    let many: Vec<(String, u64)> = (0..5).map(|ix| (format!("f{ix}.bin"), 2 * MB)).collect();
+    let message = upload_cap_rejection_message(&many, 1);
+    assert!(message.contains("5 个"), "{message}");
+    assert!(message.contains("f0.bin"), "{message}");
+    // 只点名前 3 个，其余用省略号收尾（避免状态条被长列表撑爆）
+    assert!(message.contains("f2.bin"), "{message}");
+    assert!(!message.contains("f3.bin"), "{message}");
+    assert!(message.ends_with('…'), "{message}");
 }
 
 #[test]
@@ -115,6 +210,150 @@ fn preview_kind_classifies_extensions() {
     assert_eq!(preview_kind("config.json"), PreviewKind::Text);
     assert_eq!(preview_kind("specs.pdf"), PreviewKind::System);
     assert_eq!(preview_kind("movie.mp4"), PreviewKind::System);
+}
+
+#[test]
+fn syntax_language_names_resolve_to_enabled_grammars() {
+    // 这条守 Cargo.toml 里 gpui-component 的 feature：退回 `tree-sitter`（只带 JSON grammar）时，
+    // 除 json 外的断言会全部失败。
+    let registry = gpui_component::highlighter::LanguageRegistry::singleton();
+    for (key, expected) in [
+        ("data.json", "json"),
+        ("app.js", "javascript"),
+        ("app.jsx", "javascript"),
+        ("app.ts", "typescript"),
+        ("app.tsx", "tsx"),
+        ("index.html", "html"),
+        ("style.css", "css"),
+        ("README.md", "markdown"),
+        ("conf.yaml", "yaml"),
+        ("Cargo.toml", "toml"),
+        ("main.rs", "rust"),
+        ("main.py", "python"),
+        ("main.go", "go"),
+        ("Main.java", "java"),
+        ("App.kt", "kotlin"),
+        ("App.swift", "swift"),
+        ("lib.c", "c"),
+        ("lib.h", "c"),
+        ("lib.cpp", "cpp"),
+        ("lib.hpp", "cpp"),
+        ("App.cs", "csharp"),
+        ("app.rb", "ruby"),
+        ("index.php", "php"),
+        ("init.lua", "lua"),
+        ("Main.scala", "scala"),
+        ("main.zig", "zig"),
+        ("api.proto", "proto"),
+        ("schema.graphql", "graphql"),
+        ("run.sh", "bash"),
+        ("run.zsh", "bash"),
+        ("init.sql", "sql"),
+        ("App.svelte", "svelte"),
+        ("page.astro", "astro"),
+        ("Makefile", "make"),
+        ("README", "markdown"),
+    ] {
+        assert_eq!(syntax_language(key), expected, "{key} 的语言名");
+        assert!(
+            registry
+                .language(expected)
+                .is_some_and(|config| config.has_grammar()),
+            "{expected} 不在已启用的 grammar 集里"
+        );
+    }
+    // 无 grammar：文本类按 text 预览；xml 只有显示名（mime `text/xml` 与预览标签用），高亮回落纯文本
+    assert_eq!(syntax_language("notes.txt"), "text");
+    assert_eq!(syntax_language("table.csv"), "text");
+    assert_eq!(syntax_language("service.log"), "text");
+    assert_eq!(syntax_language("Dockerfile"), "text");
+    assert_eq!(syntax_language("feed.xml"), "xml");
+}
+
+#[test]
+fn text_preview_whitelist_covers_code_config_and_named_files() {
+    for key in [
+        "src/main.rs",
+        "main.py",
+        "main.go",
+        "Main.java",
+        "App.kt",
+        "App.swift",
+        "a.c",
+        "a.h",
+        "a.cpp",
+        "a.hpp",
+        "a.cs",
+        "a.rb",
+        "a.php",
+        "a.lua",
+        "a.scala",
+        "a.zig",
+        "a.proto",
+        "a.graphql",
+        "a.json",
+        "a.js",
+        "a.jsx",
+        "a.ts",
+        "a.tsx",
+        "a.html",
+        "a.htm",
+        "a.css",
+        "a.md",
+        "a.yaml",
+        "a.yml",
+        "a.toml",
+        "a.sh",
+        "a.bash",
+        "a.zsh",
+        "a.sql",
+        "a.svelte",
+        "a.astro",
+        "a.txt",
+        "a.csv",
+        "a.tsv",
+        "a.log",
+        "a.ini",
+        "a.conf",
+        "a.cfg",
+        "a.env",
+        "a.properties",
+        "a.xml",
+        "Dockerfile",
+        "Makefile",
+        "GNUmakefile",
+        "README",
+        "LICENSE",
+        ".gitignore",
+        ".env",
+    ] {
+        assert!(is_text_object(key), "{key} 应进入应用内文本预览");
+    }
+    // 图片走 Img、其余交系统 Quick Look
+    for key in [
+        "logo.png",
+        "shot.jpg",
+        "specs.pdf",
+        "movie.mp4",
+        "archive.zip",
+        "notes",
+    ] {
+        assert!(!is_text_object(key), "{key} 不该进应用内文本预览");
+    }
+}
+
+#[test]
+fn text_preview_reads_last_path_segment_and_dot_files() {
+    // 判据只看最后一段：目录名里带点不影响（取「最后一个点之后」的老写法会拿到 `v2/README`）
+    assert_eq!(syntax_language("backup.v2/notes.md"), "markdown");
+    assert!(!is_text_object("backup.v2/notes.xyz"));
+    // 点开头整名识别：`.env` 命中文件名名单，`prod.env` 走扩展名，`.bashrc` 两边都不沾
+    assert_eq!(syntax_language(".env"), "text");
+    assert_eq!(syntax_language("prod.env"), "text");
+    assert!(!is_text_object(".bashrc"));
+    assert_eq!(syntax_language("conf/.gitignore"), "text");
+    // 多段扩展名只看最后一段
+    assert_eq!(syntax_language("archive.tar.json"), "json");
 }
 
 #[test]
@@ -285,6 +524,7 @@ fn copy_move_overlay_navigation_keeps_workspace_prefix_and_enter_blocks_while_lo
 fn provider_url_scheme_matches_cloud_provider() {
     assert_eq!(provider_url_scheme(ProviderKind::Aliyun), "oss");
     assert_eq!(provider_url_scheme(ProviderKind::Qiniu), "kodo");
+    assert_eq!(provider_url_scheme(ProviderKind::Tencent), "cos");
 }
 
 #[test]
@@ -661,6 +901,8 @@ fn preview_download_error_message_hides_html_and_lists_checks() {
     assert!(message.contains("阿里云 OSS"));
     assert!(message.contains("Endpoint/区域"));
     assert!(message.contains("RAM 权限"));
+    assert!(message.contains("腾讯云 COS"));
+    assert!(message.contains("地域"));
     assert!(!message.contains("<html>"), "不应暴露原始 HTML");
     assert!(!message.contains("<title>"), "不应暴露原始 HTML");
 }
@@ -1397,14 +1639,23 @@ fn keyboard_nav_empty_keys_clears() {
 
 #[test]
 fn provider_icon_distinguishes_vendors() {
-    assert!(matches!(
+    // 账号行只显示账号名，图标是区分服务商的唯一视觉线索，三家必须互不相同
+    let icons = [
         provider_icon(ProviderKind::Qiniu),
-        IconName::Globe
-    ));
-    assert!(matches!(
         provider_icon(ProviderKind::Aliyun),
-        IconName::Building2
-    ));
+        provider_icon(ProviderKind::Tencent),
+    ];
+    assert!(matches!(icons[0], IconName::Globe));
+    assert!(matches!(icons[1], IconName::Building2));
+    assert!(matches!(icons[2], IconName::HardDrive));
+    // IconName 没有 PartialEq，用 path() 做去重判据
+    let paths: Vec<String> = icons.iter().map(|i| i.clone().path().to_string()).collect();
+    for (ix, path) in paths.iter().enumerate() {
+        assert!(
+            !paths[..ix].contains(path),
+            "服务商图标重复：{path}（第 {ix} 项）"
+        );
+    }
 }
 
 #[test]

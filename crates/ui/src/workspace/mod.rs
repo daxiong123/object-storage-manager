@@ -23,6 +23,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gpui::Subscription;
 use gpui::{
     Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, ClickEvent, Context, Entity,
     ExternalPaths, FocusHandle, Img, InteractiveElement as _, IntoElement, MouseButton,
@@ -117,7 +118,8 @@ pub(super) const SIDEBAR_MIN: Pixels = px(180.);
 
 pub(super) const SIDEBAR_MAX: Pixels = px(360.);
 
-/// 对象列表单页条数（七牛列举单页上限内）。列宽在 tokens.rs
+/// 对象列表单页条数。三家 provider 的单页上限都是 1000（`PAGE_LIMIT_CHOICES`
+/// 全部落在其内；COS 与七牛都按 1..=1000 校验）。列宽在 tokens.rs
 /// （`col_size_width` / `col_time_width`，随字号缩放；表头与行共用保证对齐）。
 pub(super) const OBJECTS_PAGE_LIMIT: u32 = 100;
 
@@ -219,6 +221,8 @@ pub struct WorkspaceView {
     selected_bucket: Option<String>,
     /// RAM 子账号无 ListBuckets 时，手动输入空间名
     manual_bucket_input: Option<Entity<InputState>>,
+    /// 手填腾讯云空间时一并输入地域（可选；COS 对象操作需要地域）
+    manual_bucket_region_input: Option<Entity<InputState>>,
 
     // ---- 对象列表（Content；跟随选中桶异步加载，支持翻页与前缀下钻） ----
     entries: Vec<ListingEntry>,
@@ -279,6 +283,11 @@ pub struct WorkspaceView {
     settings_path: PathBuf,
     /// 设置模态（⌘,）。Some 时渲染遮罩。
     settings_modal: Option<Entity<SettingsModal>>,
+    /// 系统外观变化的订阅。**必须持有到视图销毁**：gpui 的 `Subscription` 是
+    /// RAII，drop 即退订（`subscription.rs` 的 `Drop` 直接调 `unsubscribe()`）。
+    /// 曾经把它绑成窗口创建闭包里的局部变量，于是闭包返回时订阅就被取消，
+    /// 系统切亮/暗再也不通知本 App（主题只在启动和保存设置时更新过）。
+    appearance_subscription: Option<Subscription>,
     /// 对象下载进行中（按钮置灰防重入）
     downloading: bool,
     /// 上传选文件面板打开中（防重入）
@@ -292,8 +301,8 @@ pub struct WorkspaceView {
     /// 文本预览内容；编辑器使用 GPUI Kit EditorState，不自建 WebView
     preview_text: Option<String>,
     text_editor: Option<Entity<EditorState>>,
-    /// Space 触发预览时，系统格式下载完成后自动打开 Quick Look
-    preview_open_quicklook: bool,
+    /// 文本对象超过 `TEXT_PREVIEW_MAX_BYTES`：不给编辑器，浮层只提供「用系统应用打开」
+    preview_oversized: bool,
     /// 文件名/预览按钮触发的应用内预览弹层。
     preview_overlay_open: bool,
     /// 打开预览时置位：焦点必须在弹层元素**渲染挂载后**再设置——
@@ -397,12 +406,16 @@ pub(crate) enum ObjectNavDirection {
 /// `collapsed_prefix`（被收起段中最深一层的前缀），`tail` 为保留的尾段。
 pub(super) const BREADCRUMB_MAX_VISIBLE: usize = 4;
 
-/// 目录上传的一条文件：本地路径 + 云端相对 key（`/` 分隔，含顶层目录名）。
+/// 目录上传的一条文件：本地路径 + 云端相对 key（`/` 分隔，含顶层目录名）+ 字节数。
+///
+/// `size` 在后台目录递归时一并取得（`entry.metadata()`），供上传大小上限在
+/// **入队前**筛选，避免为了判断大小再回 UI 线程 stat 一遍。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FolderUploadFile {
     source: PathBuf,
     relative_key: String,
     display_name: String,
+    size: u64,
 }
 
 impl gpui::Focusable for WorkspaceView {
@@ -589,6 +602,7 @@ impl WorkspaceView {
             buckets: Vec::new(),
             buckets_state: AsyncState::Idle,
             manual_bucket_input: None,
+            manual_bucket_region_input: None,
             selected_bucket: None,
             entries: Vec::new(),
             objects_state: AsyncState::Idle,
@@ -614,6 +628,7 @@ impl WorkspaceView {
             settings,
             settings_path,
             settings_modal: None,
+            appearance_subscription: None,
             downloading: false,
             uploading: false,
             deleting: false,
@@ -621,7 +636,7 @@ impl WorkspaceView {
             preview_path: None,
             preview_text: None,
             text_editor: None,
-            preview_open_quicklook: false,
+            preview_oversized: false,
             preview_overlay_open: false,
             preview_needs_focus: false,
             object_menu_open: None,
@@ -651,6 +666,19 @@ impl WorkspaceView {
         this.restore_persisted_transfers(cx);
         Self::subscribe_transfers(engine, cx);
         this
+    }
+
+    /// 订阅系统外观变化，把亮/暗同步到主题（窗口创建后调用一次）。
+    ///
+    /// 订阅被存进 `appearance_subscription` 字段——**这不是可选的**：
+    /// gpui 的 `Subscription` 析构即退订，绑成局部变量会让订阅在函数返回时
+    /// 立刻失效（这正是「系统切主题 App 不跟着切」的根因，见字段注释）。
+    /// 视图与窗口同生命周期，所以存在视图上就等于订阅活到窗口关闭。
+    pub fn watch_window_appearance(&mut self, window: &Window) {
+        // 重复武装时先退掉旧的，避免同一窗口叠多个订阅
+        self.appearance_subscription = Some(window.observe_window_appearance(|window, cx| {
+            crate::theme::observe_appearance(window, cx);
+        }));
     }
 
     pub(super) fn render_body(

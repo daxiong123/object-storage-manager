@@ -92,7 +92,7 @@ impl CommandPaletteView {
                 .keywords(&["close", "window"]),
             PaletteCommand::action("退出 CloudStorage", Box::new(Quit)).keywords(&["quit", "exit"]),
             PaletteCommand::action("添加账号", Box::new(AddAccount))
-                .keywords(&["account", "add", "qiniu"]),
+                .keywords(&["account", "add", "qiniu", "aliyun", "tencent", "cos"]),
             PaletteCommand::action("关于 CloudStorage", Box::new(OpenAbout))
                 .keywords(&["about", "version", "license"]),
             PaletteCommand::action("设置…", Box::new(OpenSettings)).keywords(&[

@@ -6,6 +6,41 @@ pub(super) fn skip_folder_entry_name(name: &str) -> bool {
     name == ".DS_Store" || name == ".localized" || name.starts_with("._")
 }
 
+/// 上传大小上限判据（纯函数，单测锁死边界）。
+///
+/// - `cap_mb == 0` = 不限制，任何大小都放行。
+/// - `size == cap` 视为**未超限**：「上限」是闭区间上界，正好等于上限的文件应当放行。
+pub(super) fn upload_exceeds_cap(size_bytes: u64, cap_mb: u64) -> bool {
+    cap_mb > 0 && size_bytes > cap_mb * 1024 * 1024
+}
+
+/// 被上限拦下的文件的状态条文案。`rejected` = (显示名, 字节数)。
+///
+/// 逐个点名（最多 3 个），而不是只说「N 个文件超限」——用户需要知道是哪几个，
+/// 否则在大目录里无从下手。
+pub(super) fn upload_cap_rejection_message(rejected: &[(String, u64)], cap_mb: u64) -> String {
+    let cap = format_size(cap_mb * 1024 * 1024);
+    if rejected.len() == 1 {
+        let (name, size) = &rejected[0];
+        return format!("未上传：{name}（{}）超过上限 {cap}", format_size(*size));
+    }
+    let shown: Vec<String> = rejected
+        .iter()
+        .take(3)
+        .map(|(name, size)| format!("{name}（{}）", format_size(*size)))
+        .collect();
+    let tail = if rejected.len() > shown.len() {
+        "…"
+    } else {
+        ""
+    };
+    format!(
+        "未上传 {} 个超过上限 {cap} 的文件：{}{tail}",
+        rejected.len(),
+        shown.join("、")
+    )
+}
+
 /// 递归收集目录内普通文件。不跟随符号链接。相对 key 以 `/` 连接。
 pub(super) fn collect_folder_uploads(
     root: &std::path::Path,
@@ -53,10 +88,16 @@ pub(super) fn walk_folder(
         if ft.is_dir() {
             walk_folder(&entry.path(), &rel, out)?;
         } else if ft.is_file() {
+            // 大小在这里顺手取（后台线程），供上传上限在入队前筛选
+            let size = entry
+                .metadata()
+                .map_err(|e| format!("读取 {} 大小失败：{e}", entry.path().display()))?
+                .len();
             out.push(FolderUploadFile {
                 source: entry.path(),
                 relative_key: rel,
                 display_name: name.to_string(),
+                size,
             });
         }
     }
@@ -151,13 +192,21 @@ impl WorkspaceView {
                         });
                     }
                     PanelOutcome::Picked(paths) => {
+                        let cap_mb = this.settings.max_upload_size_mb;
                         let mut names = Vec::new();
+                        let mut rejected = Vec::new();
                         for path in paths {
                             let name = path
                                 .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("file")
                                 .to_string();
+                            // 上限拦截：超限文件不入队，逐个点名（与拖放同一判据）
+                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            if upload_exceeds_cap(size, cap_mb) {
+                                rejected.push((name, size));
+                                continue;
+                            }
                             let key = format!("{prefix}{name}");
                             this.engine.enqueue_upload(
                                 account_id.as_str(),
@@ -168,10 +217,26 @@ impl WorkspaceView {
                             );
                             names.push(name);
                         }
-                        this.download_message = Some(DownloadMessage {
-                            is_error: false,
-                            text: format!("已加入传输队列：{}", names.join("、")),
-                        });
+                        this.download_message =
+                            Some(match (names.is_empty(), rejected.is_empty()) {
+                                // 全部被拦下：只报拦截原因，不能报「已加入传输队列：」
+                                (true, false) => DownloadMessage {
+                                    is_error: true,
+                                    text: upload_cap_rejection_message(&rejected, cap_mb),
+                                },
+                                (false, false) => DownloadMessage {
+                                    is_error: false,
+                                    text: format!(
+                                        "已加入传输队列：{}；{}",
+                                        names.join("、"),
+                                        upload_cap_rejection_message(&rejected, cap_mb)
+                                    ),
+                                },
+                                _ => DownloadMessage {
+                                    is_error: false,
+                                    text: format!("已加入传输队列：{}", names.join("、")),
+                                },
+                            });
                     }
                 }
                 cx.notify();
@@ -256,8 +321,28 @@ impl WorkspaceView {
             this.update(cx, |this, cx| {
                 this.uploading = false;
                 let (files, errors) = collected;
-                if files.is_empty() {
-                    let text = if errors.is_empty() {
+                let cap_mb = this.settings.max_upload_size_mb;
+                let mut rejected = Vec::new();
+                let mut n = 0usize;
+                for entry in files {
+                    if upload_exceeds_cap(entry.size, cap_mb) {
+                        rejected.push((entry.display_name, entry.size));
+                        continue;
+                    }
+                    let key = format!("{prefix}{}", entry.relative_key);
+                    this.engine.enqueue_upload(
+                        account_id.as_str(),
+                        bucket.as_str(),
+                        key.as_str(),
+                        entry.source,
+                        entry.display_name,
+                    );
+                    n += 1;
+                }
+                if n == 0 {
+                    let text = if !rejected.is_empty() {
+                        upload_cap_rejection_message(&rejected, cap_mb)
+                    } else if errors.is_empty() {
                         "目录为空，没有可上传的文件".into()
                     } else {
                         errors.join("；")
@@ -267,21 +352,14 @@ impl WorkspaceView {
                         text,
                     });
                 } else {
-                    let n = files.len();
-                    for entry in files {
-                        let key = format!("{prefix}{}", entry.relative_key);
-                        this.engine.enqueue_upload(
-                            account_id.as_str(),
-                            bucket.as_str(),
-                            key.as_str(),
-                            entry.source,
-                            entry.display_name,
-                        );
-                    }
                     let mut text = format!("已加入传输队列：{n} 个文件");
                     if !errors.is_empty() {
                         text.push_str("；部分目录失败：");
                         text.push_str(&errors.join("；"));
+                    }
+                    if !rejected.is_empty() {
+                        text.push('；');
+                        text.push_str(&upload_cap_rejection_message(&rejected, cap_mb));
                     }
                     this.download_message = Some(DownloadMessage {
                         is_error: !errors.is_empty(),
@@ -320,25 +398,34 @@ impl WorkspaceView {
             })
     }
 
+    /// 入队一批本地文件（`path` + 已知字节数）。按上传大小上限**逐文件分流**：
+    /// 能传的入队，超限的返回给调用方点名。返回 `(入队数, 超限项)`。
     pub(super) fn enqueue_file_uploads(
         &mut self,
         account_id: &str,
         bucket: &str,
         prefix: &str,
-        paths: Vec<PathBuf>,
-    ) -> usize {
-        let n = paths.len();
-        for path in paths {
+        files: Vec<(PathBuf, u64)>,
+    ) -> (usize, Vec<(String, u64)>) {
+        let cap_mb = self.settings.max_upload_size_mb;
+        let mut enqueued = 0usize;
+        let mut rejected = Vec::new();
+        for (path, size) in files {
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("file")
                 .to_string();
+            if upload_exceeds_cap(size, cap_mb) {
+                rejected.push((name, size));
+                continue;
+            }
             let key = format!("{prefix}{name}");
             self.engine
                 .enqueue_upload(account_id, bucket, key.as_str(), path, name);
+            enqueued += 1;
         }
-        n
+        (enqueued, rejected)
     }
 
     pub(super) fn handle_dropped_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
@@ -368,7 +455,8 @@ impl WorkspaceView {
             if meta.is_dir() {
                 dirs.push(path.clone());
             } else if meta.is_file() {
-                files.push(path.clone());
+                // meta 已经取到了，大小顺手带上，不必再 stat
+                files.push((path.clone(), meta.len()));
             }
         }
         if dirs.is_empty() {
@@ -378,10 +466,19 @@ impl WorkspaceView {
                     text: "没有可上传的文件（已跳过符号链接）".into(),
                 });
             } else {
-                let n = self.enqueue_file_uploads(&account_id, &bucket, &prefix, files);
+                let (n, rejected) = self.enqueue_file_uploads(&account_id, &bucket, &prefix, files);
+                let cap_mb = self.settings.max_upload_size_mb;
+                let text = match (n == 0, rejected.is_empty()) {
+                    (true, false) => upload_cap_rejection_message(&rejected, cap_mb),
+                    (false, false) => format!(
+                        "已加入传输队列：{n} 个文件；{}",
+                        upload_cap_rejection_message(&rejected, cap_mb)
+                    ),
+                    _ => format!("已加入传输队列：{n} 个文件"),
+                };
                 self.download_message = Some(DownloadMessage {
-                    is_error: false,
-                    text: format!("已加入传输队列：{n} 个文件"),
+                    is_error: n == 0,
+                    text,
                 });
             }
             cx.notify();
@@ -404,10 +501,16 @@ impl WorkspaceView {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                let n_files = this.enqueue_file_uploads(&account_id, &bucket, &prefix, files);
+                let (n_files, mut rejected) =
+                    this.enqueue_file_uploads(&account_id, &bucket, &prefix, files);
                 let (entries, errors) = walked;
-                let n_folder = entries.len();
+                let cap_mb = this.settings.max_upload_size_mb;
+                let mut n_folder = 0usize;
                 for entry in entries {
+                    if upload_exceeds_cap(entry.size, cap_mb) {
+                        rejected.push((entry.display_name, entry.size));
+                        continue;
+                    }
                     let key = format!("{prefix}{}", entry.relative_key);
                     this.engine.enqueue_upload(
                         account_id.as_str(),
@@ -416,29 +519,36 @@ impl WorkspaceView {
                         entry.source,
                         entry.display_name,
                     );
+                    n_folder += 1;
                 }
                 let n = n_files + n_folder;
-                if n == 0 {
-                    let text = if errors.is_empty() {
+                // 全部落空时才只报失败原因；只要有一项成功，成功与拦截信息并列
+                let nothing_enqueued = n == 0;
+                let mut text = if nothing_enqueued {
+                    if errors.is_empty() && !rejected.is_empty() {
+                        upload_cap_rejection_message(&rejected, cap_mb)
+                    } else if errors.is_empty() {
                         "没有可上传的文件".into()
                     } else {
                         errors.join("；")
-                    };
-                    this.download_message = Some(DownloadMessage {
-                        is_error: true,
-                        text,
-                    });
+                    }
                 } else {
-                    let mut text = format!("已加入传输队列：{n} 个文件");
+                    format!("已加入传输队列：{n} 个文件")
+                };
+                if !nothing_enqueued {
                     if !errors.is_empty() {
                         text.push_str("；部分目录失败：");
                         text.push_str(&errors.join("；"));
                     }
-                    this.download_message = Some(DownloadMessage {
-                        is_error: !errors.is_empty(),
-                        text,
-                    });
+                    if !rejected.is_empty() {
+                        text.push('；');
+                        text.push_str(&upload_cap_rejection_message(&rejected, cap_mb));
+                    }
                 }
+                this.download_message = Some(DownloadMessage {
+                    is_error: nothing_enqueued,
+                    text,
+                });
                 cx.notify();
             })
             .ok();

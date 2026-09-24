@@ -109,6 +109,7 @@ pub struct SettingsModal {
     code_font_select: Entity<SelectState<Vec<FontOption>>>,
     code_font_size: Entity<InputState>,
     transfer_concurrency: Entity<InputState>,
+    max_upload_size_mb: Entity<InputState>,
     default_download_dir: Option<PathBuf>,
     /// 左侧导航当前分组
     active_section: SettingsSection,
@@ -197,6 +198,14 @@ impl SettingsModal {
                 .clean_on_escape()
                 .default_value(settings.transfer_concurrency.to_string())
         });
+        // 纯 Input（不挂 NumberInput 步进）：0 – 5119 这种宽范围直接打字，
+        // 与同为宽范围的「签名链接有效期」一致；步进控件只配 10..24 / 1..8 那种小范围。
+        let max_upload_size_mb = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("0")
+                .clean_on_escape()
+                .default_value(settings.max_upload_size_mb.to_string())
+        });
         let default_download_dir = settings.default_download_dir.clone();
         // 字体选择确认后清掉过期的「已保存」提示（值已变化）。
         cx.subscribe_in(
@@ -272,6 +281,7 @@ impl SettingsModal {
             code_font_select,
             code_font_size,
             transfer_concurrency,
+            max_upload_size_mb,
             default_download_dir,
             active_section: SettingsSection::General,
             saving: false,
@@ -387,6 +397,10 @@ impl SettingsModal {
             self.transfer_concurrency.read(cx).value().trim(),
             "传输并发数必须是整数",
         )?;
+        let max_upload_size_mb = parse_u64_field(
+            self.max_upload_size_mb.read(cx).value().trim(),
+            "上传大小上限必须是非负整数（MB，0 = 不限制）",
+        )?;
         let font_value = |state: &Entity<SelectState<Vec<FontOption>>>| {
             state.read(cx).selected_value().cloned().unwrap_or_default()
         };
@@ -404,6 +418,7 @@ impl SettingsModal {
             code_font_size,
             transfer_concurrency,
             default_download_dir: self.default_download_dir.clone(),
+            max_upload_size_mb,
         };
         settings.validate()?;
         Ok(settings)
@@ -822,6 +837,14 @@ impl SettingsModal {
                     "传输并发数",
                     Some("同时进行的上传/下载任务数，1 – 8。"),
                     number_field_input(&self.transfer_concurrency),
+                    theme,
+                ))
+                .into_any_element(),
+            section_divider(theme)
+                .child(field_row(
+                    "上传大小上限（MB）",
+                    Some("仅本地文件上传生效。0 = 不限制，最大 5119。"),
+                    field_input(Input::new(&self.max_upload_size_mb)),
                     theme,
                 ))
                 .into_any_element(),

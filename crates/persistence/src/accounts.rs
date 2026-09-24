@@ -48,7 +48,7 @@ const SQL_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
     id                TEXT PRIMARY KEY,
     name              TEXT NOT NULL,
-    provider          TEXT NOT NULL CHECK (provider IN ('qiniu', 'aliyun')),
+    provider          TEXT NOT NULL CHECK (provider IN ('qiniu', 'aliyun', 'tencent')),
     access_key        TEXT NOT NULL,
     created_at_millis INTEGER NOT NULL
 );
@@ -61,9 +61,72 @@ CREATE TABLE IF NOT EXISTS transfers (
     dest                TEXT NOT NULL,
     display_name        TEXT NOT NULL,
     state               TEXT NOT NULL CHECK (state IN ('queued', 'paused')),
+    region              TEXT,
     enqueued_at_millis  INTEGER NOT NULL
 );
 ";
+
+/// accounts.provider 的 CHECK 允许值（建表与迁移共用，避免两处写法漂移）
+const PROVIDER_CHECK: &str = "'qiniu', 'aliyun', 'tencent'";
+
+/// 已有库的 accounts 表 CHECK 只有 `qiniu` / `aliyun`。SQLite 不能 ALTER CHECK，
+/// 检测到旧 schema 就整表重建（数据原样搬迁）——与 transfers 的迁移同一范式。
+///
+/// 迁移必须保号：旧库里已有的账号（含七牛/阿里云）要一条不少地活下来，
+/// `accounts_allow_tencent_migration_preserves_existing_rows` 把这条钉死。
+pub(crate) fn migrate_accounts_allow_tencent(conn: &Connection) -> Result<(), PersistenceError> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| PersistenceError::Query {
+            op: "检查 accounts schema",
+            source,
+        })?;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains("'tencent'") {
+        return Ok(());
+    }
+    // 整个重建必须在一个事务里：若进程在 rename 之后、copy 完成之前中断，
+    // 无事务的各语句已各自提交——下次启动时 SQL_SCHEMA 会建出一张带
+    // 'tencent' 的新空表，本函数提前返回，旧账号永久困在 accounts_mig_old。
+    // （Codex PR review P2）
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|source| PersistenceError::Query {
+            op: "开启 accounts 迁移事务",
+            source,
+        })?;
+    tx.execute_batch(&format!(
+        "
+        ALTER TABLE accounts RENAME TO accounts_mig_old;
+        CREATE TABLE accounts (
+            id                TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            provider          TEXT NOT NULL CHECK (provider IN ({PROVIDER_CHECK})),
+            access_key        TEXT NOT NULL,
+            created_at_millis INTEGER NOT NULL
+        );
+        INSERT INTO accounts (id, name, provider, access_key, created_at_millis)
+            SELECT id, name, provider, access_key, created_at_millis FROM accounts_mig_old;
+        DROP TABLE accounts_mig_old;
+        "
+    ))
+    .map_err(|source| PersistenceError::Query {
+        op: "升级 accounts 表允许 tencent",
+        source,
+    })?;
+    tx.commit().map_err(|source| PersistenceError::Query {
+        op: "提交 accounts 迁移事务",
+        source,
+    })?;
+    Ok(())
+}
 
 /// accounts 表的全部列名（schema 回归测试的把守依据）
 #[cfg(test)]
@@ -121,7 +184,9 @@ impl AccountRepository {
             .map_err(|source| PersistenceError::Query {
                 op: "建表", source
             })?;
+        migrate_accounts_allow_tencent(&conn)?;
         crate::transfers::migrate_transfers_allow_upload(&conn)?;
+        crate::transfers::migrate_transfers_add_region(&conn)?;
         Ok(Self { conn })
     }
 
@@ -135,7 +200,9 @@ impl AccountRepository {
             .map_err(|source| PersistenceError::Query {
                 op: "建表", source
             })?;
+        migrate_accounts_allow_tencent(&conn)?;
         crate::transfers::migrate_transfers_allow_upload(&conn)?;
+        crate::transfers::migrate_transfers_add_region(&conn)?;
         Ok(Self { conn })
     }
 
@@ -321,5 +388,101 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(names, ACCOUNT_COLUMNS);
+    }
+
+    /// 0.3.0 的库（provider CHECK 只有 qiniu/aliyun）必须能原地升级：
+    /// 老账号一条不少、字段不变，且升级后 tencent 可以插入。
+    ///
+    /// 这条测试的价值在「用真的旧 schema 建库再走 open()」——直接测
+    /// `open_in_memory()` 得到的是新 schema，迁移分支根本不会被执行。
+    #[test]
+    fn accounts_allow_tencent_migration_preserves_existing_rows() {
+        const OLD_SCHEMA: &str = "
+            CREATE TABLE accounts (
+                id                TEXT PRIMARY KEY,
+                name              TEXT NOT NULL,
+                provider          TEXT NOT NULL CHECK (provider IN ('qiniu', 'aliyun')),
+                access_key        TEXT NOT NULL,
+                created_at_millis INTEGER NOT NULL
+            );
+        ";
+        let dir = std::env::temp_dir().join(format!(
+            "cloudstorage-migrate-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite");
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(OLD_SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, name, provider, access_key, created_at_millis)
+                 VALUES ('old-qiniu', '老的七牛号', 'qiniu', 'ak-old', 1700000000000)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, name, provider, access_key, created_at_millis)
+                 VALUES ('old-aliyun', '老的阿里云号', 'aliyun', 'ak-oss', 1700000000001)",
+                [],
+            )
+            .unwrap();
+            // 前提校验：旧库此刻确实拒绝 tencent，否则这条测试什么都没验证
+            assert!(
+                conn.execute(
+                    "INSERT INTO accounts (id, name, provider, access_key, created_at_millis)
+                     VALUES ('pre', 'x', 'tencent', 'ak', 0)",
+                    [],
+                )
+                .is_err(),
+                "旧 schema 本应拒绝 tencent，前提不成立"
+            );
+        }
+
+        let repo = AccountRepository::open(&path).unwrap();
+
+        let surviving = repo.list().unwrap();
+        assert_eq!(surviving.len(), 2, "迁移不能丢账号");
+        assert_eq!(surviving[0].id, "old-qiniu");
+        assert_eq!(surviving[0].name, "老的七牛号");
+        assert_eq!(surviving[0].provider, ProviderKind::Qiniu);
+        assert_eq!(surviving[0].access_key, "ak-old");
+        assert_eq!(surviving[0].created_at_millis, 1_700_000_000_000);
+        assert_eq!(surviving[1].provider, ProviderKind::Aliyun);
+
+        // 主键约束必须还在（重建表时最容易漏掉的东西）
+        assert!(
+            repo.insert(&sample_account("old-qiniu", "dup", ProviderKind::Qiniu))
+                .is_err()
+        );
+
+        // 升级后 tencent 可插入
+        let tencent = sample_account("new-tencent", "腾讯云号", ProviderKind::Tencent);
+        repo.insert(&tencent).unwrap();
+        assert_eq!(repo.get("new-tencent").unwrap(), Some(tencent));
+
+        // 迁移仍拒未知 provider
+        assert!(
+            repo.conn
+                .execute(
+                    "INSERT INTO accounts (id, name, provider, access_key, created_at_millis)
+                     VALUES ('bad', 'x', 'gcp', 'ak', 0)",
+                    [],
+                )
+                .is_err()
+        );
+
+        // 再打开一次不应重复迁移（幂等）
+        drop(repo);
+        let repo = AccountRepository::open(&path).unwrap();
+        assert_eq!(repo.list().unwrap().len(), 3);
+
+        drop(repo);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

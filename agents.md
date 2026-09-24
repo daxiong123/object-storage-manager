@@ -10,7 +10,7 @@
 | 版本 | `0.4.0`（`Cargo.toml` 的 `[workspace.package] version`，发版时一处改） |
 | 平台 | macOS 14+ / Apple Silicon（`aarch64-apple-darwin`） |
 | 语言与 UI | Rust 2024 + `gpui-pre`（声明 0.3.1，锁 0.3.4）+ `gpui-component` 0.6.1 + `gpui-kit-assets` 0.6.1 |
-| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **194 passed / 1 ignored**（被忽略的是需真实凭证的七牛联网用例）；无 UI 交互自动化，交互靠人肉验收 |
+| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **239 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
 | 已落地 | 账号与 Keychain、Bucket/对象浏览（前缀下钻/搜索/排序/分页/虚拟列表）、选择语义、上传下载删除重命名复制移动、传输引擎与系统事件、预览与 Quick Look、设置、命令面板、原生菜单 |
 | 未落地 | 见 §10（含明确不做的项） |
 
@@ -18,9 +18,9 @@
 
 ## 1. 产品定位
 
-**一款专为 macOS 设计的高性能七牛 Kodo / 阿里云 OSS 对象存储工作台。**
+**一款专为 macOS 设计的高性能七牛 Kodo / 阿里云 OSS / 腾讯云 COS 对象存储工作台。**
 
-> Build the best Qiniu Kodo + Aliyun OSS client for macOS, not the most portable one.
+> Build the best Qiniu Kodo + Aliyun OSS + Tencent COS client for macOS, not the most portable one.
 
 UX 标准：如果 Zed / ChatGPT 团队设计一个 OSS Browser，大概就应该是这个样子。不是 OSSBrowser 换皮，也不是 Web 云控制台塞进桌面客户端。
 
@@ -71,6 +71,7 @@ crates/
     storage-core/   Provider abstraction
     provider-qiniu/ Qiniu Kodo
     provider-aliyun/ Aliyun OSS
+    provider-tencent/ Tencent Cloud COS
     transfer/       Transfer Engine（队列/状态机/watch 事件驱动；runner 闭包由 UI 注入）
     persistence/    SQLite + settings.json
     macos/          macOS native integration（Keychain/系统事件 NSWorkspace+NWPathMonitor/QuickLook/Clipboard/关于面板）
@@ -134,9 +135,10 @@ crates/ui/src/
 | Keychain key | `service = com.example.cloudstorage.credentials`（**占位 bundle id，定稿后统一替换**），`account = <account_uuid>`（不用账号名）；service 名集中在 `crates/macos/src/keychain.rs` 的 `KEYCHAIN_SERVICE`，只改一处；实现用 security-framework 3 的 generic password 三函数（`set/get/delete_generic_password`，get 返回 `Vec<u8>`，not-found 用 `err.code() == errSecItemNotFound` 归一化为正常分支） |
 | 账号编排 | `AccountService`（crates/app）：Secret 只入 Keychain，元数据（含 AK，AK 非 Secret）只入 SQLite；一致性顺序 —— add 先 Keychain 后 SQLite（失败补偿删 Keychain，补偿再失败报复合错误不吞）；delete 先 SQLite 后 Keychain（幂等）；Keychain 条目缺失报 `MissingSecret` 不静默。本层无状态：`load_secret`/`build_provider(_with_secret)` 分离，Secret 可由调用方提供 |
 | SK 会话缓存 | 钥匙串授权弹窗只在「选中账号后的第一次操作」出现：`AppServices.build_provider`（crates/app/src/services.rs）优先用单条会话缓存 `cached_secret`（最近使用账号的 SK，内存驻留、不落盘不进日志），未命中才现取钥匙串并写缓存；切换账号即置换淘汰。账号删除后缓存可能残留，但任何使用都因元数据缺失报 NotFound（不复活）。缓存锁与账号锁永不嵌套 |
-| SQLite schema | `accounts` 表列固定为 `id/name/provider/access_key/created_at_millis`；`transfers` 表（⌘Q 暂停并退出）列为 `id/kind/account_id/bucket/object_key/dest/display_name/state/enqueued_at_millis`，kind/state 有 CHECK。两表均有「无 Secret 列」回归测试把守；provider/kind/state 用 CHECK 在 DB 层 Fail Fast |
+| SQLite schema | `accounts` 表列固定为 `id/name/provider/access_key/created_at_millis`；`transfers` 表（⌘Q 暂停并退出）列为 `id/kind/account_id/bucket/object_key/dest/display_name/state/region/enqueued_at_millis`（region 可空，腾讯云任务随行落盘地域供重启后回填会话缓存），kind/state 有 CHECK。两表均有「无 Secret 列」回归测试把守；provider/kind/state 用 CHECK 在 DB 层 Fail Fast |
 | 本地路径 | `PathBuf`；Cloud Object Key：`String` + `/`。两者严格区分 |
-| 设置（⌘,） | `Settings`（crates/persistence/src/settings.rs）存 `settings.json`（Application Support/CloudStorage/，spec §58；永不存 Secret），损坏显式报错不静默重置（Fail Fast）；新增字段必须 serde default，旧配置缺字段正常补默认（`load_old_settings_file_fills_new_defaults` 用已删除字段 `theme_style` 把这条兜底变成可证伪的）。可配：签名链接 TTL、复制后清剪贴板秒数（0=关闭）、外观模式（System/Light/Dark）、界面字体族/字号缩放、代码字体族/字号、传输并发数（1..8）、默认下载目录（单/批量下载交互一致：设置了有效默认目录先弹确认 sheet「使用默认目录/另存为…或另选目录/取消」；单文件另存为面板以默认目录为初始目录；不自动回写）。运行时值在 `WorkspaceView.settings`，改动经 `SettingsModal`（自建 overlay，同 AddAccountModal 机制）保存后即时生效；`copy_object_url_request` 的 TTL 是运行时参数，禁止退回编译期常量。Transfer 列表：进度条 + 百分比 + 字节；失败原因完整换行展示（不 truncate） |
+| 设置（⌘,） | `Settings`（crates/persistence/src/settings.rs）存 `settings.json`（Application Support/CloudStorage/，spec §58；永不存 Secret），损坏显式报错不静默重置（Fail Fast）；新增字段必须 serde default，旧配置缺字段正常补默认（`load_old_settings_file_fills_new_defaults` 用已删除字段 `theme_style` 把这条兜底变成可证伪的）。可配：签名链接 TTL、复制后清剪贴板秒数（0=关闭）、外观模式（System/Light/Dark）、界面字体族/字号缩放、代码字体族/字号、传输并发数（1..8）、默认下载目录（单/批量下载交互一致：设置了有效默认目录先弹确认 sheet「使用默认目录/另存为…或另选目录/取消」；单文件另存为面板以默认目录为初始目录；不自动回写）、**上传大小上限（MB，0 = 不限制，可设上限 5119 MB——严格小于 5 GB，因为 5 GB 是 COS 简单上传的硬顶，不是用户可调项）**。运行时值在 `WorkspaceView.settings`，改动经 `SettingsModal`（自建 overlay，同 AddAccountModal 机制）保存后即时生效；`copy_object_url_request` 的 TTL 是运行时参数，禁止退回编译期常量。Transfer 列表：进度条 + 百分比 + 字节；失败原因完整换行展示（不 truncate） |
+| 上传大小上限的作用面 | **只管本地→云的上传**：⌘U 上传文件、上传文件夹、Finder 拖放、⌘S 保存编辑后的文本。**不拦云端复制/移动/重命名**——它们在本 App 里虽是「下载到临时文件再上传」，但用户心智是「搬运已有对象」而非「上传」，按上限拒掉会像 bug。判据是纯函数 `upload::upload_exceeds_cap`（`cap_mb == 0` = 不限制；`size == cap` **放行**，上限是闭区间上界），四处入口共用，超限**逐文件跳过后在状态条点名**（最多 3 个），不整批拒绝。目录上传的大小在 `walk_folder` 后台递归时随 `FolderUploadFile::size` 采集，避免为了判大小回 UI 线程再 stat 一遍。COS 自己的 5 GB 硬顶（`MAX_SIMPLE_UPLOAD_BYTES`）与用户设置无关，保留作最后一道防线 |
 
 ### 5.2 Provider 与网络
 
@@ -145,8 +147,12 @@ crates/ui/src/
 | Provider trait | `StorageProvider`（`crates/storage-core`）：方法返回 `impl Future + Send`（不用裸 `async fn`，Send 义务显式化，否则无法 spawn 到 tokio/gpui 后台执行器）；非 dyn-safe，上层按服务商 enum 分发 |
 | 七牛签名 | V2 请求签名逐字节核对自官方 SDK 源码并内置官方向量测试（V1 hello/world + V2 X-Qiniu-* 规范化排序）；坑：Base64 必须带 padding、签名用实际发送的原始 query 串、X-Qiniu-* 头名规范化为 Title-Case 后排序、putTime 单位 100ns。详见 `docs/notes/qiniu-api-notes.md`，勿凭记忆重写 |
 | 阿里云签名 | V1 签名，逐项核对官方文档并内置测试。坑：对象请求走 virtual-hosted 三级域名（`{bucket}.{location}.aliyuncs.com`，只有本地 mock 用 path-style）；**同时发送 `Date` 与 `x-oss-date`（同一 GMT 串）**——StringToSign 的 Date 行填该时间，并把 `x-oss-date` 列入 CanonicalizedOSSHeaders，Date 留空会 `SignatureDoesNotMatch`；ListObjects 的 CanonicalizedResource 是 `/{bucket}/`（服务端 StringToSign 只认这个）。详见 `docs/notes/aliyun-api-notes.md` |
+| 腾讯云 COS 签名 | 签名 v5（`q-sign-algorithm=sha1`），逐字节核对官方文档 + 五个官方 SDK 并内置三条可复现向量（含 Go SDK 的端到端向量）。**腾讯云没有官方 Rust SDK，只能照规范实现**。三个静默签错的坑：① `SignKey` 的**十六进制字符串当文本**用作下一层 HMAC 的 key（不是原始字节）；② `HttpString` 里的 `UriPathname` 必须是**解码后**的 UTF-8 路径（用线上百分号编码形式会得到一个服务端永远算不出的签名）；③ `HttpString` 用 LF 且**结尾换行必须有**，空分量保留空行。只签 `host`（上传加 `content-type`），不签 `date`/`content-length`。详见 `docs/notes/tencent-cos-api-notes.md` |
+| 腾讯云 COS 端点与地域 | 列举空间走全局 `https://service.cos.myqcloud.com`（**一次拿到全部地域的桶且带 `<Location>`**，但**它也分页**，容易漏）；对象操作走 `{bucket}.cos.{region}.myqcloud.com`。Bucket 标识是 `<名称>-<APPID>`（`examplebucket-1250000000`），**只写名称会得到 DNS 失败或 404、完全看不出原因**，故联网前用 `bucket_name_error` 挡住。地域缺失时回退查一次全局入口并缓存，仍拿不到就报错——**不蒙默认地域**（地域错了只会回 `SignatureDoesNotMatch`，无从判断）。**地域会话缓存在 AppServices**（`(account_id, bucket) → region`，`list_buckets`/`list_objects` 成功后写入、`build_provider` 回填进新 Tencent 实例）——provider 实例内的缓存活不过单次操作，没有这层的话每次下载/上传都要查一次 service 端点，无 `cos:GetService` 权限的账号（手填 Bucket）会永远卡死；手填空间时 UI 可一并输入地域。限流是 **503 `SlowDown` 而非 429**（与阿里云的映射不同，不能照抄）；错误响应带 `RequestId`，签名类错误必须把它带进报错文案 |
+| 腾讯云 COS 上传 | 简单上传（`PUT /{key}`）**上限 5 GB**，超过即在联网前 Fail Fast 报错（**分块上传明确不做**，与七牛断点续传同一决定）；支持 `Transfer-Encoding: chunked`，故流式上传不预先声明 `Content-Length` |
 | 七牛区域上传 | 上传 host 按 bucket 经 UC `GET /v4/query?ak=&bucket=` 解析（**公开接口无 Authorization**；官方 Rust SDK `BucketRegionsQueryer` 同构），取 `hosts[0].up.domains[0]`，进程内缓存（host 级 ttl，缺省 86400），失败回退 `upload.qiniup.com`。测试模式（UC 指向 127.0.0.1）直接用注入 up_base，不做真实解析。**断点续传明确不做**（用户决定） |
-| 七牛目录占位对象 | key 以 `/` 结尾的占位对象（size=0、mimeType `application/qiniu-object-manager`）不是文件——下载/预览/签名 URL 必 404，目录语义的唯一载体是 `CommonPrefix`；因此在 entries 数据填充点**单点过滤**掉（单一真相源），不在各交互入口打拦截补丁 |
+| 七牛目录占位对象 | key 以 `/` 结尾的占位对象（size=0、mimeType `application/qiniu-object-manager`）不是文件——下载/预览/签名 URL 必 404，目录语义的唯一载体是 `CommonPrefix`；因此在 entries 数据填充点**单点过滤**掉（单一真相源），不在各交互入口打拦截补丁。腾讯云 COS 在控制台建目录同样产生 `<前缀>/` 的空对象，同一条判据覆盖 |
+| 新增一家服务商要改的地方 | 判据是「编译器会拦住多少」。`ProviderKind`（domain）加变体后，三处 `match` + `BuiltProvider` 的 7 个臂 + `build_provider_with_secret` 的构造臂会**编译失败**，跟着改即可；`Sidebar 图标` / `URL scheme` / 账号弹层分段控件 / 下载失败排查文案 / 命令面板关键词是**不会编译失败**的几处，必须自己想起来。`accounts.provider` 的 CHECK 约束放宽需要**整表重建迁移**（SQLite 不能 ALTER CHECK），范式抄 `transfers.rs` 的 `migrate_transfers_allow_upload`，并配一条「用真的旧 schema 建库再走 open()」的迁移测试——直接测 `open_in_memory()` 得到的是新 schema，迁移分支根本不会执行 |
 
 ### 5.3 传输引擎与生命周期
 
@@ -164,7 +170,7 @@ crates/ui/src/
 | 文件选择 | 只用 gpui 平台 API：`cx.prompt_for_new_path`（保存）/ `cx.prompt_for_paths`（打开），结果经 oneshot 异步回传；**禁止在事件处理器里同步 `runModal`**——模态循环重入 gpui `App` RefCell 借用 → "RefCell already borrowed" 闪退（详见 docs/notes/gpui-api-notes.md「文件对话框」；crates/macos 不再封装面板，panel.rs 已删） |
 | 剪贴板 | `NSPasteboard`（`copy_text` / `read_text` / `clear_if_equals`）；Signed URL 可配置 N 秒自动清除（0=关闭） |
 | Open With / Show in Finder | ⌘O / 对象菜单入口：`ensure_local_copy` 复用 `preview_path`（判据 `cached_copy_matches` 纯函数：文件名 = `{nanos}-{display_name}` 后缀匹配且非全等，单测锁死），无副本先下载到临时目录（与预览同缓存位置）→ `object_storage_macos::open_with_default_app`（NSWorkspace）/ gpui `cx.reveal_path`（spec §14/§16） |
-| 预览 | 常见格式应用内；PDF/Office/视频走系统 Quick Look（`object_storage_macos::quick_look`），不自建 Preview Engine。图片等比完整显示：**不要**用 `img(..).size_full().object_fit(Contain)`——布局阶段按自然尺寸推导会撑出容器被 `overflow_hidden` 裁切，可靠写法是外层 flex 居中 + `overflow_hidden`，img 改 `max_w_full().max_h_full()`，Contain 仅作 paint 兜底。文本用 GPUI Kit `EditorState` 查看与编辑，⌘S 保存并上传（dirty 约束：内容与原文一致时按钮禁用，且 ⌘S 入口在保存函数内加同一检查，快捷键不得绕过按钮语义；编辑器内容变化须 `cx.subscribe_in(.., InputEvent::Change)` + `cx.notify()` 驱动禁用态刷新） |
+| 预览 | 常见格式应用内；PDF/Office/视频走系统 Quick Look（`object_storage_macos::quick_look`），不自建 Preview Engine。图片等比完整显示：**不要**用 `img(..).size_full().object_fit(Contain)`——布局阶段按自然尺寸推导会撑出容器被 `overflow_hidden` 裁切，可靠写法是外层 flex 居中 + `overflow_hidden`，img 改 `max_w_full().max_h_full()`，Contain 仅作 paint 兜底。文本用 GPUI Kit `EditorState` 查看与编辑，⌘S 保存并上传（dirty 约束：内容与原文一致时按钮禁用，且 ⌘S 入口在保存函数内加同一检查，快捷键不得绕过按钮语义；编辑器内容变化须 `cx.subscribe_in(.., InputEvent::Change)` + `cx.notify()` 驱动禁用态刷新）。**哪些文件进应用内文本预览由 `preview.rs` 的两张表决定**（`TEXT_EXTENSIONS` 扩展名 → 语言名、`TEXT_FILE_NAMES` 无扩展名/点开头按名识别，如 `Dockerfile`/`Makefile`/`README`/`.env`）：白名单与语言映射是同一张表，不会两半各改一次；语言名在已启用的 grammar 里找不到时高亮自动回落纯文本（`xml` 即此类，只有显示名）。判据只看 key 的最后一段，点开头的名字要连点一起写。**超过 2 MiB 的文本对象不报错**：不读进内存，浮层改成超限提示 + 复用「系统预览」按钮（`can_open_system` 同时认 `preview_oversized`） |
 | 「关于」用系统面板 | 走 `NSApplication.orderFrontStandardAboutPanelWithOptions:`（`crates/macos/src/about.rs` 的 `show_about_panel`，`OpenAbout` Action 入口不变）。**不要**再自建 About 浮层：系统已提供的能力不自建（§3），而且原生面板自动跟随系统语言/外观/无障碍设置。对齐参照实现——oss-browser2 的「关于」就是 Electron 的 `role: 'about'`（主菜单里只有这一项，两份 bundle 里都没有自建对话框）。用 **WithOptions** 而非无参版本：无参版读 bundle 的 Info.plist，开发期裸二进制没有它，会显示可执行文件名与空版本号 |
 
 ### 5.5 UI 架构与线程模型
@@ -195,7 +201,7 @@ crates/ui/src/
 | 排序（`sort.rs`） | **目录恒排在对象前**（Finder 语义，参照实现亦然），组内才谈「原序 / 名称 / 大小 / 时间」。`Natural`（默认）也走这一步分组，只是组内保持 provider 返回顺序——它曾经直接 `return ix`，于是默认视图的顺序完全由 provider 决定（OSS 把对象排在 `CommonPrefix` 之前 → 目录被推到整张表最后），与函数自己的注释和 Finder 行为都矛盾。见 `sort_entries_natural_keeps_listing_order_within_groups_but_puts_dirs_first` |
 | 对象列表的列与行内动作 | 列＝勾选 / 名称 / 大小 / 最新修改时间 / **操作**。**表头必须给每一列同样的固定宽度占位**（含末尾「操作」列，`tokens::col_action_width`）——表头少一列时名称列（`flex_1`）会多吸收那部分宽度，后面几列整体右移（实测曾偏 55px）。行内动作＝**下载 + 更多**（参照实现是 ☆ ↻ ⤓ ⋯，我们只做有实际动作的两个）：行内下载先 `select_object_for_row_action` **把选择收敛到本行**再下载，所以未选中任何行时点它也是按本行来；其余动作留在 ⋯ 菜单（与右键菜单共用同一个菜单实体） |
 | 工具栏 | 左＝上传（主色 + ▾：上传文件… / 上传文件夹…）· 新建目录 · 下载 · 更多（▾）；右＝搜索（紧凑控件）+ 刷新。下拉菜单的状态是**单个枚举** `toolbar_menu: Option<ToolbarMenu>`（Upload/More），所以不可能两个菜单同时开着；锚定一律用触发点的窗口坐标（`position_mode(Window)` + `position`）。「上传文件夹」已从「更多」移到这里，不再两处重复 |
-| 标题栏与地址栏 | 标题栏＝应用图标 + 名称 + 侧栏开关（左）、**聚合传输进度条 + 百分比 + 摘要**（右，仅进行中且有已知总大小时出现；下载的 Content-Length 可能未知故按已知项聚合）。地址栏行＝后退/前进 + 面包屑：`<scheme>://`（`oss`/`kodo`，次要色、不可点）→ bucket → 可点前缀段（长路径折叠成 `…`）。**不要**把 scheme 也做成可点目标，它不是导航目标 |
+| 标题栏与地址栏 | 标题栏＝应用图标 + 名称 + 侧栏开关（左）、**聚合传输进度条 + 百分比 + 摘要**（右，仅进行中且有已知总大小时出现；下载的 Content-Length 可能未知故按已知项聚合）。地址栏行＝后退/前进 + 面包屑：`<scheme>://`（`oss`/`kodo`/`cos`，次要色、不可点）→ bucket → 可点前缀段（长路径折叠成 `…`）。**不要**把 scheme 也做成可点目标，它不是导航目标 |
 | 紧凑搜索控件（`ui::compact_search_field`） | 输入框 + **接合**在右侧的放大镜按钮，形状照参照实现逐像素量出：两段**无间隙**，接缝那条竖线只由输入框自己的右边框提供（输入框右角方角、按钮左角方圆、按钮**不画左边框**）；未聚焦时两段边框同为 `theme.input`，聚焦时输入框整圈变蓝（`Input` 按 `theme.ring` 画）——**不要覆写 `Input` 的 border_color**，那会把聚焦色一起盖掉。按钮分两层：外壳 div 画外观，里层 ghost `Button` 管交互。原因是库的两个 API 都是 `pub(crate)`：`Button::border_edges` 拿不掉单条边、`ManagedTooltipExt` 让纯自绘 div 挂不上 tooltip，两层各取所需。该控件单独导出（`lib.rs` 的 `pub use`）以便离屏预览渲染生产代码本身。**宽度由调用方给、控件自己 `w_full` 铺满**：输入框是 `flex_1`，作为内容尺寸 flex 行的子项会塌成一条缝（工具栏踩过），预览也必须照抄调用点的父链才验得出来 |
 | 弹层内分段控件（服务商选择） | 「添加账号」的服务商用库自带 `ButtonGroup` + 每段 `Button::selected(bool)`，选中底走 `ButtonVariant::Custom` 的 **`active`** 色 = `sidebar_accent`（`ButtonGroup` 的选中样式取 variant 的 `active`，所以 accent 必须放 `active` 而非 `color`），选中项另加对勾图标 + `sidebar_accent_foreground` 文字色（不得只靠颜色表意）。两段等宽 `w(tokens::text(120.))` 且**等宽是必须的**——不然加了对勾会把另一段挤动。**禁止退回「选中 Secondary + 非选中 ghost」**：Secondary 的底 ≈ 面板底色，与 ghost 只差约 1%，选中态等于看不见（用户报过这个问题）；`theme.rs` 的 `selection_tint_is_visible_against_the_surface` 把这条钉住 |
 | 点击空白清空选择（B6，已落地并实测通过） | 清空处理器挂在**对象列表滚动容器自己**身上（`render_object_list` 的 `on_mouse_down`；列表改虚拟化后挂点仍是滚动容器——`UniformList` 自己实现了 `InteractiveElement`，挂不到它的祖先上去），行处理器一律 `cx.stop_propagation()`——能冒泡到容器的一定没命中行，判据不需要几何、也不依赖注册顺序。**不要**回到前几版方案：内容区容器的 `capture_any_mouse_down` 的 `is_hovered` 只统计 `BlockMouseExceptScroll` hitbox 链（非滚动容器收不到事件）；canvas 几何命中版要每帧重建全部行 bounds + 每行挂一个 canvas，为一个交互付 O(行) 代价。注：行处理器 `stop_propagation` 会跳过 WorkspaceView 根节点的菜单兜底关闭，行内已由 `handle_object_row_click` 自己关菜单 |
@@ -244,7 +250,7 @@ crates/ui/src/
 - **列表行一律「单击选择、双击打开」**（Finder 语义，判据为纯函数 `row_activation`，单测锁死）。Space 预览（再按 Space/Esc 关闭，方向键切换）；Return 打开重命名弹层；删除用 `⌘⌫` 且远端删除必须确认（`window.prompt`，无废纸篓）。命令面板/添加账号打开时 ⌘⌫ 不删对象。
 - Selection：Click / ⌘Click / ⇧Click / ⌘A，完整 macOS 语义。
 - Context Menu 顺序参考 Finder，Delete 放最底。Menu Bar：App/文件/编辑/显示/对象/传输/窗口/帮助；同一 Action 必须在 Menu / Context Menu / Toolbar / 快捷键 / Command Palette 共用。
-- 外观默认跟随 System（监听变化），设置中可手动固定 Light/Dark；低饱和 Accent，自有视觉身份（图标不得拼接七牛+阿里云 Logo）。
+- 外观默认跟随 System（监听变化），设置中可手动固定 Light/Dark；低饱和 Accent，自有视觉身份（图标不得拼接七牛+阿里云+腾讯云 Logo）。**系统外观变化的订阅必须由 `WorkspaceView` 持有**（`watch_window_appearance` → `appearance_subscription` 字段）：gpui 的 `Subscription` 析构即退订，绑成窗口创建闭包里的局部变量会当场失效——曾因此长期「系统切亮/暗 App 不跟」，回归测试 `watch_window_appearance_is_retained_by_the_view` 把这条钉住。详见 `docs/notes/gpui-api-notes.md`「Subscription 是 RAII」。
 - Retina 全适配；Trackpad 滚动平滑（虚拟列表不得丢惯性/跳跃）。
 - **可访问性（与视觉同等的要求）**：每个鼠标可达的控件都要键盘可达——`track_focus` + `tab_index`/`tab_group`/`tab_stop` 排 Tab 序、焦点态有可见的 `focus_visible`，并补齐该控件类型的常规键（方向键、Home/End、Enter/Space、Esc）；**不得只靠颜色/悬停/动效表意**，状态色必须与图标或文字配对；命中区域宁可放大控件也不要把字形缩小。装饰性动画必须尊重 `reduce_motion`（`with_animation` 已内建，`request_animation_frame` 需自判）。
 - **UI 设计基调（参照 oss-browser2；语义 token 六族沿用 [OpenChamber](https://github.com/openchamber/openchamber) theme-system，已落地 `crates/ui/src/theme.rs`）**：surface（面）/ primary（主 CTA）/ interactive+selection（可交互与选中）/ status（**唯一允许外来色相的一族**，只用于真实反馈）/ 中性（border 与 text 同属中性族）/ inverse。铁律：UI 代码只用 `cx.theme()` 语义字段，禁止硬编码 hex/hsla；hover 只给可交互元素；**selection ≠ primary**；**中性面不得带外来色相**（三条纪律都有测试，见 §5.7「色板族纪律」）。主色为 Ant 蓝 `#0064c8`（暗色 `#1668dc`），中性面统一冷灰 + 发丝级分隔线，选中态为淡蓝染色；小圆角（自绘尺寸档位见 `tokens.rs`，组件级由 `Theme.radius` 写入）。亮/暗两套（`CloudStorage Light/Dark`）经 `Theme::apply_config` 写入全局，`observe_window_appearance` 跟随系统切换。
@@ -268,7 +274,7 @@ crates/ui/src/
   cargo build --release
   ```
 
-  基线：194 passed / 1 ignored（ignored 的是需真实凭证的七牛联网用例；跑法见 README）、clippy 无告警。
+  基线：239 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
 - 打包：`./scripts/build-app.sh` → `.app` Bundle（`scripts/Info.plist.in` + `app-icon.png` 生成的 `.icns`）→ ad-hoc 签名 → `dist/CloudStorage-v<版本>-macos-arm64.zip` + sha256。
 - 正式发布流程（尚未走完）：Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由 `daxiong123/homebrew-tap` 分发，仓内定义在 `Casks/cloudstorage.rb`（URL 资产名必须与脚本产物同名）。初期不做 App Store Sandbox。
 - UI 改动无法脚本化验证交互：改完用 `cargo run -p object-storage-desktop` 后台启动，请用户复现确认；单视图视觉走 §5.8 的离屏预览。
@@ -282,6 +288,7 @@ crates/ui/src/
 | Developer ID 签名与公证 | 未做，发布包为 ad-hoc 签名；Bundle ID 与 Keychain service 仍是占位值 `com.example.cloudstorage` |
 | `crates/preview` / `crates/common` | 占位 crate，尚无实现（预览能力目前落在 `crates/ui/src/workspace/preview.rs` 与 `crates/macos/src/quicklook.rs`） |
 | 七牛断点续传 | **明确不做**（用户决定） |
+| 腾讯云 COS 分块上传 / STS 临时凭证 | **明确不做**。COS 简单上传上限 5 GB，超过即 Fail Fast 报错；STS（`x-cos-security-token`）未接，账号只支持永久密钥 |
 | 对象拖出到 Finder | 未做 |
 | 命令面板卡片窄窗口偏心 | 已知缺陷：面板按其自算 `left` 绝对定位，窗口窄于卡片时会压出左边缘（**待修**） |
 | CI | 未接入，验证靠本地闸门（§9） |

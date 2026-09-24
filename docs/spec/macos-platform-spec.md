@@ -743,6 +743,8 @@ Qiniu SecretKey
 
 Aliyun AccessKey Secret
 
+Tencent Cloud SecretKey（COS）
+
 STS Secret
 
 STS Token
@@ -1189,7 +1191,7 @@ Cloud/Object Storage
 不要直接：
 
 ```text
-七牛 Logo + 阿里云 Logo
+七牛 Logo + 阿里云 Logo + 腾讯云 Logo
 ```
 
 拼接。
@@ -2198,6 +2200,9 @@ crates/
     provider-aliyun/
         Aliyun OSS
 
+    provider-tencent/
+        Tencent Cloud COS
+
     transfer/
         Transfer Engine
 
@@ -2345,11 +2350,11 @@ Windows Developer
 
 而是：
 
-> A native, high-performance macOS workspace for Qiniu Kodo and Aliyun OSS.
+> A native, high-performance macOS workspace for Qiniu Kodo, Aliyun OSS, and Tencent Cloud COS.
 
 中文：
 
-> 一款专为 macOS 设计的高性能七牛 Kodo / 阿里云 OSS 对象存储工作台。
+> 一款专为 macOS 设计的高性能七牛 Kodo / 阿里云 OSS / 腾讯云 COS 对象存储工作台。
 
 产品重点：
 
@@ -2472,8 +2477,8 @@ macOS 用户体验
 
 # 70. 最终一句话原则
 
-> Build the best Qiniu Kodo + Aliyun OSS client for macOS, not the most portable one.
+> Build the best Qiniu Kodo + Aliyun OSS + Tencent Cloud COS client for macOS, not the most portable one.
 
 中文：
 
-> 我们的目标不是做最容易跨平台的对象存储客户端，而是做 macOS 上体验最好、性能最高、最轻量的七牛 Kodo + 阿里云 OSS 管理工具。
+> 我们的目标不是做最容易跨平台的对象存储客户端，而是做 macOS 上体验最好、性能最高、最轻量的七牛 Kodo + 阿里云 OSS + 腾讯云 COS 管理工具。

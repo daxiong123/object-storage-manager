@@ -18,11 +18,22 @@ impl WorkspaceView {
             .find(|account| Some(account.id.as_str()) == self.selected_account_id.as_deref())
             .map(|account| account.provider)
             .unwrap_or(object_storage_domain::ProviderKind::Aliyun);
-        if !self.buckets.iter().any(|bucket| bucket.name == name) {
+        // 腾讯云的对象操作需要地域；手填时一并带上可免去 service 端点解析
+        // （账号无 cos:GetService 权限时那是唯一出路）。
+        let region = self
+            .manual_bucket_region_input
+            .as_ref()
+            .map(|input| input.read(cx).value().trim().to_string())
+            .filter(|region| !region.is_empty());
+        // 同名桶已存在（上次地域留空/填错）时刷新它的地域，而不是原样跳过——
+        // 否则修正后的地域永远进不来，手填路径一直不可用（Codex PR review）
+        if let Some(existing) = self.buckets.iter_mut().find(|bucket| bucket.name == name) {
+            existing.region = region;
+        } else {
             self.buckets.push(Bucket {
                 name: name.clone(),
                 kind,
-                region: None,
+                region,
             });
         }
         self.buckets_state = AsyncState::Idle;

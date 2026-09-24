@@ -17,6 +17,13 @@ pub const CLIPBOARD_CLEAR_DEFAULT: u64 = 60;
 pub const TRANSFER_CONCURRENCY_DEFAULT: u32 = 2;
 pub const UI_FONT_SCALE_DEFAULT: f32 = 1.0;
 pub const CODE_FONT_SIZE_DEFAULT: u32 = 13;
+/// 上传文件大小上限（MB）。0 = 不限制。
+pub const MAX_UPLOAD_SIZE_MB_DEFAULT: u64 = 0;
+/// 上传大小上限**可设置的最大值**（MB）：严格小于 5 GB。
+///
+/// 5 GB = 5120 MiB，所以能设到 5119 MiB，5 GB 本身不可设——它是腾讯云 COS
+/// 简单上传（`PUT Object`）的硬顶，属于协议限制而非用户可调项。
+pub const MAX_UPLOAD_SIZE_MB_CEILING: u64 = 5119;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +44,10 @@ fn default_ui_font_scale() -> f32 {
 
 fn default_code_font_size() -> u32 {
     CODE_FONT_SIZE_DEFAULT
+}
+
+fn default_max_upload_size_mb() -> u64 {
+    MAX_UPLOAD_SIZE_MB_DEFAULT
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +77,9 @@ pub struct Settings {
     /// 默认下载目录。None = 使用 HOME 作为保存面板初始目录。
     #[serde(default)]
     pub default_download_dir: Option<PathBuf>,
+    /// 上传文件大小上限（MB）。0 = 不限制；上限见 `MAX_UPLOAD_SIZE_MB_CEILING`。
+    #[serde(default = "default_max_upload_size_mb")]
+    pub max_upload_size_mb: u64,
 }
 
 impl Default for Settings {
@@ -80,6 +94,7 @@ impl Default for Settings {
             code_font_size: CODE_FONT_SIZE_DEFAULT,
             transfer_concurrency: TRANSFER_CONCURRENCY_DEFAULT,
             default_download_dir: None,
+            max_upload_size_mb: MAX_UPLOAD_SIZE_MB_DEFAULT,
         }
     }
 }
@@ -149,6 +164,12 @@ impl Settings {
         if !(1..=8).contains(&self.transfer_concurrency) {
             return Err("传输并发数必须在 1 到 8 之间".into());
         }
+        // 0 = 不限制，天然通过；上界严格小于 5 GB（见常量注释）
+        if self.max_upload_size_mb > MAX_UPLOAD_SIZE_MB_CEILING {
+            return Err(format!(
+                "上传大小上限不能超过 {MAX_UPLOAD_SIZE_MB_CEILING} MB（必须小于 5 GB）"
+            ));
+        }
         if let Some(path) = &self.default_download_dir
             && !path.is_dir()
         {
@@ -202,6 +223,7 @@ mod tests {
             code_font_size: 15,
             transfer_concurrency: 4,
             default_download_dir: Some(dir.clone()),
+            max_upload_size_mb: 2048,
         };
         settings.save_at(path.clone()).unwrap();
         let loaded = Settings::load_at(path).unwrap();
@@ -214,6 +236,7 @@ mod tests {
         assert_eq!(loaded.code_font_size, 15);
         assert_eq!(loaded.transfer_concurrency, 4);
         assert_eq!(loaded.default_download_dir.as_deref(), Some(dir.as_path()));
+        assert_eq!(loaded.max_upload_size_mb, 2048);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -252,6 +275,7 @@ mod tests {
         assert_eq!(loaded.code_font_size, CODE_FONT_SIZE_DEFAULT);
         assert_eq!(loaded.transfer_concurrency, TRANSFER_CONCURRENCY_DEFAULT);
         assert_eq!(loaded.default_download_dir, None);
+        assert_eq!(loaded.max_upload_size_mb, MAX_UPLOAD_SIZE_MB_DEFAULT);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -307,5 +331,40 @@ mod tests {
         s.transfer_concurrency = TRANSFER_CONCURRENCY_DEFAULT;
         s.default_download_dir = Some(std::env::temp_dir().join("missing-cloudstorage-dir"));
         assert!(s.validate().is_err());
+        s.default_download_dir = None;
+        // 上传大小上限：0 = 不限制，合法
+        s.max_upload_size_mb = MAX_UPLOAD_SIZE_MB_DEFAULT;
+        assert!(s.validate().is_ok());
+        // 可设的最大值 = 5119 MB（严格小于 5 GB），合法
+        s.max_upload_size_mb = MAX_UPLOAD_SIZE_MB_CEILING;
+        assert!(s.validate().is_ok());
+        // 5 GB 本身（5120 MB）不可设
+        s.max_upload_size_mb = 5120;
+        assert!(s.validate().is_err(), "5 GB 本身必须被拒绝");
+        s.max_upload_size_mb = u64::MAX;
+        assert!(s.validate().is_err());
+    }
+
+    /// 「最大设置不超过 5 GB 且不含 5 GB」这条边界要可证伪：
+    /// 上界常量必须**严格小于** 5120 MiB，而不是等于。
+    /// 「最大设置不超过 5 GB 且不含 5 GB」——这条在**编译期**挡住：
+    /// 有人把上限常量改到 5 GB 及以上时直接编译失败，而不是等运行时测试来发现。
+    const _: () = assert!(MAX_UPLOAD_SIZE_MB_CEILING < 5 * 1024);
+
+    /// 同一条约束的**行为**验证：5 GB 本身必须被 `validate()` 拒绝，
+    /// 可设的最大值必须被接受。改常量或改校验条件都会让这条变红。
+    #[test]
+    fn upload_size_ceiling_is_strictly_below_five_gib() {
+        let five_gib_mb = 5 * 1024;
+        let mut s = Settings {
+            max_upload_size_mb: five_gib_mb,
+            ..Settings::default()
+        };
+        assert!(s.validate().is_err(), "5 GB 本身不可设");
+        s.max_upload_size_mb = MAX_UPLOAD_SIZE_MB_CEILING;
+        assert!(s.validate().is_ok(), "可设的最大值应当合法");
+        // 默认不限制，升级不改变任何现有用户的行为
+        assert_eq!(Settings::default().max_upload_size_mb, 0);
+        assert!(Settings::default().validate().is_ok());
     }
 }
