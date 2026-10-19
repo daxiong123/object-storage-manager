@@ -28,6 +28,15 @@ pub(super) fn breadcrumb_prefixes(prefix: Option<&str>) -> Vec<(String, String)>
         .collect()
 }
 
+/// 传输摘要按钮的 tooltip：点它展开/收起传输面板。
+fn transfer_panel_tooltip(expanded: bool) -> &'static str {
+    if expanded {
+        "收起传输面板"
+    } else {
+        "展开传输面板"
+    }
+}
+
 pub(super) fn collapse_breadcrumb(
     segments: &[(String, String)],
 ) -> Option<(String, Vec<(String, String)>)> {
@@ -196,46 +205,60 @@ impl WorkspaceView {
                         .flex_1()
                         .min_w_0()
                         .h_full()
+                        .flex()
+                        .items_center()
                         .child(self.render_title_location(theme, cx)),
                 )
                 .when(active_transfers > 0, |bar| {
+                    // 真按钮而不是带 hover/click 的 div：传输面板入口必须能 Tab 到、
+                    // 有可见焦点环、并支持 Enter / Space 激活（§7 可访问性）。
                     bar.child(
-                        h_flex()
-                            .id("title-transfers")
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .rounded(tokens::radius())
-                            .text_size(tokens::caption())
-                            .text_color(theme.muted_foreground)
-                            .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
+                        Button::new("title-transfers")
+                            .ghost()
+                            .with_size(Size::Small)
+                            .tooltip(transfer_panel_tooltip(self.transfers_expanded))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.transfers_expanded = !this.transfers_expanded;
                                 cx.notify();
                             }))
                             .child(
-                                Icon::new(IconName::ChevronsUpDown)
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .child(format!("{active_transfers} 项传输中"))
-                            .when_some(progress, |row, ratio| {
-                                row.child(
-                                    div()
-                                        .w(tokens::text(72.))
-                                        .h(tokens::text(3.))
-                                        .rounded(tokens::radius())
-                                        .bg(theme.border)
-                                        .child(
+                                h_flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(tokens::caption())
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        // 展开态朝上、收起态朝下：图标随面板状态变，
+                                        // 不额外加文字（标签已是「N 项传输中」）。
+                                        Icon::new(if self.transfers_expanded {
+                                            IconName::ChevronUp
+                                        } else {
+                                            IconName::ChevronDown
+                                        })
+                                        .text_color(theme.muted_foreground),
+                                    )
+                                    .child(format!("{active_transfers} 项传输中"))
+                                    .when_some(progress, |row, ratio| {
+                                        row.child(
                                             div()
-                                                .h_full()
+                                                .w(tokens::text(72.))
+                                                .h(tokens::text(3.))
                                                 .rounded(tokens::radius())
-                                                .bg(theme.primary)
-                                                .w(tokens::text(72. * ratio.clamp(0.0, 1.0))),
-                                        ),
-                                )
-                            }),
+                                                .bg(theme.border)
+                                                .child(
+                                                    div()
+                                                        .h_full()
+                                                        .rounded(tokens::radius())
+                                                        .bg(theme.primary)
+                                                        .w(tokens::text(
+                                                            72. * ratio.clamp(0.0, 1.0),
+                                                        )),
+                                                ),
+                                        )
+                                    }),
+                            ),
                     )
                 }),
         )
@@ -291,6 +314,11 @@ impl WorkspaceView {
     ) -> impl IntoElement {
         // 当前位置就是窗口标题：bucket / 路径。不画 `oss://` 这类协议前缀——
         // 那是控制台地址，不是用户正在看的对象。当前段用前景色，祖先段用次要色。
+        //
+        // **容器本身不拦鼠标**：`TitleBar` 的拖拽与双击缩放都从它自己的鼠标处理器
+        // 开始，整条面包屑 `stop_propagation` 会把标题栏中段整块拖拽区吃掉。拦截只
+        // 放在真正可点的段上（bucket / 各路径段 / ⌘L 输入框）；段与段之间的空隙、
+        // 以及路径右侧的空白，仍然留给窗口拖拽。
         let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
         let at_root = segments.is_empty();
         let mut path = h_flex()
@@ -302,7 +330,6 @@ impl WorkspaceView {
             .gap_1()
             .overflow_hidden()
             .text_size(tokens::body())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .px_1()
@@ -316,7 +343,10 @@ impl WorkspaceView {
                     .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.open_bucket_root(cx)),
+                        cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.open_bucket_root(cx)
+                        }),
                     )
                     .child(bucket.to_string()),
             );
@@ -337,6 +367,7 @@ impl WorkspaceView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.open_prefix(first_target.clone(), cx)
                                 }),
                             )
@@ -352,6 +383,7 @@ impl WorkspaceView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.open_prefix(collapsed_prefix.clone(), cx)
                                 }),
                             )
@@ -388,6 +420,7 @@ impl WorkspaceView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 this.open_prefix(target_prefix.clone(), cx)
                             }),
                         )
@@ -484,5 +517,54 @@ mod tests {
     #[gpui::test]
     fn click_stops_at_the_filter_wrapper(cx: &mut TestAppContext) {
         assert_eq!(ancestor_clicks(cx, true), 0);
+    }
+
+    /// 面包屑容器**不能**整体 `stop_propagation`。
+    ///
+    /// 标题栏中段是窗口的主要拖拽 / 双击缩放区。整条面包屑拦截 mouse_down 会让
+    /// 这块区域失效，只剩控件周围一圈 padding 可用（PR #4 review 指出）。拦截只
+    /// 放在真正可点的段上。这条测试盯源码里的结构约束——比肉眼看渲染可靠。
+    #[test]
+    fn breadcrumb_container_does_not_block_titlebar_dragging() {
+        let source = include_str!("titlebar.rs");
+        let container = source
+            .split("let mut path = h_flex()")
+            .nth(1)
+            .and_then(|tail| tail.split(".child(").next())
+            .expect("找不到面包屑容器");
+        assert!(
+            !container.contains("stop_propagation"),
+            "面包屑容器不该拦截 mouse_down，否则标题栏中段无法拖拽/双击缩放"
+        );
+        // 可点的段仍然各自拦截：否则点段会同时被标题栏当成拖拽起点。
+        assert!(
+            source.matches("cx.stop_propagation();").count() >= 4,
+            "各可点面包屑段（bucket / 折叠首段 / … / 路径段）应各自 stop_propagation"
+        );
+    }
+
+    /// 传输面板入口必须是**可聚焦、可用键盘激活**的控件。
+    ///
+    /// 带 hover / click 的裸 `h_flex` 键盘用户够不着（PR #4 review 指出）。这里锁住
+    /// 两点：一是它由 `Button` 承载（Button 自带 focus ring + Tab + Enter/Space），
+    /// 二是它有 tooltip 名称，图标按钮不至于只剩一个图标。
+    #[test]
+    fn transfer_entry_is_a_real_button() {
+        let source = include_str!("titlebar.rs");
+        let block = source
+            .split("fn render_title_bar")
+            .nth(1)
+            .and_then(|tail| tail.split("fn render_title_location").next())
+            .expect("找不到 render_title_bar");
+        assert!(
+            block.contains(r#"Button::new("title-transfers")"#),
+            "传输入口必须渲染为 Button，才能被键盘聚焦与激活"
+        );
+        assert!(
+            block.contains("transfer_panel_tooltip("),
+            "图标+文字的传输入口需要 tooltip 说明其作用"
+        );
+        assert_eq!(transfer_panel_tooltip(true), "收起传输面板");
+        assert_eq!(transfer_panel_tooltip(false), "展开传输面板");
     }
 }
