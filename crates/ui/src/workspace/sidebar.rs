@@ -35,10 +35,9 @@ impl WorkspaceView {
     pub(super) fn sidebar_section_label(&self, theme: &Theme, label: &str) -> impl IntoElement {
         div()
             .px_3()
-            .pt_2()
+            .pt_3()
             .pb_1()
             .text_size(tokens::caption())
-            .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.muted_foreground)
             .child(label.to_string())
     }
@@ -59,7 +58,7 @@ impl WorkspaceView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(self.sidebar_section_label(theme, "账户"))
+                    .child(self.sidebar_section_label(theme, "账号"))
                     .children(self.render_account_rows(theme, cx))
                     .child(self.render_add_account_row(theme, cx))
                     .child(self.sidebar_section_label(theme, "空间"))
@@ -157,8 +156,8 @@ impl WorkspaceView {
                 div()
                     .px_1()
                     .rounded(tokens::radius_lg())
-                    .bg(theme.primary)
-                    .text_color(theme.primary_foreground)
+                    .bg(theme.sidebar_accent)
+                    .text_color(theme.sidebar_accent_foreground)
                     .text_size(tokens::caption())
                     .child(count.to_string())
             }))
@@ -469,7 +468,11 @@ impl WorkspaceView {
             })
             .when(!active, |row| row.hover(|row| row.bg(theme.list_hover)))
             .on_click(on_click)
-            .child(Icon::new(icon))
+            .child(Icon::new(icon).text_color(if active {
+                theme.sidebar_accent_foreground
+            } else {
+                theme.muted_foreground
+            }))
             .child(div().truncate().child(label.to_string()))
     }
 

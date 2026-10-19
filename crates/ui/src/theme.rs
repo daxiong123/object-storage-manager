@@ -1,4 +1,4 @@
-//! 应用主题（Linear 风格设计基调，agents.md §7「UI 设计基调」）。
+//! 应用主题（现代桌面壳层，agents.md §7「UI 设计基调」）。
 //!
 //! 语义 token 体系沿用 [OpenChamber theme-system](https://github.com/openchamber/openchamber)
 //! 的四族划分，映射到 gpui-component 的 `ThemeColor`：
@@ -13,11 +13,11 @@
 //! - hover 只给可交互元素；
 //! - 不用 primary/accent 色标记普通选中行（选中用 selection / sidebar_accent）。
 //!
-//! 视觉身份（Linear 风格，规范 §38「低饱和」）：主色为低饱和靛蓝
-//! （hue 233，锚定 Linear `#5E6AD2`），亮/暗两套各自微调亮度；
-//! 中性面色族统一冷灰（hue 225），极低对比面 + 发丝级 1px 边框；
-//! 选中态 = 低饱和 indigo 淡染色（≠ primary）；小圆角（radius 5 / lg 8）。
-//! 状态色（error/warning/success/info）保持库默认，只用于真实反馈。
+//! 视觉身份对齐 Codex / Zed 一类现代桌面软件，而不是管理后台表格：
+//! 标题栏与侧栏是同一块下凹的 chrome，内容区是抬起的工作面；
+//! 主色是克制的蓝（hue 221 / 暗色 217），只给真正的提交动作；
+//! 选中是低饱和淡染色，文字保持中性前景，不把选中行染成主色；
+//! 圆角 6 / 10，发丝级分隔线，没有斑马纹。
 //!
 //! 实现说明：gpui-component 的 `ThemeConfig.colors` 颜色为 hex 字符串
 //! （内部经 `try_parse_color` 解析），且 `ThemeRegistry` 的默认主题没有
@@ -33,8 +33,8 @@ use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Setting
 
 use crate::tokens;
 
-/// 主色 hue：与色板 primary（`#0064c8`）同族，供只按 hue 生成的语法/高亮色使用。
-const HUE_DEG: f32 = 210.0;
+/// 主色 hue：与亮色 primary 同族，供只按 hue 生成的语法/高亮色使用。
+const HUE_DEG: f32 = 221.0;
 /// 中性面色族 hue：统一冷灰，供代码高亮的中性层使用。
 const NEUTRAL_HUE: f32 = 225.0;
 
@@ -152,9 +152,9 @@ struct Palette {
     // （见 `status_is_the_only_foreign_hue_family`）。
     /// 文件类型图标的**统一**色（目录与文件同色）。
     ///
-    /// 参照实现（oss-browser2）就是这么做的：它每行图标的最饱和像素实测都是同一个
-    /// 金色 `(255,189,60)`，目录与文件只靠**字形**区分，不按类型分色。
-    /// `ThemeConfig` 没有这一位，所以经 `theme::file_icon_color()` 下发（同 `image_outline`）。
+    /// 目录与文件只靠字形区分，不按类型分色。取一档能在亮/暗底上都看得见的琥珀，
+    /// 而不是把图标染成主色。`ThemeConfig` 没有这一位，所以经
+    /// `theme::file_icon_color()` 下发（同 `image_outline`）。
     file_icon: [f32; 4],
     danger: [f32; 4],
     danger_hover: [f32; 4],
@@ -205,182 +205,163 @@ fn rgb(hex: u32) -> [f32; 4] {
     [(h / 6.).rem_euclid(1.), s, l, 1.]
 }
 
-/// OSS Browser（阿里官方客户端）风格 · 亮色。
+/// 亮色：内容是白工作面，标题栏与侧栏是同一块略凹的中性 chrome。
 ///
-/// 取值**逐项来自该应用自己的 CSS**（`/Applications/oss-browser2.app` →
-/// `.webpack/renderer/main.css`）：它的 `:root` 里有 `--oss-primary-color: #0064c8`
-/// 等自定义属性，表头/行高/文字色则在 `.ant-table-*` 规则里。要点：
-///
-/// - 主色是**深蓝 `#0064c8`**（不是 Linear 的靛蓝、也不是 waku 的珊瑚）；
-/// - 选中是**淡蓝**：行选中 `#eff3f8`、侧栏/菜单选中 `#e6f7ff`；
-/// - hover 是**纯中性灰 `#f2f2f2`**（无色相）；边框 `#f0f0f0` 极浅；
-/// - 表头底色 `#fafafc`、文字 `#1f2024`，次要文字 `#898989`；
-/// - 状态色是经典饱和三色：成功 `rgb(80,187,53)`、错误 `rgb(250,73,74)`、
-///   警告 `rgb(246,164,52)`；它没有 info，用它的链接蓝 `#1677ff` 顶。
-///
-/// `selection` 不是直接抄 `#eff3f8`：gpui-component 会把 `selection` 的 alpha
-/// 强压到 ≤0.3，源色太淡会渲染到看不见（见 `selection_tint_survives_library_alpha_clamp`）。
-/// 这里取 `#b8cee6` 作**源色**，0.3 压完后叠在白底上恰好约等于它的 `#eff3f8`。
+/// 中性面一律等通道灰，避免冷灰色相漂进「有色」。品牌色用同一 hue 221
+/// 推导，选中染色与主 CTA 分开：`sidebar_accent` 是不透明淡底（侧栏行、
+/// 设置导航），`selection` 要扛过库对 alpha 的 ≤0.3 钳制后仍看得见。
+/// `list_active` 故意保持在钳制后不可见——选中底色不要走它。
 fn light_palette() -> Palette {
-    let border = rgb(0xF0F0F0);
+    let border = rgb(0xE6E6E6);
+    let canvas = rgb(0xFFFFFF);
+    let chrome = rgb(0xF2F2F2);
+    let ink = rgb(0x1A1A1A);
+    let brand = 221.;
     Palette {
-        background: rgb(0xFFFFFF),
-        foreground: rgb(0x1F2024),
-        muted: rgb(0xFAFAFC),
-        muted_foreground: rgb(0x898989),
+        background: canvas,
+        foreground: ink,
+        muted: rgb(0xF6F6F6),
+        muted_foreground: rgb(0x6E6E6E),
         border,
-        // 侧栏与内容**同色**（实测其运行实例：侧栏与内容区都是纯白 255,255,255），
-        // 两者只靠一条极淡的界线分开（实测 245,245,245）。不要给它加更深的底色。
-        sidebar: rgb(0xFFFFFF),
-        sidebar_foreground: rgb(0x333333),
-        sidebar_border: rgb(0xF5F5F5),
-        popover: rgb(0xFFFFFF),
-        secondary: rgb(0xFAFAFC),
-        secondary_hover: rgb(0xF2F2F2),
-        secondary_active: rgb(0xEFEFEF),
-        // Ant 的控件边框是 `@border-color-base` = #d9d9d9——比表格分隔线 #f0f0f0
-        // 明显更深；两者混用会让复选框「没有边框」。
-        input: rgb(0xD9D9D9),
-        list: rgb(0xFFFFFF),
-        list_even: rgb(0xFAFAFC),
-        list_head: rgb(0xFAFAFC),
-        table: rgb(0xFFFFFF),
-        table_even: rgb(0xFAFAFC),
-        table_head: rgb(0xFAFAFC),
-        // 它的表格分隔线就是实色 #f0f0f0（Ant 式），不另加透明度
-        table_row_border: border,
-        title_bar: rgb(0xFFFFFF),
-        // Ant 的模态遮罩是 rgba(0,0,0,0.45)
-        overlay: hsla(0., 0., 0., 0.45),
+        // 侧栏比内容略凹，标题栏与侧栏同色，chrome 读成一整块。
+        sidebar: chrome,
+        sidebar_foreground: ink,
+        sidebar_border: border,
+        popover: canvas,
+        secondary: chrome,
+        secondary_hover: rgb(0xE8E8E8),
+        secondary_active: rgb(0xDEDEDE),
+        // `input` 是控件边框，不是填充。必须明显深于白底，否则复选框没有边。
+        input: rgb(0xC8C8C8),
+        list: canvas,
+        list_even: canvas,
+        list_head: canvas,
+        table: canvas,
+        table_even: canvas,
+        table_head: canvas,
+        table_row_border: rgb(0xEEEEEE),
+        title_bar: chrome,
+        overlay: hsla(0., 0., 0., 0.40),
         window_border: border,
-        group_box: rgb(0xFAFAFC),
-        group_box_foreground: rgb(0x1F2024),
-        description_list_label: rgb(0xFAFAFC),
-        description_list_label_foreground: rgb(0x1F2024),
-        primary: rgb(0x0064C8),
-        primary_hover: rgb(0x0170CB),
-        primary_active: rgb(0x0053A6),
+        group_box: rgb(0xF6F6F6),
+        group_box_foreground: ink,
+        description_list_label: rgb(0xF6F6F6),
+        description_list_label_foreground: ink,
+        primary: hsl(brand, 0.78, 0.48),
+        primary_hover: hsl(brand, 0.78, 0.42),
+        primary_active: hsl(brand, 0.78, 0.36),
         primary_foreground: rgb(0xFFFFFF),
-        progress_bar: rgb(0x0064C8),
-        // accent / accent_foreground 在本仓库当**图标色**用（非文本类型的文件图标、
-        // 文件夹图标），所以取它的主色蓝——不能取淡蓝，否则图标看不见。
-        accent: rgb(0x0064C8),
-        accent_foreground: rgb(0x0064C8),
-        ring: rgb(0x0064C8),
-        sidebar_accent: rgb(0xE6F7FF),
-        sidebar_accent_foreground: rgb(0x0064C8),
-        list_active: rgb(0xE6F7FF),
-        list_active_border: rgb(0x1677FF),
-        table_active: rgb(0xE6F7FF),
-        table_active_border: rgb(0x1677FF),
-        selection: rgb(0xB8CEE6),
-        link: rgb(0x1677FF),
-        link_hover: rgb(0x69B1FF),
-        link_active: rgb(0x0958D9),
-        // 拖入时的提示框：参照实现是**灰色虚线**（实测 #757575），不是彩色实线
-        drag_border: rgb(0x757575),
-        drop_target: hsla(215., 1.0, 0.53, 0.22),
-        row_hover: rgb(0xF2F2F2),
-        // 状态色：基色取自上游 CSS，**hover/active 在同色相上推亮度**得到，
-        // 不直接抄它的色阶——上游那套色阶越亮色相越漂（`#50BB35` 108° 与
-        // `#73D13D` 98° 差 10°，同一族会出现两种绿）。纪律测试就是抓这个的。
-        // Ant 金（gold-4 `#FFC53D`；实测参照实现渲染为 (255,189,60)）
-        file_icon: rgb(0xFFC53D),
-        danger: rgb(0xFA494A),
-        danger_hover: hsl(0., 0.945, 0.70),
-        danger_active: hsl(0., 0.945, 0.56),
+        progress_bar: hsl(brand, 0.78, 0.48),
+        accent: hsl(brand, 0.78, 0.48),
+        accent_foreground: hsl(brand, 0.70, 0.36),
+        ring: hsl(brand, 0.78, 0.48),
+        // 不透明淡底。前景保持中性墨色：选中靠底色，不靠把文字染成主色。
+        sidebar_accent: hsl(brand, 0.40, 0.86),
+        sidebar_accent_foreground: ink,
+        list_active: hsl(brand, 0.25, 0.93),
+        list_active_border: hsl(brand, 0.78, 0.48),
+        table_active: hsl(brand, 0.25, 0.93),
+        table_active_border: hsl(brand, 0.78, 0.48),
+        selection: hsl(brand, 0.50, 0.62),
+        link: hsl(brand, 0.80, 0.46),
+        link_hover: hsl(brand, 0.80, 0.56),
+        link_active: hsl(brand, 0.80, 0.38),
+        drag_border: rgb(0x8A8A8A),
+        drop_target: hsla(brand, 0.70, 0.48, 0.16),
+        row_hover: rgb(0xEFEFEF),
+        file_icon: rgb(0xE0A82E),
+        danger: rgb(0xE5484D),
+        danger_hover: hsl(357., 0.76, 0.66),
+        danger_active: hsl(357., 0.76, 0.48),
         danger_foreground: rgb(0xFFFFFF),
-        warning: rgb(0xF6A434),
-        warning_hover: hsl(34.6, 0.915, 0.65),
-        warning_active: hsl(34.6, 0.915, 0.52),
+        warning: rgb(0xE6A01A),
+        warning_hover: hsl(40., 0.80, 0.62),
+        warning_active: hsl(40., 0.80, 0.46),
         warning_foreground: rgb(0xFFFFFF),
-        success: rgb(0x50BB35),
-        success_hover: hsl(108., 0.558, 0.53),
-        success_active: hsl(108., 0.558, 0.41),
+        success: rgb(0x2F9E44),
+        success_hover: hsl(136., 0.54, 0.50),
+        success_active: hsl(136., 0.54, 0.36),
         success_foreground: rgb(0xFFFFFF),
-        info: rgb(0x1677FF),
-        info_hover: hsl(215., 1.0, 0.60),
-        info_active: hsl(215., 1.0, 0.47),
+        info: hsl(brand, 0.80, 0.50),
+        info_hover: hsl(brand, 0.80, 0.60),
+        info_active: hsl(brand, 0.80, 0.40),
         info_foreground: rgb(0xFFFFFF),
     }
 }
 
-/// OSS Browser 风格 · 深色。
-///
-/// 该应用的 CSS **只有亮色**（没有任何深色覆盖），所以这一套取 **Ant Design 官方
-/// 深色主题**的取值（body `#141414`、容器 `#1f1f1f`、边框 `#303030`、主色
-/// `#1668dc`、正文 `rgba(255,255,255,0.85)`），而不是我凭空配的——保持同一套
-/// 设计语言，来源可查。
+/// 深色：侧栏与标题栏更凹，内容区略抬，工作面仍然是唯一的亮面。
 fn dark_palette() -> Palette {
-    let border = rgb(0x303030);
+    let border = rgb(0x2E2E2E);
+    let canvas = rgb(0x1C1C1C);
+    let chrome = rgb(0x141414);
+    let ink = rgb(0xE8E8E8);
+    let brand = 217.;
     Palette {
-        background: rgb(0x141414),
-        foreground: rgb(0xD9D9D9),
-        muted: rgb(0x1F1F1F),
-        muted_foreground: rgb(0x737373),
+        background: canvas,
+        foreground: ink,
+        muted: rgb(0x242424),
+        muted_foreground: rgb(0x8A8A8A),
         border,
-        // 深色无上游参照（其 CSS 只有亮色）：亮色下侧栏与内容同色，深色也保持同色。
-        sidebar: rgb(0x141414),
-        sidebar_foreground: rgb(0xD9D9D9),
-        sidebar_border: border,
-        popover: rgb(0x262626),
-        secondary: rgb(0x1F1F1F),
-        secondary_hover: rgb(0x262626),
-        secondary_active: rgb(0x303030),
-        input: rgb(0x424242),
-        list: rgb(0x141414),
-        list_even: rgb(0x1A1A1A),
-        list_head: rgb(0x1F1F1F),
-        table: rgb(0x141414),
-        table_even: rgb(0x1A1A1A),
-        table_head: rgb(0x1F1F1F),
-        table_row_border: border,
-        title_bar: rgb(0x1F1F1F),
+        sidebar: chrome,
+        sidebar_foreground: ink,
+        sidebar_border: rgb(0x2A2A2A),
+        popover: rgb(0x242424),
+        secondary: rgb(0x242424),
+        secondary_hover: rgb(0x2C2C2C),
+        secondary_active: rgb(0x333333),
+        // 暗色边框要在「input 混 30% 再叠到 background」之后仍看得见，见测试。
+        input: rgb(0x555555),
+        list: canvas,
+        list_even: canvas,
+        list_head: canvas,
+        table: canvas,
+        table_even: canvas,
+        table_head: canvas,
+        table_row_border: rgb(0x2A2A2A),
+        title_bar: chrome,
         overlay: hsla(0., 0., 0., 0.55),
         window_border: border,
-        group_box: rgb(0x1F1F1F),
-        group_box_foreground: rgb(0xD9D9D9),
-        description_list_label: rgb(0x1F1F1F),
-        description_list_label_foreground: rgb(0xD9D9D9),
-        primary: rgb(0x1668DC),
-        primary_hover: rgb(0x2B7BE0),
-        primary_active: rgb(0x0F5BC4),
+        group_box: rgb(0x242424),
+        group_box_foreground: ink,
+        description_list_label: rgb(0x242424),
+        description_list_label_foreground: ink,
+        primary: hsl(brand, 0.85, 0.62),
+        primary_hover: hsl(brand, 0.85, 0.68),
+        primary_active: hsl(brand, 0.85, 0.54),
         primary_foreground: rgb(0xFFFFFF),
-        progress_bar: rgb(0x1668DC),
-        accent: rgb(0x1668DC),
-        accent_foreground: rgb(0x1668DC),
-        ring: rgb(0x1668DC),
-        sidebar_accent: rgb(0x111D2C),
-        sidebar_accent_foreground: rgb(0x1668DC),
-        list_active: rgb(0x111D2C),
-        list_active_border: rgb(0x1677FF),
-        table_active: rgb(0x111D2C),
-        table_active_border: rgb(0x1677FF),
-        selection: rgb(0x14467F),
-        link: rgb(0x1677FF),
-        link_hover: rgb(0x69B1FF),
-        link_active: rgb(0x0958D9),
-        // 暗色用本盘自己的中性灰（#737373），保证在 #141414 上仍看得见
-        drag_border: rgb(0x737373),
-        drop_target: hsla(215., 1.0, 0.53, 0.25),
-        row_hover: rgb(0x262626),
-        // 同亮色套：hover/active 在同色相上推亮度派生
-        file_icon: rgb(0xFFC53D),
-        danger: rgb(0xFF7875),
-        danger_hover: hsl(1.3, 1.0, 0.79),
-        danger_active: hsl(1.3, 1.0, 0.63),
+        progress_bar: hsl(brand, 0.85, 0.62),
+        accent: hsl(brand, 0.85, 0.62),
+        accent_foreground: hsl(brand, 0.80, 0.72),
+        ring: hsl(brand, 0.85, 0.62),
+        sidebar_accent: hsl(brand, 0.35, 0.24),
+        sidebar_accent_foreground: ink,
+        list_active: hsl(brand, 0.15, 0.18),
+        list_active_border: hsl(brand, 0.85, 0.62),
+        table_active: hsl(brand, 0.15, 0.18),
+        table_active_border: hsl(brand, 0.85, 0.62),
+        selection: hsl(brand, 0.35, 0.40),
+        link: hsl(brand, 0.85, 0.68),
+        link_hover: hsl(brand, 0.85, 0.76),
+        link_active: hsl(brand, 0.85, 0.58),
+        drag_border: rgb(0x8A8A8A),
+        drop_target: hsla(brand, 0.70, 0.55, 0.22),
+        row_hover: rgb(0x2A2A2A),
+        file_icon: rgb(0xE0A82E),
+        danger: rgb(0xFF6B6B),
+        danger_hover: hsl(0., 1.0, 0.76),
+        danger_active: hsl(0., 1.0, 0.58),
         danger_foreground: rgb(0x141414),
-        warning: rgb(0xFFC069),
-        warning_hover: hsl(34.8, 1.0, 0.77),
-        warning_active: hsl(34.8, 1.0, 0.63),
+        warning: rgb(0xE6A01A),
+        warning_hover: hsl(40., 0.80, 0.62),
+        warning_active: hsl(40., 0.80, 0.46),
         warning_foreground: rgb(0x141414),
-        success: rgb(0x73D13D),
-        success_hover: hsl(98.1, 0.617, 0.60),
-        success_active: hsl(98.1, 0.617, 0.46),
+        success: rgb(0x3DDC6E),
+        success_hover: hsl(140., 0.70, 0.62),
+        success_active: hsl(140., 0.70, 0.46),
         success_foreground: rgb(0x141414),
-        info: rgb(0x4096FF),
-        info_hover: hsl(213., 1.0, 0.70),
-        info_active: hsl(213., 1.0, 0.55),
+        info: hsl(brand, 0.85, 0.68),
+        info_hover: hsl(brand, 0.85, 0.76),
+        info_active: hsl(brand, 0.85, 0.56),
         info_foreground: rgb(0x141414),
     }
 }
@@ -482,11 +463,9 @@ fn config(
         cfg.font_family = prefs.ui_font_family.clone().map(SharedString::from);
         cfg.mono_font_size = Some(prefs.code_font_size as f32);
         cfg.mono_font_family = prefs.code_font_family.clone().map(SharedString::from);
-        // 小圆角：库组件（Button/Input/List/Table/Dialog…）经 Theme.radius 统一继承，
-        // 视图层自绘卡片用 radius_lg 对齐。取值与 tokens.rs 的 radius()/radius_lg()
-        // 必须一致（有测试钉住），参照实现是 Ant 系的小圆角（2 / 4）。
-        cfg.radius = Some(2);
-        cfg.radius_lg = Some(4);
+        // 控件 6、浮层 10。与 tokens.rs 的 radius()/radius_lg() 必须一致（有测试钉住）。
+        cfg.radius = Some(6);
+        cfg.radius_lg = Some(10);
         // 代码编辑器（code_editor 文本预览/编辑）高亮配色：跟随亮/暗模式，
         // 中性底色与 surface 族同冷灰系。
         cfg.highlight = Some(highlight_theme_style(mode));
@@ -1066,10 +1045,10 @@ mod tests {
             assert!(theme.colors.background.is_some(), "background 必须设置");
             assert_eq!(
                 theme.radius,
-                Some(2),
-                "小圆角（与 tokens.rs 的 radius() 同刻度）"
+                Some(6),
+                "控件圆角（与 tokens.rs 的 radius() 同刻度）"
             );
-            assert_eq!(theme.radius_lg, Some(4));
+            assert_eq!(theme.radius_lg, Some(10));
             assert_eq!(theme.shadow, Some(false), "Linear 纯平：组件无阴影");
         }
     }

@@ -1,4 +1,4 @@
-//! Unified Titlebar：导航按钮、当前位置（路径输入 / 面包屑）、过滤与上传入口。
+//! Unified Titlebar：侧栏开关、后退/前进、当前位置（路径输入 / 面包屑）。
 //!
 //! **标题栏里的交互控件必须保留 `on_mouse_down(stop_propagation)`**。
 //!
@@ -122,31 +122,18 @@ impl WorkspaceView {
         } else {
             IconName::PanelLeftClose
         };
-        // 标题栏按参照实现只放**窗口级身份信息**：左＝应用图标 + 名称，
-        // 右＝传输状态摘要。导航（后退/前进）与当前位置已移到标题栏下方的
-        // **地址栏行**（见 `render_address_bar`），与参照实现的层级一致。
-        let transfer_summary = if self.transfers.is_empty() {
-            "当前暂无传输任务".to_string()
-        } else {
-            let active = self
-                .transfers
-                .iter()
-                .filter(|t| {
-                    matches!(
-                        t.state,
-                        TransferState::Running | TransferState::Waiting | TransferState::Paused
-                    )
-                })
-                .count();
-            if active == 0 {
-                format!("{} 项传输已完成", self.transfers.len())
-            } else {
-                format!("{active} 项传输中")
-            }
-        };
-        // 聚合进度：只看**进行中**的任务，且只统计已知总大小的（下载的
-        // Content-Length 可能未知）。参照实现在标题栏放一条进度条 + 计数，
-        // 这里做成「文字 + 一条细进度条」，不占满整条标题栏。
+        // 标题栏是窗口级导航，不是产品名牌，也不是第二条地址栏。
+        // 传输只在真有进行中的任务时出现——空闲时那句「当前暂无传输任务」是噪音。
+        let active_transfers = self
+            .transfers
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    TransferState::Running | TransferState::Waiting | TransferState::Paused
+                )
+            })
+            .count();
         let (done, total) = self
             .transfers
             .iter()
@@ -170,31 +157,7 @@ impl WorkspaceView {
                 .h_full()
                 .items_center()
                 .gap_1()
-                .pr_2()
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap_2()
-                        .pl_2()
-                        .pr_1()
-                        .child(
-                            img(Arc::new(gpui::Image::from_bytes(
-                                gpui::ImageFormat::Png,
-                                crate::APP_ICON_PNG.to_vec(),
-                            )))
-                            .size(px(16.))
-                            .rounded(tokens::radius_lg())
-                            .object_fit(ObjectFit::Cover),
-                        )
-                        .child(
-                            div()
-                                .text_size(tokens::label())
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme.foreground)
-                                .child("CloudStorage"),
-                        ),
-                )
+                .px_2()
                 .child(
                     Button::new("toggle-sidebar")
                         .icon(Icon::new(sidebar_icon))
@@ -208,94 +171,74 @@ impl WorkspaceView {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
-                .child(div().flex_1())
-                .when_some(progress, |this, ratio| {
-                    this.child(
+                .child(
+                    Button::new("nav-back")
+                        .icon(Icon::new(IconName::ArrowLeft))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .tooltip("后退 ⌘[")
+                        .disabled(self.nav_back.is_empty())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
+                )
+                .child(
+                    Button::new("nav-forward")
+                        .icon(Icon::new(IconName::ArrowRight))
+                        .ghost()
+                        .with_size(Size::Small)
+                        .tooltip("前进 ⌘]")
+                        .disabled(self.nav_forward.is_empty())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_title_location(theme, cx)),
+                )
+                .when(active_transfers > 0, |bar| {
+                    bar.child(
                         h_flex()
+                            .id("title-transfers")
                             .flex_shrink_0()
                             .items_center()
                             .gap_2()
-                            .pr_2()
+                            .px_2()
+                            .rounded(tokens::radius())
+                            .text_size(tokens::caption())
+                            .text_color(theme.muted_foreground)
+                            .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.transfers_expanded = !this.transfers_expanded;
+                                cx.notify();
+                            }))
                             .child(
-                                div()
-                                    .w(tokens::text(96.))
-                                    .h(tokens::text(4.))
-                                    .rounded(tokens::radius())
-                                    .bg(theme.border)
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .rounded(tokens::radius())
-                                            .bg(theme.primary)
-                                            // 宽度按比例算成像素：`relative()` 不在此模块作用域内，
-                                            // 而且用 text() 能让进度条跟着字号缩放一起变。
-                                            .w(tokens::text(96. * ratio.clamp(0.0, 1.0))),
-                                    ),
+                                Icon::new(IconName::ChevronsUpDown)
+                                    .text_color(theme.muted_foreground),
                             )
-                            .child(
-                                div()
-                                    .text_size(tokens::label())
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{:.0}%", ratio * 100.)),
-                            ),
+                            .child(format!("{active_transfers} 项传输中"))
+                            .when_some(progress, |row, ratio| {
+                                row.child(
+                                    div()
+                                        .w(tokens::text(72.))
+                                        .h(tokens::text(3.))
+                                        .rounded(tokens::radius())
+                                        .bg(theme.border)
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .rounded(tokens::radius())
+                                                .bg(theme.primary)
+                                                .w(tokens::text(72. * ratio.clamp(0.0, 1.0))),
+                                        ),
+                                )
+                            }),
                     )
-                })
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .pr_2()
-                        .text_size(tokens::label())
-                        .text_color(theme.muted_foreground)
-                        .child(transfer_summary),
-                ),
+                }),
         )
-    }
-
-    /// 标题栏**下方**的地址栏行（参照实现的层级：导航与当前位置独立成行）。
-    ///
-    /// 组成与参照一致：左＝后退/前进；中＝当前位置（⌘L 路径框，否则面包屑，
-    /// 参照实现里这里是 `oss://bucket/prefix` 形式）；参照右端还有一个收藏用的
-    /// 星标，那属于「收藏」功能（待定项 B），此处先不放无效按钮。
-    pub(super) fn render_address_bar(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .w_full()
-            .flex_shrink_0()
-            .items_center()
-            .gap_1()
-            .px_3()
-            .py_1()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                Button::new("nav-back")
-                    .icon(Icon::new(IconName::ArrowLeft))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .tooltip("后退 ⌘[")
-                    .disabled(self.nav_back.is_empty())
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| this.handle_nav_back(cx))),
-            )
-            .child(
-                Button::new("nav-forward")
-                    .icon(Icon::new(IconName::ArrowRight))
-                    .ghost()
-                    .with_size(Size::Small)
-                    .tooltip("前进 ⌘]")
-                    .disabled(self.nav_forward.is_empty())
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| this.handle_nav_forward(cx))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(self.render_title_location(theme, cx)),
-            )
     }
 
     /// Titlebar 中段：⌘L 路径框，否则当前 bucket / prefix 面包屑。
@@ -329,9 +272,12 @@ impl WorkspaceView {
             None => div()
                 .flex_1()
                 .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
                 .text_size(tokens::body())
                 .text_color(theme.muted_foreground)
-                .child("CloudStorage")
+                .child("选择空间")
                 .into_any_element(),
         }
     }
@@ -343,12 +289,10 @@ impl WorkspaceView {
         bucket: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // 参照实现的地址栏是 `oss://<bucket>/<path>`：scheme 只是身份提示（不是可点
-        // 目标），所以用次要色、不加 hover。bucket 与后续段仍是可点的面包屑。
-        let scheme = self
-            .selected_provider_kind()
-            .map(provider_url_scheme)
-            .unwrap_or("oss");
+        // 当前位置就是窗口标题：bucket / 路径。不画 `oss://` 这类协议前缀——
+        // 那是控制台地址，不是用户正在看的对象。当前段用前景色，祖先段用次要色。
+        let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
+        let at_root = segments.is_empty();
         let mut path = h_flex()
             .id("title-breadcrumb")
             .flex_1()
@@ -357,28 +301,25 @@ impl WorkspaceView {
             .items_center()
             .gap_1()
             .overflow_hidden()
-            .text_size(tokens::label())
+            .text_size(tokens::body())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(theme.muted_foreground)
-                    .child(format!("{scheme}://")),
-            )
             .child(
                 div()
                     .px_1()
                     .rounded(tokens::radius())
                     .flex_shrink_0()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .hover(|el| el.bg(theme.list_hover))
+                    .when(at_root, |el| {
+                        el.text_color(theme.foreground)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .when(!at_root, |el| el.text_color(theme.muted_foreground))
+                    .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.open_bucket_root(cx)),
                     )
                     .child(bucket.to_string()),
             );
-        let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
         let (collapsed, segments) = match collapse_breadcrumb(&segments) {
             Some((collapsed_prefix, tail)) => {
                 let first = segments[0].clone();
@@ -421,7 +362,9 @@ impl WorkspaceView {
             None => (false, segments),
         };
         let _ = collapsed;
-        for (label, prefix) in segments {
+        let count = segments.len();
+        for (ix, (label, prefix)) in segments.into_iter().enumerate() {
+            let current = ix + 1 == count;
             let target_prefix = prefix.clone();
             path = path
                 .child(
@@ -436,7 +379,11 @@ impl WorkspaceView {
                         .rounded(tokens::radius())
                         .min_w_0()
                         .truncate()
-                        .text_color(theme.muted_foreground)
+                        .when(current, |el| {
+                            el.text_color(theme.foreground)
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                        })
+                        .when(!current, |el| el.text_color(theme.muted_foreground))
                         .hover(|el| el.bg(theme.list_hover).text_color(theme.foreground))
                         .on_mouse_down(
                             MouseButton::Left,

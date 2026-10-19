@@ -31,22 +31,18 @@ pub fn text(base: f32) -> Pixels {
 
 // ---- 字号阶梯（基准像素；实际渲染值 = 基准 × 字号缩放） ----
 
-// 尺度参照 OSS Browser（Ant Design 系）：它 CSS 里 12px 出现 14 次、是列表/表格/
-// 标签的绝对主力，标题用 14px，应用名 20px。所以是把**正文档位压到 12**、标题压到 14，
-// 而不是我们原先偏大的 13/15/16。
-//
-// 阶梯允许**相等**（12 同时用于元数据与正文、14 同时用于空态标题与弹层标题）——
-// 参考设计本来就有并列档位，为此把「严格递增」的测试放宽成「非递减」。
+// 桌面正文档位 13，元数据 12，标题 15。不是管理后台把正文压到 12 的那套。
+// 阶梯允许相等（空态标题与弹层标题同档），禁止倒退。
 /// 分组标题、键位提示。
 pub const CAPTION: f32 = 11.;
-/// 元数据：大小/时间列、状态条、面包屑，以及**列表/表格正文**。
+/// 元数据：大小/时间列、状态条。
 pub const LABEL: f32 = 12.;
-/// 正文、列表行文本、输入框（与 LABEL 同档，参照实现如此）。
-pub const BODY: f32 = 12.;
+/// 正文、列表行、输入框。
+pub const BODY: f32 = 13.;
 /// 空态标题。
-pub const HEADING: f32 = 14.;
-/// 弹层标题（参照实现的 modal 标题就是 14px）。
-pub const TITLE: f32 = 14.;
+pub const HEADING: f32 = 15.;
+/// 弹层标题。
+pub const TITLE: f32 = 15.;
 /// 关于弹层的应用名。
 pub const DISPLAY: f32 = 20.;
 /// 空态图标。
@@ -96,18 +92,14 @@ pub fn icon_lg() -> Pixels {
 
 // ---- 几何 ----
 
-/// 圆角：chip / 列表行 / 横幅等小元素。
-///
-/// 参照实现是 Ant Design v4 系（CSS 里用 `--ant-color-link` 这个 v4 命名），
-/// 基础圆角 **2px**，整屏观感方正——截图里按钮与输入框的角接近直角。
-/// 与 theme.rs 写入组件的 `Theme.radius` 同一刻度，不要再出现第三种值。
+/// 圆角：控件、列表行、横幅。与 `Theme.radius` 同一刻度。
 pub fn radius() -> Pixels {
-    px(2.)
+    px(6.)
 }
 
-/// 圆角：弹层卡片（= theme.rs 的 `Theme.radius_lg`）。取 Ant 的 lg 档 4px。
+/// 圆角：弹层卡片（= theme.rs 的 `Theme.radius_lg`）。
 pub fn radius_lg() -> Pixels {
-    px(4.)
+    px(10.)
 }
 
 /// 圆角：应用图标容器（近似 macOS squircle，不参与上面两档）。
@@ -132,7 +124,7 @@ pub fn radius_nested(inset: Pixels) -> Pixels {
 /// 列表行纵向内边距。行高由内容撑开，不另设固定行高——字号缩放时
 /// 固定行高会与文字错位。
 pub fn row_pad_y() -> Pixels {
-    px(6.)
+    px(4.)
 }
 
 /// 侧栏行纵向内边距：密度比内容区列表更紧（Finder 侧栏惯例）。
@@ -152,10 +144,9 @@ pub fn row_pad_y_transfer() -> Pixels {
 /// 那样由内容撑开——原先「行高由内容撑开，不另设固定行高」的约定只适用于
 /// 非虚拟列表。
 ///
-/// 取 24 是为了对上参照实现的**表格行高 36px**（其 CSS 把 `.ant-table-thead` 与行
-/// 都固定成 36px）：24 + 上下内边距 12 = 36。也明显大于行内 `Input::small()` 的
-/// 24px 高度，留量充足。
-const ROW_BOX: f32 = 24.;
+/// 22 + 上下内边距 8 = 30。大于行内 `Input::small()` 的 24px，又比管理后台的
+/// 36px 表格行紧一档，接近 Finder / Zed 的列表密度。
+const ROW_BOX: f32 = 22.;
 
 /// 对象列表行高 = 行盒 + 上下内边距。
 ///
@@ -186,14 +177,6 @@ pub fn col_time_width() -> Pixels {
 /// 对象列表行首**复选框**列宽（参照实现的表格第一列）。
 pub fn col_check_width() -> Pixels {
     text(28.)
-}
-
-/// 对象列表行末**操作**列宽（参照实现的表格最后一列）。
-///
-/// 两个图标（下载 + 更多）+ 间距：参照实现这一列放 4 个图标，我们只做有实际动作的
-/// 两个（收藏/解冻不做）。表头也用同一宽度占位，否则表头与数据行会整体错开。
-pub fn col_action_width() -> Pixels {
-    text(64.)
 }
 
 #[cfg(test)]
@@ -240,16 +223,14 @@ mod tests {
         // 时间列必须容得下「最新修改时间」六个字 + 时间串
         assert!(col_time_width() > col_size_width());
         assert_eq!(col_check_width(), text(28.));
-        assert_eq!(col_action_width(), text(64.));
         set_ui_font_scale(1.0);
     }
 
     #[test]
     fn radius_scale_matches_theme_scale() {
-        // 与 theme.rs 的 Theme.radius / radius_lg 对齐（2 / 4），
-        // 图标容器是唯一的例外档位。
-        assert_eq!(radius(), px(2.));
-        assert_eq!(radius_lg(), px(4.));
+        // 与 theme.rs 的 Theme.radius / radius_lg 对齐（6 / 10）。
+        assert_eq!(radius(), px(6.));
+        assert_eq!(radius_lg(), px(10.));
         assert!(radius_icon() > radius_lg());
     }
 
@@ -268,7 +249,7 @@ mod tests {
 
     #[test]
     fn font_ramp_is_non_decreasing() {
-        // 允许相等：参照设计里 12 同时用于元数据与正文、14 同时用于空态标题与弹层标题。
+        // 允许相等：空态标题与弹层标题同档。
         // 仍然禁止「倒退」——档位必须随语义变重而单调不减。
         let ramp = [
             CAPTION, LABEL, BODY, HEADING, TITLE, DISPLAY, ICON_SM, ICON_LG,
