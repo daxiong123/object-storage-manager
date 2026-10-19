@@ -132,32 +132,26 @@ impl WorkspaceView {
             IconName::PanelLeftClose
         };
         // 标题栏是窗口级导航，不是产品名牌，也不是第二条地址栏。
-        // 传输只在真有进行中的任务时出现——空闲时那句「当前暂无传输任务」是噪音。
+        // 传输只在真有未完成任务时出现——空闲时那句「当前暂无传输任务」是噪音。
+        //
+        // 判据用 `TransferState::is_active()`（Queued / Running / Waiting / Paused），
+        // 与 quit.rs、transfers.rs 保持一致。**不要**手写 matches! 列表并漏掉 Queued：
+        // 并发打满或引擎挂起时任务会停在 Queued，漏掉它会在「只剩排队任务」时
+        // 把整个传输入口从标题栏抹掉。
         let active_transfers = self
             .transfers
             .iter()
-            .filter(|t| {
-                matches!(
-                    t.state,
-                    TransferState::Running | TransferState::Waiting | TransferState::Paused
-                )
-            })
+            .filter(|t| t.state.is_active())
             .count();
-        let (done, total) = self
-            .transfers
-            .iter()
-            .filter(|t| {
-                matches!(
-                    t.state,
-                    TransferState::Running | TransferState::Waiting | TransferState::Paused
-                )
-            })
-            .fold((0u64, 0u64), |(done, total), task| match task.bytes_total {
+        let (done, total) = self.transfers.iter().filter(|t| t.state.is_active()).fold(
+            (0u64, 0u64),
+            |(done, total), task| match task.bytes_total {
                 Some(task_total) if task_total > 0 => {
                     (done + task.bytes_done.min(task_total), total + task_total)
                 }
                 _ => (done, total),
-            });
+            },
+        );
         let progress = (total > 0).then(|| done as f32 / total as f32);
 
         TitleBar::new().child(
@@ -541,6 +535,34 @@ mod tests {
             source.matches("cx.stop_propagation();").count() >= 4,
             "各可点面包屑段（bucket / 折叠首段 / … / 路径段）应各自 stop_propagation"
         );
+    }
+
+    /// 传输入口在**只剩排队任务**时也必须出现。
+    ///
+    /// 并发打满或引擎挂起时任务会停在 `Queued`。标题栏若手写 matches! 并漏掉它，
+    /// 这个状态下入口会被整个抹掉（PR #4 review 指出）。判据统一走 `is_active()`，
+    /// 与 quit.rs / transfers.rs 一致——这里把每个状态的口径逐个钉死。
+    #[test]
+    fn queued_transfers_count_as_active() {
+        use object_storage_transfer::TransferState;
+        for state in [
+            TransferState::Queued,
+            TransferState::Running,
+            TransferState::Waiting,
+            TransferState::Paused,
+        ] {
+            assert!(
+                state.is_active(),
+                "{state:?} 是未完成态，标题栏必须把它算进「N 项传输中」，否则入口会消失"
+            );
+        }
+        for state in [
+            TransferState::Completed,
+            TransferState::Failed,
+            TransferState::Cancelled,
+        ] {
+            assert!(!state.is_active(), "{state:?} 是终态，不该让入口常驻");
+        }
     }
 
     /// 传输面板入口必须是**可聚焦、可用键盘激活**的控件。

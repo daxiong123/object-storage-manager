@@ -10,7 +10,7 @@
 | 版本 | `0.4.0`（`Cargo.toml` 的 `[workspace.package] version`，发版时一处改） |
 | 平台 | macOS 14+ / Apple Silicon（`aarch64-apple-darwin`） |
 | 语言与 UI | Rust 2024 + `gpui-pre`（声明 0.3.1，锁 0.3.4）+ `gpui-component` 0.6.1 + `gpui-kit-assets` 0.6.1 |
-| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **244 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
+| 验证状态 | `cargo fmt --check` 干净、`cargo clippy --all-targets` 无告警、`cargo test --workspace` **245 passed / 2 ignored**（被忽略的是需真实凭证的七牛与腾讯云 COS 联网用例）；无 UI 交互自动化，交互靠人肉验收 |
 | 已落地 | 账号与 Keychain、Bucket/对象浏览（前缀下钻/搜索/排序/分页/虚拟列表）、选择语义、上传下载删除重命名复制移动、传输引擎与系统事件、预览与 Quick Look、设置、命令面板、原生菜单 |
 | 未落地 | 见 §10（含明确不做的项） |
 
@@ -274,7 +274,7 @@ crates/ui/src/
   cargo build --release
   ```
 
-  基线：244 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
+  基线：245 passed / 2 ignored（ignored 的是需真实凭证的七牛与腾讯云 COS 联网用例；跑法见 README）、clippy 无告警。
 - 打包：`./scripts/build-app.sh` → `.app` Bundle（`scripts/Info.plist.in` + `app-icon.png` 生成的 `.icns`）→ ad-hoc 签名 → `dist/CloudStorage-v<版本>-macos-arm64.zip` + sha256。
 - 正式发布流程（尚未走完）：Developer ID 签名 → Notarize → Staple → DMG；Homebrew Cask 由 `daxiong123/homebrew-tap` 分发，仓内定义在 `Casks/cloudstorage.rb`（URL 资产名必须与脚本产物同名）。初期不做 App Store Sandbox。
 - UI 改动无法脚本化验证交互：改完用 `cargo run -p object-storage-desktop` 后台启动，请用户复现确认；单视图视觉走 §5.8 的离屏预览。
