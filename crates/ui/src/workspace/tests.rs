@@ -1780,3 +1780,42 @@ fn copy_object_url_request_uses_current_selection_and_configured_ttl() {
         }
     );
 }
+
+#[test]
+fn create_folder_input_rerenders_while_typing() {
+    // 回归：弹层打开时输入为空（占位符），「创建」按钮初始禁用。若订阅只处理
+    // PressEnter、不处理 Change，打字时视图不重绘，按钮会一直是灰的——鼠标
+    // 用户根本创建不了目录。rename / copy_move 的输入框都显式在 Change 上
+    // notify，新建目录必须一致。
+    let source = include_str!("folder.rs");
+    let subscribe = source
+        .split("cx.subscribe_in(&editor, window")
+        .nth(1)
+        .and_then(|tail| tail.split(".detach()").next())
+        .expect("找不到新建目录输入框的订阅");
+    assert!(
+        subscribe.contains("InputEvent::Change => cx.notify()"),
+        "新建目录输入框必须在 Change 上重渲染，否则「创建」按钮不会解除禁用"
+    );
+    assert!(
+        subscribe.contains("InputEvent::PressEnter"),
+        "回车仍要能提交创建"
+    );
+}
+
+#[test]
+fn create_folder_starts_empty_with_a_placeholder() {
+    // 输入框用占位符提示，而不是预填「新建目录」当真名——预填内容容易被
+    // 手滑连同名字一起提交。
+    let source = include_str!("folder.rs");
+    let ctor = source
+        .split("let editor = cx.new(|cx| InputState::new(window, cx)")
+        .nth(1)
+        .and_then(|tail| tail.split(';').next())
+        .expect("找不到输入框构造");
+    assert!(
+        ctor.contains(".placeholder("),
+        "应以 placeholder 提供提示：{ctor}"
+    );
+    assert!(!ctor.contains("default_value"), "不该预填默认值：{ctor}");
+}

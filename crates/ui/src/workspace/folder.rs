@@ -60,8 +60,14 @@ impl WorkspaceView {
         }
         let editor = cx.new(|cx| InputState::new(window, cx).placeholder("新建目录"));
         cx.subscribe_in(&editor, window, |this, _, event: &InputEvent, _, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                this.commit_create_folder(cx);
+            match event {
+                // 回车 = 创建（与「创建」按钮同一条路径）
+                InputEvent::PressEnter { .. } => this.commit_create_folder(cx),
+                // 输入变化必须重渲染：「创建」按钮的可用态与校验提示都是即时算的。
+                // 占位符取代默认值之后，弹层打开时输入为空、按钮初始禁用——少了
+                // 这一条，打字时视图不重绘，按钮会一直是灰的。
+                InputEvent::Change => cx.notify(),
+                _ => {}
             }
         })
         .detach();
