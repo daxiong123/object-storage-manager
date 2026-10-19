@@ -127,8 +127,15 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// ⋯ 入口（行末「操作」列）：**不改动选择**，只打开菜单并把动作目标设为该行。
-    pub(super) fn open_row_actions_menu(
+    /// 右键打开对象菜单。
+    ///
+    /// **不需要在调用点再做一次「收敛到被右键的行」**：`open_object_menu` 内部已经
+    /// 按 Finder 语义把该行纳入选择（`select_object_for_row_action`，锚点用
+    /// `object_selection_ix` 的对象下标）。曾在调用点另加一层收敛，锚点误用了
+    /// `display_slot_of_key` 的显示槽位（含目录前缀），两套坐标不一致，已删除。
+    ///
+    /// 唯一例外是菜单开着时再右键同一行：此时收起菜单，不改动选择。
+    pub(super) fn toggle_object_context_menu(
         &mut self,
         key: &str,
         at: Point<Pixels>,
@@ -137,44 +144,10 @@ impl WorkspaceView {
         if self.object_menu_open.as_deref() == Some(key) {
             self.object_menu_open = None;
             self.object_menu_at = None;
-            self.object_menu_targets.clear();
             cx.notify();
             return;
         }
-        self.object_menu_targets = menu_targets_for(key, &self.selected_object_keys, false);
-        // **未选中任何对象时，把「主选」设为这一行**（不动多选集合）。
-        //
-        // 这样菜单里所有「按当前对象」的动作（详情 / 重命名 / 复制链接 / 下载 / 删除 /
-        // 复制到·移动到）都能直接拿到这一行的数据，不必再提示「请先选中对象」——
-        // 它们解析「当前对象」时都回落到主选（`selected_cloud_object()`，以及集合为空时
-        // 的 `selected_object_keys_vec()`）。
-        //
-        // 主选在菜单关闭后仍然有效，动作路径不依赖菜单开着。行高亮现在**同时认主选**
-        // （`checked || active`，见 `object_list.rs` 的行渲染），所以这一行会亮起来——
-        // 这是想要的：菜单里的动作作用在哪一行应当看得见。复选框不受影响。
-        if self.selected_object_keys.is_empty() {
-            self.selected_object_key = Some(key.to_string());
-        }
-        self.object_menu_open = Some(key.to_string());
-        self.object_menu_at = Some(at);
-        self.preview_overlay_open = false;
-        self.details_overlay_open = false;
-        cx.notify();
-    }
-
-    pub(super) fn toggle_object_menu(
-        &mut self,
-        key: &str,
-        at: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.object_menu_open.as_deref() == Some(key) {
-            self.object_menu_open = None;
-            self.object_menu_at = None;
-            cx.notify();
-        } else {
-            self.open_object_menu(key, at, cx);
-        }
+        self.open_object_menu(key, at, cx);
     }
 
     /// 打开/收起工具栏下拉菜单。同一个按钮再点 = 收起；换一个按钮 = 直接切过去

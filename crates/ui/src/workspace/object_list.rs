@@ -22,7 +22,7 @@ impl WorkspaceView {
             .justify_between()
             .gap_2()
             .px_3()
-            .py_2()
+            .py_1()
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -30,11 +30,8 @@ impl WorkspaceView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    // 操作组顺序与参照实现一致：上传（主色）· 新建目录 · 下载 · 更多
+                    // 上传是本区的常用动作，用默认按钮而不是主色——主色留给对话框里的提交。
                     .child(
-                        // 「上传 ▾」：一个按钮带下拉（参照实现如此），两个条目
-                        // （上传文件… / 上传文件夹…）走同一条既有上传路径。
-                        // 原先「上传文件夹」藏在「更多」里，发现成本高。
                         div()
                             .relative()
                             .child(
@@ -46,7 +43,6 @@ impl WorkspaceView {
                                         "上传"
                                     })
                                     .icon(Icon::new(IconName::ChevronDown))
-                                    .primary()
                                     .with_size(Size::Small)
                                     .disabled(self.uploading)
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -75,6 +71,7 @@ impl WorkspaceView {
                     .child(
                         Button::new("toolbar-create-folder")
                             .label("新建目录")
+                            .ghost()
                             .with_size(Size::Small)
                             .disabled(self.creating_folder)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -86,6 +83,7 @@ impl WorkspaceView {
                     .child(
                         Button::new("toolbar-download")
                             .label("下载")
+                            .ghost()
                             .with_size(Size::Small)
                             .disabled(
                                 self.downloading || self.selected_object_keys_vec().is_empty(),
@@ -102,6 +100,7 @@ impl WorkspaceView {
                                 Button::new("toolbar-more")
                                     .icon(Icon::new(IconName::ChevronDown))
                                     .label("更多")
+                                    .ghost()
                                     .with_size(Size::Small)
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
@@ -275,10 +274,8 @@ impl WorkspaceView {
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
-                // 地址栏与工具栏都在加载/失败分支之前挂上：它们是对象区的常驻
-                // chrome，不该随加载态出现/消失（否则表头会上下跳）。
-                // 顺序对齐参照实现：地址栏行 → 操作工具栏 → 表格
-                .child(self.render_address_bar(theme, cx))
+                // 工具栏是对象区的常驻 chrome，不该随加载态出现/消失。
+                // 导航已经在标题栏里，这里不再叠一条地址栏。
                 .child(self.render_object_toolbar(theme, cx)),
             cx,
         );
@@ -513,8 +510,7 @@ impl WorkspaceView {
             && visible_keys
                 .iter()
                 .all(|k| self.selected_object_keys.contains(k));
-        // 表格规格照抄参照实现：单元格横向内边距 16px、表头与行同一高度
-        // （36px，见 tokens::row_height）、表头底色 #fafafc、文字 12px。
+        // 表头是列名，不是第二条工具栏：次要色、无底、与行同高同内边距。
         h_flex()
             .w_full()
             .flex_shrink_0()
@@ -523,10 +519,8 @@ impl WorkspaceView {
             .gap_2()
             .border_b_1()
             .border_color(theme.border)
-            .bg(theme.list_head)
             .text_size(tokens::label())
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.foreground)
+            .text_color(theme.muted_foreground)
             .child(
                 // 全选框（参照实现的表格第一列）：勾上＝选中当前可见的全部对象，
                 // 取消＝清空；语义与 ⌘A 一致，走同一个 handler。
@@ -567,6 +561,8 @@ impl WorkspaceView {
                     .id("header-size")
                     .w(tokens::col_size_width())
                     .flex_shrink_0()
+                    .flex()
+                    .justify_end()
                     .hover(|el| el.text_color(theme.foreground))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -582,6 +578,8 @@ impl WorkspaceView {
                     .id("header-time")
                     .w(tokens::col_time_width())
                     .flex_shrink_0()
+                    .flex()
+                    .justify_end()
                     .hover(|el| el.text_color(theme.foreground))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -591,15 +589,6 @@ impl WorkspaceView {
                         }),
                     )
                     .child(format!("最新修改时间{}", self.object_sort.time_mark())),
-            )
-            // 「操作」列表头（行末图标列）。这不只是补个文字：**表头必须用与数据行
-            // 相同的固定宽度占位**，否则名称列（flex_1）会多吸收这一列的宽度，
-            // 后面几列整体右移——实测过表头比数据行右偏 55px。
-            .child(
-                div()
-                    .w(tokens::col_action_width())
-                    .flex_shrink_0()
-                    .child("操作"),
             )
     }
 
@@ -674,8 +663,6 @@ impl WorkspaceView {
                     .items_center()
                     .px_4()
                     .gap_2()
-                    .border_b_1()
-                    .border_color(theme.table_row_border)
                     .text_size(tokens::body())
                     .line_height(tokens::row_line_height())
                     .hover(|row| row.bg(theme.list_hover))
@@ -719,6 +706,8 @@ impl WorkspaceView {
                         div()
                             .w(tokens::col_size_width())
                             .flex_shrink_0()
+                            .flex()
+                            .justify_end()
                             .text_color(theme.muted_foreground)
                             .child("-"),
                     )
@@ -726,10 +715,11 @@ impl WorkspaceView {
                         div()
                             .w(tokens::col_time_width())
                             .flex_shrink_0()
+                            .flex()
+                            .justify_end()
                             .text_color(theme.muted_foreground)
                             .child("-"),
                     )
-                    .child(div().w(tokens::col_action_width()).flex_shrink_0())
                     .into_any_element()
             }
             ListingEntry::Object(object) => {
@@ -744,11 +734,9 @@ impl WorkspaceView {
                     checked || self.selected_object_key.as_deref() == Some(object.key.as_str());
                 let key = object.key.clone();
                 let check_key = object.key.clone();
-                let actions_key = object.key.clone();
                 let right_key = object.key.clone();
                 let menu_open_key = object.key.clone();
                 let dbl_key = object.key.clone();
-                let download_key = object.key.clone();
                 let size = format_size(object.size);
                 let time = format_time(object.put_time_millis);
                 h_flex()
@@ -759,8 +747,6 @@ impl WorkspaceView {
                     .items_center()
                     .px_4()
                     .gap_2()
-                    .border_b_1()
-                    .border_color(theme.table_row_border)
                     .text_size(tokens::body())
                     .line_height(tokens::row_line_height())
                     .when(active, |row| row.bg(theme.selection))
@@ -781,8 +767,10 @@ impl WorkspaceView {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            // event.position 是窗口坐标，菜单以它为锚点
-                            this.toggle_object_menu(&right_key, event.position, cx);
+                            // event.position 是窗口坐标，菜单以它为锚点。
+                            // 右键同时把当前行收敛到本行（行内操作列已删除，
+                            // 右键是行级动作唯一贴着行的入口）。
+                            this.toggle_object_context_menu(&right_key, event.position, cx);
                         }),
                     )
                     // 双击整行打开预览（Finder 语义；判据见纯函数
@@ -819,6 +807,8 @@ impl WorkspaceView {
                         div()
                             .w(tokens::col_size_width())
                             .flex_shrink_0()
+                            .flex()
+                            .justify_end()
                             .text_color(theme.muted_foreground)
                             .text_size(tokens::label())
                             .child(size),
@@ -827,6 +817,8 @@ impl WorkspaceView {
                         div()
                             .w(tokens::col_time_width())
                             .flex_shrink_0()
+                            .flex()
+                            .justify_end()
                             .text_color(theme.muted_foreground)
                             .text_size(tokens::label())
                             .child(time),
@@ -858,55 +850,6 @@ impl WorkspaceView {
                             },
                         ),
                     )
-                    .child(
-                        // 「操作」列（参照实现的最后一列 = ⤓ ⋯）。下载是最常用动作，
-                        // 提到行内省一次开菜单；其余动作留在 ⋯ 里。
-                        // 两点与工具栏的「下载」不同：这里先**把选择收敛到本行**
-                        // （`select_object_for_row_action`），所以未选中任何行时点行内
-                        // 下载也按本行来，不需要先选。
-                        div()
-                            .w(tokens::col_action_width())
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap_1()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(
-                                Button::new(("row-download", ix))
-                                    .icon(Icon::new(IconName::ArrowDown))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("下载")
-                                    .disabled(self.downloading)
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.select_object_for_row_action(&download_key);
-                                        this.start_object_download(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("row-actions", ix))
-                                    .icon(Icon::new(IconName::Ellipsis))
-                                    .ghost()
-                                    .with_size(Size::Small)
-                                    .tooltip("更多操作")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(
-                                        move |this, event: &ClickEvent, _, cx| {
-                                            this.open_row_actions_menu(
-                                                &actions_key,
-                                                event.position(),
-                                                cx,
-                                            );
-                                        },
-                                    )),
-                            ),
-                    )
                     .into_any_element()
             }
         }
@@ -925,11 +868,11 @@ impl WorkspaceView {
             .w_full()
             .flex_shrink_0() // 不被滚动区挤压，恒定钉底
             .px_3()
-            .py_2()
+            .py_1()
             .gap_3()
             .border_t_1()
             .border_color(theme.border)
-            .text_size(tokens::label())
+            .text_size(tokens::caption())
             .text_color(theme.muted_foreground)
             // 左段：条目计数（+ 当前排序）。参照实现左段是页码，我们的分页是
             // marker 式（没有真实页码），所以这里放真实计数，不编造页码。
@@ -974,6 +917,7 @@ impl WorkspaceView {
                 .child(
                     Button::new("page-limit")
                         .label(format!("{} 条/页", self.page_limit))
+                        .ghost()
                         .with_size(Size::Small)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
@@ -1010,87 +954,5 @@ impl WorkspaceView {
             );
         }
         bar
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Modifiers, TestAppContext};
-    use std::cell::Cell;
-    use std::rc::Rc;
-
-    /// 复刻「行 > 操作列包裹层 > ⋯ 按钮」的结构。
-    /// 目的：验证点 ⋯ **不会**触发行选中（行处理器必须收不到 mouse_down）。
-    struct Harness {
-        row_down: Rc<Cell<usize>>,
-        menu_opens: Rc<Cell<usize>>,
-    }
-
-    impl Render for Harness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let row_down = self.row_down.clone();
-            let menu_opens = self.menu_opens.clone();
-            div()
-                .id("row")
-                .size_full()
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    row_down.set(row_down.get() + 1);
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .id("actions-wrap")
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            Button::new("actions-btn")
-                                .icon(Icon::new(IconName::Ellipsis))
-                                .ghost()
-                                .with_size(Size::Small)
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, _| {
-                                    menu_opens.set(menu_opens.get() + 1);
-                                }),
-                        ),
-                )
-        }
-    }
-
-    /// 返回 (行收到 mouse_down 的次数, 菜单被打开的次数)
-    fn probe(cx: &mut TestAppContext) -> (usize, usize) {
-        cx.update(|cx| {
-            gpui_component::init(cx);
-            crate::init(cx);
-        });
-        let row_down = Rc::new(Cell::new(0));
-        let menu_opens = Rc::new(Cell::new(0));
-        let (r, m) = (row_down.clone(), menu_opens.clone());
-        let (_view, cx) = cx.add_window_view(move |_window, _cx| Harness {
-            row_down: r,
-            menu_opens: m,
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        // 点在 ⋯ 按钮上：包裹层 justify_end，按钮在窗口右端的 40px 内（窗口 1920 宽）
-        let at = point(px(1900.), px(540.));
-        cx.simulate_mouse_move(at, None, Modifiers::default());
-        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
-        cx.run_until_parked();
-        (row_down.get(), menu_opens.get())
-    }
-
-    #[gpui::test]
-    fn clicking_the_action_button_does_not_select_the_row(cx: &mut TestAppContext) {
-        let (row_down, menu_opens) = probe(cx);
-        assert_eq!(
-            row_down, 0,
-            "点 ⋯ 不该触发行选中（行处理器收到了 mouse_down）"
-        );
-        assert_eq!(menu_opens, 1, "点 ⋯ 应当打开菜单");
     }
 }

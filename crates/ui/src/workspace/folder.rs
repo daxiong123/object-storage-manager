@@ -58,10 +58,16 @@ impl WorkspaceView {
         {
             return;
         }
-        let editor = cx.new(|cx| InputState::new(window, cx).default_value("新建目录"));
+        let editor = cx.new(|cx| InputState::new(window, cx).placeholder("新建目录"));
         cx.subscribe_in(&editor, window, |this, _, event: &InputEvent, _, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                this.commit_create_folder(cx);
+            match event {
+                // 回车 = 创建（与「创建」按钮同一条路径）
+                InputEvent::PressEnter { .. } => this.commit_create_folder(cx),
+                // 输入变化必须重渲染：「创建」按钮的可用态与校验提示都是即时算的。
+                // 占位符取代默认值之后，弹层打开时输入为空、按钮初始禁用——少了
+                // 这一条，打字时视图不重绘，按钮会一直是灰的。
+                InputEvent::Change => cx.notify(),
+                _ => {}
             }
         })
         .detach();
@@ -94,6 +100,10 @@ impl WorkspaceView {
             return;
         };
         let folder_name = editor.read(cx).value().to_string();
+        // 空输入是「还没填」，不是一次失败的提交。占位符不算内容。
+        if folder_name.trim().is_empty() {
+            return;
+        }
         if let Some(message) = create_folder_validation_message(
             self.current_prefix.as_deref(),
             &folder_name,
@@ -186,7 +196,11 @@ impl WorkspaceView {
             &folder_name,
             &self.entries,
         );
-        let can_confirm = !self.creating_folder && validation_message.is_none();
+        // 刚打开时输入是空的，占位符在提示该填什么。这时只禁用「创建」，
+        // 不把「目录名不能为空」画成红字——用户还没提交。
+        let visible_error = validation_message.filter(|_| !folder_name.trim().is_empty());
+        let can_confirm =
+            !self.creating_folder && visible_error.is_none() && !folder_name.trim().is_empty();
         let parent = self.current_prefix.as_deref().unwrap_or("/").to_string();
 
         let mask = overlay::mask(theme)
@@ -282,7 +296,7 @@ impl WorkspaceView {
                                             .child("对象存储目录会创建为以 / 结尾的占位对象。"),
                                     ),
                             )
-                            .children(validation_message.map(|message| {
+                            .children(visible_error.map(|message| {
                                 h_flex()
                                     .gap_4()
                                     .child(div().w(tokens::text(74.)).flex_shrink_0())

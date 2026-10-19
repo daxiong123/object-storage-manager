@@ -1064,6 +1064,68 @@ fn create_folder_validation_message_reports_errors() {
     assert!(create_folder_validation_message(None, "next", &entries).is_none());
 }
 
+#[test]
+fn context_menu_converges_onto_the_right_clicked_row() {
+    // 行内操作列删除后，右键是行级动作唯一贴着行的入口。它必须把被右键的那一行
+    // 纳入选择——否则菜单里的下载/重命名/删除没有目标（Finder 语义）。
+    //
+    // 契约分两段，缺一不可：
+    // ① `open_object_menu` 先调 `select_object_for_row_action`，保证被右键的行在集合里；
+    // ② 再由 `menu_targets_for(.., keep_selection = true)` 取整批作为菜单目标。
+    // 只做 ② 是不够的：选择为空时它返回空列表（下面第一条断言就是这个反例）。
+    let entries = vec![
+        ListingEntry::CommonPrefix("photos/".into()),
+        entry_object("a.txt"),
+        entry_object("b.txt"),
+    ];
+    let empty: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+    assert!(
+        menu_targets_for("a.txt", &empty, true).is_empty(),
+        "选择为空时只靠 menu_targets_for 拿不到目标——所以 open_object_menu 必须先收敛选择"
+    );
+
+    // ① 的收敛：锚点用**对象下标**（`object_selection_ix` 跳过目录前缀），
+    // 右键 a.txt 后按 ⇧ 扩展的范围必须从 a.txt 开始，而不是从显示槽位算。
+    // 这里把它会写进去的集合与锚点显式摆出来，逐条断言。
+    let mut selection: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+    selection.insert("a.txt".to_string());
+    let anchor = object_selection_ix(&entries, "a.txt");
+    assert_eq!(anchor, Some(0), "锚点是对象下标，不能用显示槽位");
+    assert_ne!(
+        anchor,
+        display_slot_of_key(&entries, &[0, 1, 2], "a.txt"),
+        "对象下标与显示槽位在含目录的列表里必须不同，否则说明测例选错了"
+    );
+
+    // ② 目标：右键 a.txt 后菜单作用于 a.txt。
+    assert_eq!(
+        menu_targets_for("a.txt", &selection, true),
+        vec!["a.txt".to_string()]
+    );
+
+    // 右键已在多选里的行：整批仍是目标（批量语义不变）。
+    let multi: indexmap::IndexSet<String> =
+        ["a.txt", "b.txt"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        menu_targets_for("b.txt", &multi, true),
+        vec!["a.txt".to_string(), "b.txt".to_string()]
+    );
+}
+
+#[test]
+fn object_rows_have_no_inline_action_column() {
+    // 结构护栏：对象行只由「勾选 / 名称 / 大小 / 时间」四段组成。行内再塞图标按钮
+    // （下载 + ⋯）会让密集列表变吵，而且它们与右键菜单共用同一份动作，属于冗余入口。
+    // 这条测试盯的是源码里不出现行内按钮的 id——比肉眼复查可靠。
+    let source = include_str!("object_list.rs");
+    for retired in ["row-download", "row-actions", "col_action_width"] {
+        assert!(
+            !source.contains(retired),
+            "对象列表不该再有行内操作列残留：{retired}"
+        );
+    }
+}
+
 fn entry_object(key: &str) -> ListingEntry {
     ListingEntry::Object(CloudObject {
         key: key.into(),
@@ -1717,4 +1779,43 @@ fn copy_object_url_request_uses_current_selection_and_configured_ttl() {
             ttl_secs: 600,
         }
     );
+}
+
+#[test]
+fn create_folder_input_rerenders_while_typing() {
+    // 回归：弹层打开时输入为空（占位符），「创建」按钮初始禁用。若订阅只处理
+    // PressEnter、不处理 Change，打字时视图不重绘，按钮会一直是灰的——鼠标
+    // 用户根本创建不了目录。rename / copy_move 的输入框都显式在 Change 上
+    // notify，新建目录必须一致。
+    let source = include_str!("folder.rs");
+    let subscribe = source
+        .split("cx.subscribe_in(&editor, window")
+        .nth(1)
+        .and_then(|tail| tail.split(".detach()").next())
+        .expect("找不到新建目录输入框的订阅");
+    assert!(
+        subscribe.contains("InputEvent::Change => cx.notify()"),
+        "新建目录输入框必须在 Change 上重渲染，否则「创建」按钮不会解除禁用"
+    );
+    assert!(
+        subscribe.contains("InputEvent::PressEnter"),
+        "回车仍要能提交创建"
+    );
+}
+
+#[test]
+fn create_folder_starts_empty_with_a_placeholder() {
+    // 输入框用占位符提示，而不是预填「新建目录」当真名——预填内容容易被
+    // 手滑连同名字一起提交。
+    let source = include_str!("folder.rs");
+    let ctor = source
+        .split("let editor = cx.new(|cx| InputState::new(window, cx)")
+        .nth(1)
+        .and_then(|tail| tail.split(';').next())
+        .expect("找不到输入框构造");
+    assert!(
+        ctor.contains(".placeholder("),
+        "应以 placeholder 提供提示：{ctor}"
+    );
+    assert!(!ctor.contains("default_value"), "不该预填默认值：{ctor}");
 }

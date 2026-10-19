@@ -1092,7 +1092,16 @@ mod tests {
 
     #[test]
     fn upload_sends_signed_put_with_content_type() {
-        let dir = std::env::temp_dir().join(format!("cos-upload-{}", std::process::id()));
+        // 临时目录带上纳秒时间戳：同一进程里重复跑、或并行跑同一目标时，不会
+        // 读到别的运行留下的文件（曾被 pid 重名踩到过一次偶发失败）。
+        let dir = std::env::temp_dir().join(format!(
+            "cos-upload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("payload.bin");
         std::fs::write(&file, b"hello cos").unwrap();
