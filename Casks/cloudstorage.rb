@@ -1,10 +1,10 @@
 cask "cloudstorage" do
-  version "0.4.0"
-  sha256 "bdcc8a9784846a6126666d5c07f99b3aa3442e9f2714a26c79be1124124948e4"
+  version "0.5.0"
+  sha256 "4fd9ae9382d9f59fe43ac2a9cd317e58b62c895cb516744329037f2fba17d952"
 
   url "https://github.com/daxiong123/object-storage-manager/releases/download/v#{version}/CloudStorage-v#{version}-macos-arm64.zip"
   name "CloudStorage"
-  desc "Native object storage manager for Qiniu Kodo and Aliyun OSS"
+  desc "Native object storage manager for Qiniu Kodo, Aliyun OSS and Tencent COS"
   homepage "https://github.com/daxiong123/object-storage-manager"
 
   depends_on arch: :arm64
