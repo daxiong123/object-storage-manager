@@ -35,11 +35,9 @@ impl PartialFileGuard {
     pub fn new(dest: &std::path::Path) -> Self {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = dest
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let temp = dest.with_file_name(format!(".{name}.{}-{seq}.part", std::process::id()));
+        // 临时名只含进程号 + 序号，与目标文件名长度无关：目标名接近文件系统单段上限
+        // （255 字节）时，在其后追加后缀会让原本可创建的下载在写入前就 ENAMETOOLONG。
+        let temp = dest.with_file_name(format!(".osm-{}-{seq}.part", std::process::id()));
         Self {
             dest: dest.to_path_buf(),
             temp,
@@ -223,5 +221,15 @@ mod guard_tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         assert!(!other_temp.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn guard_temp_name_does_not_depend_on_destination_length() {
+        let long = "a".repeat(255);
+        let dest = std::path::Path::new("/tmp").join(long);
+        let guard = PartialFileGuard::new(&dest);
+        let name = guard.temp_path().file_name().unwrap().to_string_lossy();
+        assert!(name.len() < 64, "临时名过长：{name}");
+        assert_eq!(guard.temp_path().parent(), dest.parent());
     }
 }
