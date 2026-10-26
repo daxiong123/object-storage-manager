@@ -1819,3 +1819,27 @@ fn create_folder_starts_empty_with_a_placeholder() {
     );
     assert!(!ctor.contains("default_value"), "不该预填默认值：{ctor}");
 }
+
+#[test]
+fn directory_of_prefix_cuts_search_prefix_back_to_a_directory() {
+    // 前缀搜索允许不以 `/` 结尾的前缀；上传/新建目录/复制移动的落点必须是目录，
+    // 否则 key 会被拼成 `2025a.txt`
+    assert_eq!(directory_of_prefix(None), None);
+    assert_eq!(directory_of_prefix(Some("2025")), None);
+    assert_eq!(directory_of_prefix(Some("photos/")), Some("photos/"));
+    assert_eq!(directory_of_prefix(Some("photos/2025")), Some("photos/"));
+    assert_eq!(directory_of_prefix(Some("a/b/c/")), Some("a/b/c/"));
+}
+
+#[test]
+fn preview_owner_distinguishes_same_named_objects() {
+    // 只比文件名后缀会把 a/x.txt 的缓存当成 b/x.txt（或别的账号同名桶）打开
+    assert_ne!(
+        preview_owner("acc", "bkt", "a/x.txt"),
+        preview_owner("acc", "bkt", "b/x.txt")
+    );
+    assert_ne!(
+        preview_owner("acc1", "bkt", "x.txt"),
+        preview_owner("acc2", "bkt", "x.txt")
+    );
+}

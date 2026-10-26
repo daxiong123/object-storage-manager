@@ -204,7 +204,16 @@ impl WorkspaceView {
     ) {
         let (baseline, baseline_anchor) =
             (self.selected_object_keys.clone(), self.selection_anchor);
-        let ordered_keys = object_keys(&self.entries);
+        // ⇧Click 的范围按**屏幕上的显示顺序**算（与键盘 ⇧↑↓ 同一套）：按服务商返回顺序算
+        // 的话，表头排序后选中的是夹在两者之间的「别的行」，直接喂给 ⌘⌫ / 批量下载会误删。
+        // 锚点在状态里仍是 entries 下标，进出纯函数时与显示序互相换算。
+        let order = display_entry_order(&self.entries, self.object_sort);
+        let ordered_keys = visible_object_keys(&self.entries, &order);
+        let baseline_anchor = baseline_anchor.and_then(|index| {
+            object_keys(&self.entries)
+                .get(index)
+                .and_then(|key| ordered_keys.iter().position(|candidate| candidate == key))
+        });
         let clicked_index = match &clicked {
             ClickedEntry::Object(key) => {
                 ordered_keys.iter().position(|object_key| object_key == key)
@@ -224,17 +233,13 @@ impl WorkspaceView {
             ClickedEntry::Object(key) => Some(key.clone()),
             _ => None,
         };
-        let (next, anchor, _) = apply_object_selection(
-            intent,
-            &ordered_keys,
-            &baseline,
-            if baseline_anchor.is_some() {
-                baseline_anchor
-            } else {
-                self.selection_anchor
-            },
-            clicked,
-        );
+        let (next, anchor, _) =
+            apply_object_selection(intent, &ordered_keys, &baseline, baseline_anchor, clicked);
+        let anchor = anchor.and_then(|index| {
+            ordered_keys
+                .get(index)
+                .and_then(|key| object_selection_ix(&self.entries, key))
+        });
         self.selected_object_keys = next;
         // 不带动词的点击 = 主选就是被点的那一行（集合没动，不能从集合末项取）；
         // 带 ⌘/⇧ 的点击才从集合末项取。目录行不参与对象选择，主选保持原样。

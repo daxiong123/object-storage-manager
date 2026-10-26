@@ -361,6 +361,9 @@ impl QiniuProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
+        }
         if ttl_secs == 0 {
             return Err(StorageError::InvalidInput("ttl_secs 必须大于 0".into()));
         }
@@ -667,6 +670,9 @@ impl StorageProvider for QiniuProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
+        }
 
         let domains = self.bucket_download_domains(bucket).await?;
         if domains.is_empty() {
@@ -689,7 +695,10 @@ impl StorageProvider for QiniuProvider {
                     .get(signed_url)
                     .send()
                     .await
-                    .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
+                    .map_err(|e| {
+                        // 签名下载 URL（含 token）不得进错误文本
+                        StorageError::Network(format!("download_object: {}", e.without_url()))
+                    })?;
                 self.check_status(resp, &format!("download_object[{host}]"))
                     .await
             }
@@ -732,11 +741,18 @@ impl StorageProvider for QiniuProvider {
                 dest.display()
             ))
         })?;
+        // 守卫：流中断（`?` 提前返回）与 future 被 abort 丢弃时都会删除半成品文件。
+        let guard = object_storage_core::PartialFileGuard::new(dest);
         let mut total: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            // 下载 URL 带 `token=AK:签名`，reqwest 的 Display 会把整条 URL 拼进错误文本，
+            // 必须 without_url，否则签名会进 UI 与日志。
             let chunk = chunk.map_err(|e| {
-                StorageError::Network(format!("download_object: 接收数据中断: {e}"))
+                StorageError::Network(format!(
+                    "download_object: 接收数据中断: {}",
+                    e.without_url()
+                ))
             })?;
             if let Err(e) = file.write_all(&chunk).await {
                 return Err(
@@ -753,6 +769,7 @@ impl StorageProvider for QiniuProvider {
                 Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
             );
         }
+        guard.disarm();
         Ok(total)
     }
 

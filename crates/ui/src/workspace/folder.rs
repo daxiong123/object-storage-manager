@@ -105,7 +105,7 @@ impl WorkspaceView {
             return;
         }
         if let Some(message) = create_folder_validation_message(
-            self.current_prefix.as_deref(),
+            directory_of_prefix(self.current_prefix.as_deref()),
             &folder_name,
             &self.entries,
         ) {
@@ -116,7 +116,10 @@ impl WorkspaceView {
             cx.notify();
             return;
         }
-        let key = match create_folder_target_key(self.current_prefix.as_deref(), &folder_name) {
+        let key = match create_folder_target_key(
+            directory_of_prefix(self.current_prefix.as_deref()),
+            &folder_name,
+        ) {
             Ok(key) => key,
             Err(message) => {
                 self.download_message = Some(DownloadMessage {
@@ -162,11 +165,12 @@ impl WorkspaceView {
                 match result {
                     Ok(_) => {
                         this.create_folder_input = None;
+                        // 先重载再写提示（reload_objects 会清空 download_message）
+                        this.reload_objects(cx);
                         this.download_message = Some(DownloadMessage {
                             is_error: false,
                             text: format!("已新建目录：{}", display_key),
                         });
-                        this.reload_objects(cx);
                     }
                     Err(error) => {
                         this.download_message = Some(DownloadMessage {
@@ -192,7 +196,7 @@ impl WorkspaceView {
         };
         let folder_name = editor.read(cx).value().to_string();
         let validation_message = create_folder_validation_message(
-            self.current_prefix.as_deref(),
+            directory_of_prefix(self.current_prefix.as_deref()),
             &folder_name,
             &self.entries,
         );

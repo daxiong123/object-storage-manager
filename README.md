@@ -212,7 +212,7 @@ cargo test --workspace
 cargo build --release
 ```
 
-当前 `cargo test --workspace` 为 **220 passed / 2 ignored**——被忽略的两条是需要真实凭证的联网用例（七牛、腾讯云 COS），可这样单独跑：
+当前 `cargo test --workspace` 为 **254 passed / 2 ignored**——被忽略的两条是需要真实凭证的联网用例（七牛、腾讯云 COS），可这样单独跑：
 
 ```bash
 QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=yyy \

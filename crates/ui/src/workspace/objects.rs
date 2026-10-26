@@ -20,6 +20,14 @@ pub fn parent_prefix(prefix: &str) -> Option<&str> {
     Some(&prefix[..=idx])
 }
 
+/// 当前前缀所在的**目录**（截到最后一个 `/`）。前缀搜索允许不以 `/` 结尾的前缀
+/// （如 `2025`），那只是列举过滤，不是目录；上传 / 新建目录 / 复制移动的落点必须
+/// 取目录，否则 key 会被拼成 `2025a.txt`。
+pub fn directory_of_prefix(prefix: Option<&str>) -> Option<&str> {
+    let prefix = prefix?;
+    prefix.rfind('/').map(|idx| &prefix[..=idx])
+}
+
 impl WorkspaceView {
     /// 从头（当前前缀的第一页）重新加载对象。
     pub(super) fn reload_objects(&mut self, cx: &mut Context<Self>) {

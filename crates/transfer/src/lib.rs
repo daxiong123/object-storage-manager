@@ -271,6 +271,13 @@ impl EngineInner {
             if slot.attempt != attempt {
                 return; // 过期回调（此轮已被 abort 并可能已重跑）
             }
+            // pause / cancel / suspend_all 只改状态并 abort，不作废 attempt：future 若已在
+            // abort 前返回，这里会抢在它们之后拿到锁。非 Running 说明状态已被外部事件
+            // 接管（Paused / Cancelled / Waiting），结果必须丢弃，否则断网瞬间的网络错误
+            // 会把 Waiting 覆盖成 Failed（P0）。
+            if slot.task.state != TransferState::Running {
+                return;
+            }
             slot.handle = None;
             let now = now_millis();
             match result {
@@ -568,7 +575,7 @@ impl TransferEngine {
             let Some(index) = st.tasks.iter().position(|slot| slot.task.id == id) else {
                 return false;
             };
-            let mut slot = st.tasks.swap_remove(index);
+            let mut slot = st.tasks.remove(index);
             let handle = slot.handle.take();
             slot.task.state = TransferState::Cancelled;
             drop(slot);
@@ -865,6 +872,26 @@ mod tests {
         .await;
         // 重跑 = runner 被调用了两次
         assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    /// P0 回归：future 已在 abort 前返回、`complete` 才抢到锁时，不得把 Waiting
+    /// 覆盖成 Failed（断网瞬间的在途请求错误）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_completion_never_overwrites_suspended_state() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (runner, _gate) = gated_runner(Arc::clone(&log), 1);
+        let engine = TransferEngine::new(tokio::runtime::Handle::current(), runner, 1);
+        let id = engine.enqueue_download("a1", "bkt", "k1", PathBuf::from("/tmp/a"), "k1");
+        wait_for(&engine, 2000, |t| {
+            t.first().is_some_and(|t| t.state == TransferState::Running)
+        })
+        .await;
+        let attempt = engine.inner.lock().slot_mut(id).unwrap().attempt;
+        engine.suspend_all();
+        engine
+            .inner
+            .complete(id, attempt, Err("connection reset".into()));
+        assert_eq!(engine.snapshot()[0].state, TransferState::Waiting);
     }
 
     /// P0：挂起后必须是 Waiting，绝不允许出现 Failed。

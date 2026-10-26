@@ -58,6 +58,7 @@ pub(crate) fn migrate_transfers_allow_upload(conn: &Connection) -> Result<(), Pe
     }
     conn.execute_batch(
         "
+        BEGIN IMMEDIATE;
         ALTER TABLE transfers RENAME TO transfers_mig_old;
         CREATE TABLE transfers (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +75,7 @@ pub(crate) fn migrate_transfers_allow_upload(conn: &Connection) -> Result<(), Pe
             SELECT kind, account_id, bucket, object_key, dest, display_name, state, enqueued_at_millis
             FROM transfers_mig_old;
         DROP TABLE transfers_mig_old;
+        COMMIT;
         ",
     )
     .map_err(|source| PersistenceError::Query {

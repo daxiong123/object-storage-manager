@@ -19,6 +19,48 @@ use std::sync::Arc;
 /// 调用方（传输引擎）负责节流通知 UI，本层每块都可回调。
 pub type ByteProgress = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
+/// 下载目标文件的清理守卫：下载 future 被丢弃（暂停/取消/挂起时传输引擎靠
+/// `JoinHandle::abort()` 终止任务）时，半截文件不会留在磁盘上。
+/// 下载完整成功后必须调用 [`PartialFileGuard::disarm`] 保留文件。
+pub struct PartialFileGuard {
+    path: Option<std::path::PathBuf>,
+}
+
+impl PartialFileGuard {
+    pub fn new(path: &std::path::Path) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    /// 下载完成：保留文件。
+    pub fn disarm(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for PartialFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// 含独立 `.` / `..` 路径段的 key 无法被 HTTP 客户端按字面寻址：URL 点段归一化会把
+/// `a/../b` 改写成 `/b`，请求（以及签名）打到别的对象上。联网前拒绝，三家共用。
+pub fn dot_segment_error(key: &str) -> Option<String> {
+    key.split('/')
+        .any(|segment| segment == "." || segment == "..")
+        .then(|| {
+            format!(
+                "对象 key `{key}` 含独立的 `.` / `..` 路径段。HTTP 客户端无法按字面寻址这类对象\
+                 （URL 点段归一化会改变请求路径），本应用拒绝操作以免误伤其它对象；\
+                 如需处理请在云厂商控制台操作"
+            )
+        })
+}
+
 /// 存储层统一错误
 ///
 /// Provider 实现负责把自己的传输层错误（reqwest 等）映射到这里的语义分类，
@@ -120,5 +162,33 @@ mod tests {
             message: "no such bucket".into(),
         };
         assert_eq!(e.to_string(), "API 错误 (HTTP 631): no such bucket");
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::PartialFileGuard;
+
+    #[test]
+    fn dot_segments_are_rejected_only_as_whole_segments() {
+        assert!(super::dot_segment_error("a/../b").is_some());
+        assert!(super::dot_segment_error("./x").is_some());
+        assert!(super::dot_segment_error("a/b/..").is_some());
+        assert!(super::dot_segment_error("a/..b/c.d/.hidden").is_none());
+    }
+
+    #[test]
+    fn dropped_guard_removes_partial_file_but_disarmed_keeps_it() {
+        let dir = std::env::temp_dir().join(format!("osm-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.part");
+        std::fs::write(&a, b"x").unwrap();
+        drop(PartialFileGuard::new(&a));
+        assert!(!a.exists(), "未解除武装的守卫应删除半截文件");
+        let b = dir.join("b.done");
+        std::fs::write(&b, b"x").unwrap();
+        PartialFileGuard::new(&b).disarm();
+        assert!(b.exists(), "disarm 后必须保留文件");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

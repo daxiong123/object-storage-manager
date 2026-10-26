@@ -241,34 +241,52 @@ impl StorageProvider for AliyunProvider {
 
     async fn list_buckets(&self) -> Result<Vec<Bucket>, StorageError> {
         let resource = sign::canonicalized_resource("", None, &[]);
-        let (date, auth) = self.signed_headers("GET", "", &resource)?;
-        let mut url = self.service_base.clone();
-        url.set_path("/");
-        url.set_query(None);
-        let resp = self
-            .http
-            .get(url)
-            .header(DATE, date.clone())
-            .header(HeaderName::from_static("x-oss-date"), date.clone())
-            .header(AUTHORIZATION, auth)
-            .send()
-            .await
-            .map_err(|e| StorageError::Network(format!("list_buckets: {e}")))?;
-        let resp = self.check_status(resp, "list_buckets").await?;
-        let text = text_or_invalid(resp, "list_buckets").await?;
         let mut buckets = Vec::new();
-        for block in xml_blocks(&text, "Bucket") {
-            let Some(name) = xml_first(&block, "Name") else {
-                continue;
-            };
-            let region = xml_first(&block, "Location");
-            buckets.push(Bucket {
-                name,
-                kind: ProviderKind::Aliyun,
-                region,
-            });
+        let mut marker: Option<String> = None;
+        // GetService 每页最多 100 个 Bucket，超出时 IsTruncated=true + NextMarker；
+        // 不翻页的话第 101 个起的空间永远不会出现在侧栏。页数上限防服务端异常死循环。
+        for _ in 0..1000 {
+            let (date, auth) = self.signed_headers("GET", "", &resource)?;
+            let mut url = self.service_base.clone();
+            url.set_path("/");
+            url.set_query(None);
+            if let Some(marker) = &marker {
+                url.query_pairs_mut().append_pair("marker", marker);
+            }
+            let resp = self
+                .http
+                .get(url)
+                .header(DATE, date.clone())
+                .header(HeaderName::from_static("x-oss-date"), date.clone())
+                .header(AUTHORIZATION, auth)
+                .send()
+                .await
+                .map_err(|e| StorageError::Network(format!("list_buckets: {e}")))?;
+            let resp = self.check_status(resp, "list_buckets").await?;
+            let text = text_or_invalid(resp, "list_buckets").await?;
+            for block in xml_blocks(&text, "Bucket") {
+                let Some(name) = xml_first(&block, "Name") else {
+                    continue;
+                };
+                let region = xml_first(&block, "Location");
+                buckets.push(Bucket {
+                    name,
+                    kind: ProviderKind::Aliyun,
+                    region,
+                });
+            }
+            let truncated = xml_first(&text, "IsTruncated").is_some_and(|v| v == "true");
+            let next = xml_first(&text, "NextMarker").filter(|m| !m.is_empty());
+            match (truncated, next) {
+                (true, Some(next)) if marker.as_deref() != Some(next.as_str()) => {
+                    marker = Some(next);
+                }
+                _ => return Ok(buckets),
+            }
         }
-        Ok(buckets)
+        Err(StorageError::InvalidResponse(
+            "list_buckets: 翻页超过上限，疑似服务端返回异常".into(),
+        ))
     }
 
     async fn list_objects(&self, request: ListObjectsRequest) -> Result<ObjectPage, StorageError> {
@@ -342,6 +360,9 @@ impl StorageProvider for AliyunProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
+        }
         let location = self.bucket_location(bucket).await?;
         let url = self.object_url(bucket, &location, key)?;
         let resource = sign::canonicalized_resource(bucket, Some(key), &[]);
@@ -363,6 +384,7 @@ impl StorageProvider for AliyunProvider {
                 dest.display()
             ))
         })?;
+        let guard = object_storage_core::PartialFileGuard::new(dest);
         let mut total: u64 = 0;
         let mut stream = resp.bytes_stream();
         if let Some(cb) = &progress {
@@ -385,6 +407,12 @@ impl StorageProvider for AliyunProvider {
                 cb(total, content_len);
             }
         }
+        // tokio::fs::File 的写入在后台线程完成，drop 不保证落盘；调用方（复制/重命名/
+        // 预览）紧接着会读这个文件，必须 flush 并把写入错误暴露出来。
+        if let Err(e) = file.flush().await {
+            return Err(Self::download_cleanup_failed(dest, format!("写入失败: {e}")).await);
+        }
+        guard.disarm();
         Ok(total)
     }
 
@@ -400,6 +428,9 @@ impl StorageProvider for AliyunProvider {
         }
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
         }
         let meta = tokio::fs::metadata(source).await.map_err(|e| {
             StorageError::Io(format!(
@@ -471,6 +502,9 @@ impl StorageProvider for AliyunProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
+        }
         let location = self.bucket_location(bucket).await?;
         let url = self.object_url(bucket, &location, key)?;
         let resource = sign::canonicalized_resource(bucket, Some(key), &[]);
@@ -499,6 +533,9 @@ impl StorageProvider for AliyunProvider {
         }
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
+        }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
         }
         if ttl_secs == 0 {
             return Err(StorageError::InvalidInput("ttl_secs 必须大于 0".into()));
@@ -537,12 +574,36 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// 单遍 XML 实体解码：扫到 `&` 后**一次**匹配一个命名实体，`&amp;` 与其它
+/// 实体同轮竞争——`&amp;lt;` 解成字面 `&lt;`，不会先解 `&amp;` 再把结果
+/// 又当实体解一次（双重解码会让 UI 拿到错误的 key，后续操作打到别的对象上）。
 fn xml_unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
+    const ENTITIES: [(&str, &str); 5] = [
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&apos;", "'"),
+        ("&amp;", "&"),
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        match ENTITIES.iter().find(|(name, _)| rest.starts_with(name)) {
+            Some((name, value)) => {
+                out.push_str(value);
+                rest = &rest[name.len()..];
+            }
+            // 不认识的实体（或孤立 `&`）按字面保留，不做猜测
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn xml_first(hay: &str, tag: &str) -> Option<String> {
@@ -573,8 +634,8 @@ fn parse_rfc3339_millis(value: &str) -> i64 {
     // 2024-06-04T16:29:00.000Z / 2024-06-04T16:29:00Z
     let trimmed = value.trim();
     let bytes = trimmed.as_bytes();
-    if bytes.len() < 19 {
-        return 0;
+    if bytes.len() < 19 || !trimmed.is_ascii() {
+        return 0; // 非 ASCII 时按字节切片会落在字符边界中间而 panic
     }
     let parse_u = |s: &str| s.parse::<i64>().unwrap_or(0);
     let year = parse_u(&trimmed[0..4]);
@@ -643,6 +704,24 @@ fn parse_list_bucket(text: &str) -> Result<ObjectPage, StorageError> {
 
 #[cfg(test)]
 mod tests {
+    /// XML 实体只解一次：字面 `&amp;lt;` 解完应是 `&lt;`，不是被二次解码成 `<`——
+    /// 否则 UI 拿到错误 key，后续下载/删除打到别的对象上。
+    #[test]
+    fn xml_unescape_decodes_entities_exactly_once() {
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
+        assert_eq!(xml_unescape("a &lt; b &amp;&amp; c"), "a < b && c");
+        assert_eq!(
+            xml_unescape("stray &unknown; & tail"),
+            "stray &unknown; & tail"
+        );
+    }
+
+    #[test]
+    fn rfc3339_parser_survives_non_ascii_input() {
+        assert_eq!(parse_rfc3339_millis("２０２４-06-04T16:29:00Z现在"), 0);
+        assert!(parse_rfc3339_millis("2024-06-04T16:29:00Z") > 0);
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};

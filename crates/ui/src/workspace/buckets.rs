@@ -39,6 +39,11 @@ impl WorkspaceView {
         self.buckets_state = AsyncState::Idle;
         self.selected_bucket = Some(name);
         self.selected_object_key = None;
+        // 与 select_bucket 同一套重置：沿用上个桶的前缀/历史会拿旧路径去列举新桶
+        self.current_prefix = None;
+        self.nav_back.clear();
+        self.nav_forward.clear();
+        self.search_input = None;
         self.reload_objects(cx);
         cx.notify();
     }
@@ -104,6 +109,10 @@ impl WorkspaceView {
         self.loading_more = false;
         self.next_marker = None;
         self.current_prefix = None;
+        // 换账号后旧账号的桶名不能留下：否则工具栏/上传/删除会用「新账号 + 旧桶名」发请求，
+        // 在途的旧账号列举结果也会（gen 仍匹配）灌进新账号的视图。
+        self.selected_bucket = None;
+        self.object_gen += 1;
         self.nav_back.clear();
         self.nav_forward.clear();
         self.clear_object_selection();

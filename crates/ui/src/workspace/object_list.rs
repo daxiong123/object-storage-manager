@@ -37,13 +37,13 @@ impl WorkspaceView {
                             .relative()
                             .child(
                                 Button::new("toolbar-upload")
+                                    // 两次 .icon() 后者会覆盖前者（上传箭头曾因此消失）
                                     .icon(Icon::new(IconName::ArrowUp))
                                     .label(if self.uploading {
                                         "选择文件…"
                                     } else {
                                         "上传"
                                     })
-                                    .icon(Icon::new(IconName::ChevronDown))
                                     .primary()
                                     .with_size(Size::Small)
                                     .disabled(self.uploading)

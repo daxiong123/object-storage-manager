@@ -19,6 +19,11 @@ pub(super) fn provider_url_scheme(provider: ProviderKind) -> &'static str {
     }
 }
 
+/// 本地副本的归属标记（账号 + 空间 + key）。
+pub(crate) fn preview_owner(account_id: &str, bucket: &str, key: &str) -> String {
+    format!("{account_id}\0{bucket}\0{key}")
+}
+
 /// 判断本地缓存文件是否对应当前选中的对象（缓存复用判据）：
 /// 缓存文件名形如 `{nanos}-{display_name}`，只需后缀匹配 display_name。
 /// `None` path / 无 key 一律不复用（保守：多下载一次好过开错文件）。
@@ -246,8 +251,10 @@ impl WorkspaceView {
                 .as_nanos(),
             name
         ));
+        let owner = preview_owner(&account_id, &bucket, &key);
         self.previewing = true;
         self.preview_path = None;
+        self.preview_path_owner = None;
         self.preview_text = None;
         self.preview_oversized = false;
         self.text_editor = None;
@@ -294,6 +301,7 @@ impl WorkspaceView {
                 match result {
                     Ok((path, text, oversized)) => {
                         this.preview_path = Some(path);
+                        this.preview_path_owner = Some(owner);
                         this.preview_text = text;
                         this.preview_oversized = oversized;
                     }
@@ -306,7 +314,7 @@ impl WorkspaceView {
                 }
                 cx.notify();
             })
-            .expect("预览结果回传 UI 失败");
+            .ok(); // 预览下载途中关窗口/退出：视图已不在，丢弃结果即可，不能 panic
         })
         .detach();
     }
@@ -327,7 +335,14 @@ impl WorkspaceView {
         };
         // 已有本地副本且对应当前对象：直接用
         let current = self.selected_object_key.clone().unwrap_or_default();
-        if cached_copy_matches(self.preview_path.as_deref(), &current) {
+        let owner = match (&self.selected_account_id, &self.selected_bucket) {
+            (Some(account_id), Some(bucket)) => Some(preview_owner(account_id, bucket, &current)),
+            _ => None,
+        };
+        if owner.is_some()
+            && self.preview_path_owner == owner
+            && cached_copy_matches(self.preview_path.as_deref(), &current)
+        {
             let path = self.preview_path.clone().expect("刚检查过");
             then(self, path, key, cx);
             return;
@@ -353,6 +368,7 @@ impl WorkspaceView {
                 .as_nanos(),
             name
         ));
+        let owner = preview_owner(&account_id, &bucket, &key);
         self.previewing = true;
         self.download_message = None;
         cx.notify();
@@ -377,6 +393,7 @@ impl WorkspaceView {
                 match result {
                     Ok(path) => {
                         this.preview_path = Some(path.clone());
+                        this.preview_path_owner = Some(owner);
                         then(this, path, key_for_result, cx);
                     }
                     Err(error) => {

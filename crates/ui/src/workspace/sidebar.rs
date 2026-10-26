@@ -88,12 +88,8 @@ impl WorkspaceView {
         let active = self
             .transfers
             .iter()
-            .filter(|task| {
-                matches!(
-                    task.state,
-                    TransferState::Running | TransferState::Waiting | TransferState::Paused
-                )
-            })
+            // 与标题栏同一判据（含 Queued）：并发打满时任务停在 Queued，漏掉会让角标消失
+            .filter(|task| task.state.is_active())
             .count();
         h_flex()
             .w_full()
