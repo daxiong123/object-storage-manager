@@ -8,8 +8,8 @@
 use gpui::Styled as _;
 use gpui_component::{Icon, IconName};
 
-/// 文件类型图标语义分组。颜色只表达类型区分（muted 基调 + 少量低饱和
-/// 语义色），不表达状态——status 色只用于真实反馈（agents.md §7）。
+/// 文件类型图标语义分组。颜色按类型着色（`theme::file_type_icon_color`，
+/// Blob0 参照：类型即信息），不表达状态——status 色只用于真实反馈。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileIconKind {
     /// 通用文件（无法识别扩展名）
@@ -110,17 +110,16 @@ pub(crate) fn file_icon_kind(key: &str) -> FileIconKind {
     }
 }
 
-/// 行图标渲染：按 Object Key 的扩展名选 Lucide SVG，muted/accent 语义着色。
-/// 目录行不经过这里（目录恒用 IconName::Folder）。
-/// 文件图标：**所有类型同一个颜色**（取自 `theme::file_icon_color`），
-/// 只靠字形区分类型——与参照实现一致（实测它每行图标的最饱和像素都是同一个金色）。
+/// 行图标渲染：按 Object Key 的扩展名选 Lucide SVG，**按类型着色**
+/// （`theme::file_type_icon_color`，Blob0 参照：类型即信息）。
+/// 目录行不经过这里（目录恒用 `IconName::Folder` + `file_folder_color`）。
 ///
-/// 之前是按类型分色（文本/代码取 muted、其余取 accent），那样在 Linear 风格下非文本
-/// 图标用的是近白的 `accent`，实际几乎看不见；统一取色后这个既有缺陷也一并消失。
+/// 2026-10 契约翻转：此前全类型一个琥珀色（照 oss-browser2 的单色约定），
+/// 在彩色图标参照下扫读效率不够；现在同色系分组一眼可辨，未知类型回中性灰。
 pub(crate) fn file_type_icon(key: &str, mode: gpui_component::ThemeMode) -> Icon {
-    file_icon_kind(key)
-        .icon()
-        .text_color(crate::theme::file_icon_color(mode))
+    let kind = file_icon_kind(key);
+    kind.icon()
+        .text_color(crate::theme::file_type_icon_color(kind, mode))
 }
 
 #[cfg(test)]

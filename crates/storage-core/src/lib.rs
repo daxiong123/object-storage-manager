@@ -19,6 +19,67 @@ use std::sync::Arc;
 /// 调用方（传输引擎）负责节流通知 UI，本层每块都可回调。
 pub type ByteProgress = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
+/// 下载落盘守卫：数据先写到**本次尝试专属**的同目录临时文件，成功后原子 rename 到目标。
+///
+/// - 暂停/取消/挂起时传输引擎靠 `JoinHandle::abort()` 丢弃 future，守卫的 Drop 只删自己的
+///   临时文件，半截数据不会留在目标路径上；
+/// - 临时名带进程内唯一序号：两个下载共用同一目标路径时，取消较旧的一个不会误删较新一个
+///   已完成（或进行中）的产物，目标路径上的既有文件在成功前也不会被截断。
+pub struct PartialFileGuard {
+    dest: std::path::PathBuf,
+    temp: std::path::PathBuf,
+    armed: bool,
+}
+
+impl PartialFileGuard {
+    pub fn new(dest: &std::path::Path) -> Self {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 临时名只含进程号 + 序号，与目标文件名长度无关：目标名接近文件系统单段上限
+        // （255 字节）时，在其后追加后缀会让原本可创建的下载在写入前就 ENAMETOOLONG。
+        let temp = dest.with_file_name(format!(".osm-{}-{seq}.part", std::process::id()));
+        Self {
+            dest: dest.to_path_buf(),
+            temp,
+            armed: true,
+        }
+    }
+
+    /// 本次尝试写入的临时文件路径。
+    pub fn temp_path(&self) -> &std::path::Path {
+        &self.temp
+    }
+
+    /// 下载完整成功：把临时文件原子地换到目标路径。
+    pub fn commit(mut self) -> std::io::Result<()> {
+        std::fs::rename(&self.temp, &self.dest)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for PartialFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
+}
+
+/// 含独立 `.` / `..` 路径段的 key 无法被 HTTP 客户端按字面寻址：URL 点段归一化会把
+/// `a/../b` 改写成 `/b`，请求（以及签名）打到别的对象上。联网前拒绝，三家共用。
+pub fn dot_segment_error(key: &str) -> Option<String> {
+    key.split('/')
+        .any(|segment| segment == "." || segment == "..")
+        .then(|| {
+            format!(
+                "对象 key `{key}` 含独立的 `.` / `..` 路径段。HTTP 客户端无法按字面寻址这类对象\
+                 （URL 点段归一化会改变请求路径），本应用拒绝操作以免误伤其它对象；\
+                 如需处理请在云厂商控制台操作"
+            )
+        })
+}
+
 /// 存储层统一错误
 ///
 /// Provider 实现负责把自己的传输层错误（reqwest 等）映射到这里的语义分类，
@@ -120,5 +181,55 @@ mod tests {
             message: "no such bucket".into(),
         };
         assert_eq!(e.to_string(), "API 错误 (HTTP 631): no such bucket");
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::PartialFileGuard;
+
+    #[test]
+    fn dot_segments_are_rejected_only_as_whole_segments() {
+        assert!(super::dot_segment_error("a/../b").is_some());
+        assert!(super::dot_segment_error("./x").is_some());
+        assert!(super::dot_segment_error("a/b/..").is_some());
+        assert!(super::dot_segment_error("a/..b/c.d/.hidden").is_none());
+    }
+
+    #[test]
+    fn guard_writes_to_private_temp_and_commit_publishes_atomically() {
+        let dir = std::env::temp_dir().join(format!("osm-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin");
+        std::fs::write(&dest, b"old").unwrap();
+
+        // 被丢弃（abort）的尝试：只删自己的临时文件，目标路径上的既有文件原样保留
+        let aborted = PartialFileGuard::new(&dest);
+        std::fs::write(aborted.temp_path(), b"partial").unwrap();
+        let aborted_temp = aborted.temp_path().to_path_buf();
+        // 另一个并发尝试：临时名必须不同
+        let other = PartialFileGuard::new(&dest);
+        assert_ne!(aborted.temp_path(), other.temp_path());
+        std::fs::write(other.temp_path(), b"new").unwrap();
+        drop(aborted);
+        assert!(!aborted_temp.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+
+        // 成功的尝试：commit 后目标内容为新内容，临时文件消失
+        let other_temp = other.temp_path().to_path_buf();
+        other.commit().unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!other_temp.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn guard_temp_name_does_not_depend_on_destination_length() {
+        let long = "a".repeat(255);
+        let dest = std::path::Path::new("/tmp").join(long);
+        let guard = PartialFileGuard::new(&dest);
+        let name = guard.temp_path().file_name().unwrap().to_string_lossy();
+        assert!(name.len() < 64, "临时名过长：{name}");
+        assert_eq!(guard.temp_path().parent(), dest.parent());
     }
 }

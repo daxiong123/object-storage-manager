@@ -117,10 +117,18 @@ impl Settings {
                 return Err(PersistenceError::SettingsIo { path, source });
             }
         };
-        serde_json::from_str(&text).map_err(|e| PersistenceError::SettingsParse {
-            path,
-            message: e.to_string(),
-        })
+        let settings: Self =
+            serde_json::from_str(&text).map_err(|e| PersistenceError::SettingsParse {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+        // 手工编辑/损坏出的越界值（字号缩放 0、并发 9999……）不能原样进入运行时：
+        // validate() 以前只在保存时由 UI 调用。目录存在性不在启动路径上检查
+        // （默认下载目录被删不应让应用起不来，使用处自会报错）。
+        settings
+            .validate_ranges()
+            .map_err(|message| PersistenceError::SettingsParse { path, message })?;
+        Ok(settings)
     }
 
     /// 写入默认位置。
@@ -141,11 +149,22 @@ impl Settings {
                 path: path.clone(),
                 message: e.to_string(),
             })?;
-        std::fs::write(&path, text).map_err(|source| PersistenceError::SettingsIo { path, source })
+        // 先写同目录临时文件再 rename：写到一半崩溃/断电只会留下 .tmp，
+        // 不会把 settings.json 截断成下次启动必然解析失败的残片。
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text)
+            .and_then(|()| std::fs::rename(&tmp, &path))
+            .map_err(|source| PersistenceError::SettingsIo { path, source })
     }
 
     /// 校验：TTL 必须 > 0；清除秒数 >= 0（0 = 关闭）。
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_ranges()?;
+        self.validate_download_dir()
+    }
+
+    /// 只含纯数值范围（读盘时也用，不碰文件系统）。
+    fn validate_ranges(&self) -> Result<(), String> {
         if self.signed_url_ttl_secs == 0 {
             return Err("签名链接有效期必须大于 0 秒".into());
         }
@@ -170,6 +189,11 @@ impl Settings {
                 "上传大小上限不能超过 {MAX_UPLOAD_SIZE_MB_CEILING} MB（必须小于 5 GB）"
             ));
         }
+        Ok(())
+    }
+
+    /// 默认下载目录必须真实存在（保存设置时检查）。
+    fn validate_download_dir(&self) -> Result<(), String> {
         if let Some(path) = &self.default_download_dir
             && !path.is_dir()
         {
@@ -298,6 +322,30 @@ mod tests {
             "损坏文件必须显式报错，实际 {err:?}"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_out_of_range_values_and_save_is_atomic() {
+        let dir = std::env::temp_dir().join(format!("osm-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut s = Settings::default();
+        s.save_at(path.clone()).unwrap();
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "rename 后不应残留临时文件"
+        );
+        assert!(Settings::load_at(path.clone()).is_ok());
+        s.ui_font_scale = 0.0;
+        s.save_at(path.clone()).unwrap();
+        assert!(
+            matches!(
+                Settings::load_at(path.clone()),
+                Err(PersistenceError::SettingsParse { .. })
+            ),
+            "越界值读盘时必须报错而不是进入运行时"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

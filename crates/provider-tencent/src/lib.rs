@@ -512,12 +512,15 @@ impl StorageProvider for TencentProvider {
             .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
         let resp = self.check_status(resp, "download_object").await?;
         let content_len = resp.content_length();
-        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
-            StorageError::Io(format!(
-                "download_object: 创建本地文件 {} 失败: {e}",
-                dest.display()
-            ))
-        })?;
+        let guard = object_storage_core::PartialFileGuard::new(dest);
+        let mut file = tokio::fs::File::create(guard.temp_path())
+            .await
+            .map_err(|e| {
+                StorageError::Io(format!(
+                    "download_object: 创建本地文件 {} 失败: {e}",
+                    dest.display()
+                ))
+            })?;
         let mut total: u64 = 0;
         let mut stream = resp.bytes_stream();
         if let Some(cb) = &progress {
@@ -527,18 +530,37 @@ impl StorageProvider for TencentProvider {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    return Err(
-                        Self::download_cleanup_failed(dest, format!("接收数据中断: {e}")).await,
-                    );
+                    return Err(Self::download_cleanup_failed(
+                        guard.temp_path(),
+                        format!("接收数据中断: {e}"),
+                    )
+                    .await);
                 }
             };
             if let Err(e) = file.write_all(&chunk).await {
-                return Err(Self::download_cleanup_failed(dest, format!("写入失败: {e}")).await);
+                return Err(Self::download_cleanup_failed(
+                    guard.temp_path(),
+                    format!("写入失败: {e}"),
+                )
+                .await);
             }
             total += chunk.len() as u64;
             if let Some(cb) = &progress {
                 cb(total, content_len);
             }
+        }
+        // tokio::fs::File 的写入在后台线程完成，drop 不保证落盘；调用方（复制/重命名/
+        // 预览）紧接着会读这个文件，必须 flush 并把写入错误暴露出来。
+        if let Err(e) = file.flush().await {
+            return Err(
+                Self::download_cleanup_failed(guard.temp_path(), format!("写入失败: {e}")).await,
+            );
+        }
+        if let Err(e) = guard.commit() {
+            return Err(StorageError::Io(format!(
+                "download_object: 写入目标文件 {} 失败: {e}",
+                dest.display()
+            )));
         }
         Ok(total)
     }
@@ -780,8 +802,8 @@ fn xml_blocks(hay: &str, tag: &str) -> Vec<String> {
 /// COS 的 `LastModified` 两种精度都出现过，秒与小数秒都要吃下。
 fn parse_rfc3339_millis(value: &str) -> i64 {
     let trimmed = value.trim();
-    if trimmed.len() < 19 {
-        return 0;
+    if trimmed.len() < 19 || !trimmed.is_ascii() {
+        return 0; // 非 ASCII 时按字节切片会落在字符边界中间而 panic
     }
     let parse_u = |s: &str| s.parse::<i64>().unwrap_or(0);
     let year = parse_u(&trimmed[0..4]);

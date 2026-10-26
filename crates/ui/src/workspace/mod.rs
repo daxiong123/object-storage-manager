@@ -298,6 +298,9 @@ pub struct WorkspaceView {
     previewing: bool,
     /// 已下载到本地缓存、供 GPUI img 直接渲染的预览路径
     preview_path: Option<PathBuf>,
+    /// `preview_path` 所属对象（`account\0bucket\0key`）。只靠文件名后缀匹配会把 `a/x.txt`
+    /// 的副本当成 `b/x.txt` 打开；复用缓存必须同时核对归属。
+    preview_path_owner: Option<String>,
     /// 文本预览内容；编辑器使用 GPUI Kit EditorState，不自建 WebView
     preview_text: Option<String>,
     text_editor: Option<Entity<EditorState>>,
@@ -634,6 +637,7 @@ impl WorkspaceView {
             deleting: false,
             previewing: false,
             preview_path: None,
+            preview_path_owner: None,
             preview_text: None,
             text_editor: None,
             preview_oversized: false,

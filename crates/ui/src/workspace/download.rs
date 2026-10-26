@@ -59,7 +59,9 @@ impl WorkspaceView {
             self.start_batch_download(window, cx);
             return;
         }
-        let Some(key) = self.selected_cloud_object().map(|o| o.key.clone()) else {
+        // 与删除 / 复制移动同一作用域（动作目标集合）：单击另一行只移动「当前行」、
+        // 不改勾选集合，用 selected_cloud_object() 会下载到状态条/复选框之外的那一行。
+        let Some(key) = self.action_target_keys().into_iter().next() else {
             return; // 未选中对象：无操作（按钮本应置灰）
         };
         let Some(account_id) = self.selected_account_id.clone() else {

@@ -144,7 +144,9 @@ impl WorkspaceView {
             cx.notify();
             return None;
         };
-        let prefix = self.current_prefix.clone().unwrap_or_default();
+        let prefix = directory_of_prefix(self.current_prefix.as_deref())
+            .unwrap_or_default()
+            .to_string();
         Some((account_id, bucket, prefix))
     }
 

@@ -228,7 +228,9 @@ impl WorkspaceView {
         self.copy_move = Some(CopyMoveState {
             mode,
             source_keys,
-            target_prefix: self.current_prefix.clone().unwrap_or_default(),
+            target_prefix: directory_of_prefix(self.current_prefix.as_deref())
+                .unwrap_or_default()
+                .to_string(),
             filter,
             entries: Vec::new(),
             state: AsyncState::Loading,
@@ -497,8 +499,10 @@ impl WorkspaceView {
                     ),
                     Err(message) => (true, message),
                 };
-                this.download_message = Some(DownloadMessage { is_error, text });
+                // reload_objects 会清空 download_message，必须先重载再写结果，
+                // 否则逐项失败 / 自动改名的汇总会被立刻抹掉。
                 this.reload_objects(cx);
+                this.download_message = Some(DownloadMessage { is_error, text });
                 cx.notify();
             })
             .ok();
@@ -629,7 +633,7 @@ impl WorkspaceView {
                     )
                     .child(
                         Icon::new(IconName::Folder)
-                            .text_color(crate::theme::file_icon_color(theme.mode)),
+                            .text_color(crate::theme::file_folder_color(theme.mode)),
                     )
                     .child(
                         div()

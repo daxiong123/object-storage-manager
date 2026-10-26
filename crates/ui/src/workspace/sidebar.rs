@@ -88,12 +88,8 @@ impl WorkspaceView {
         let active = self
             .transfers
             .iter()
-            .filter(|task| {
-                matches!(
-                    task.state,
-                    TransferState::Running | TransferState::Waiting | TransferState::Paused
-                )
-            })
+            // 与标题栏同一判据（含 Queued）：并发打满时任务停在 Queued，漏掉会让角标消失
+            .filter(|task| task.state.is_active())
             .count();
         h_flex()
             .w_full()
@@ -440,6 +436,10 @@ impl WorkspaceView {
     }
 
     /// 通用侧栏行（id 动态：账号/桶行）。
+    ///
+    /// 选中态（Blob0 参照，2026-10 契约翻转）：**实心主色 pill + 白字**——
+    /// 侧栏是应用级导航，「当前在哪」要一眼可见，淡染在此不够强调；
+    /// 对象列表的选中仍保持 `selection` 淡染（Finder 语义，不染色整行）。
     pub(super) fn sidebar_row<F>(
         &self,
         theme: &Theme,
@@ -463,13 +463,14 @@ impl WorkspaceView {
             .gap_2()
             .text_size(tokens::body())
             .when(active, |row| {
-                row.bg(theme.sidebar_accent)
-                    .text_color(theme.sidebar_accent_foreground)
+                row.bg(theme.primary)
+                    .text_color(theme.primary_foreground)
+                    .hover(|row| row.bg(theme.primary_hover))
             })
             .when(!active, |row| row.hover(|row| row.bg(theme.list_hover)))
             .on_click(on_click)
             .child(Icon::new(icon).text_color(if active {
-                theme.sidebar_accent_foreground
+                theme.primary_foreground
             } else {
                 theme.muted_foreground
             }))
@@ -516,8 +517,7 @@ impl WorkspaceView {
                     name,
                 )
                 .when(active, |btn| {
-                    btn.bg(theme.sidebar_accent)
-                        .text_color(theme.sidebar_accent_foreground)
+                    btn.bg(theme.primary).text_color(theme.primary_foreground)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| this.select_account(&id, cx))),
             );
@@ -532,8 +532,7 @@ impl WorkspaceView {
                 rail = rail.child(
                     ui::icon_button(("rail-bucket", ix), Icon::new(IconName::Folder), tooltip)
                         .when(active, |btn| {
-                            btn.bg(theme.sidebar_accent)
-                                .text_color(theme.sidebar_accent_foreground)
+                            btn.bg(theme.primary).text_color(theme.primary_foreground)
                         })
                         .on_click(cx.listener(move |this, _, _, cx| this.select_bucket(&name, cx))),
                 );

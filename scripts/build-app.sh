@@ -29,6 +29,11 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
+if [[ ! "$VERSION" =~ ^[0-9A-Za-z.+-]+$ ]]; then
+  echo "错误：版本号含非法字符：$VERSION" >&2
+  exit 1
+fi
+
 BUILD=1
 case "${1:-}" in
   "" | "--rebuild") BUILD=1 ;;
@@ -97,8 +102,10 @@ printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 
 # 5. ad-hoc 代码签名（本地可启动；正式分发需 Developer ID + 公证）
 echo "==> 代码签名（ad-hoc）"
+# 签名失败必须中止：否则会产出一个签名损坏的 zip，并打印一个能被贴进 Cask 的 sha256
 if ! codesign --force --deep --sign - "$APP_BUNDLE"; then
-  echo "警告：ad-hoc 签名失败，跳过签名（本地产物仍可运行）" >&2
+  echo "错误：ad-hoc 签名失败，中止打包" >&2
+  exit 1
 fi
 
 # 6. 打包 zip（ditto 保留权限与符号链接）
@@ -112,7 +119,9 @@ echo "==> 校验签名与目录结构"
 if codesign --verify --deep --strict "$APP_BUNDLE"; then
   echo "  签名校验 OK"
 else
-  echo "  警告：签名校验未通过" >&2
+  echo "错误：签名校验未通过，中止（不输出 sha256，避免损坏产物被发布）" >&2
+  rm -f "$ZIP_FILE"
+  exit 1
 fi
 plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null && echo "  Info.plist 校验 OK"
 find "$APP_BUNDLE" -type f | sed 's/^/    /'

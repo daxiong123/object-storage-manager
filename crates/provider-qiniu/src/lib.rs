@@ -361,6 +361,9 @@ impl QiniuProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
+        }
         if ttl_secs == 0 {
             return Err(StorageError::InvalidInput("ttl_secs 必须大于 0".into()));
         }
@@ -667,6 +670,9 @@ impl StorageProvider for QiniuProvider {
         if key.is_empty() {
             return Err(StorageError::InvalidInput("key 不能为空".into()));
         }
+        if let Some(message) = object_storage_core::dot_segment_error(key) {
+            return Err(StorageError::InvalidInput(message));
+        }
 
         let domains = self.bucket_download_domains(bucket).await?;
         if domains.is_empty() {
@@ -689,7 +695,10 @@ impl StorageProvider for QiniuProvider {
                     .get(signed_url)
                     .send()
                     .await
-                    .map_err(|e| StorageError::Network(format!("download_object: {e}")))?;
+                    .map_err(|e| {
+                        // 签名下载 URL（含 token）不得进错误文本
+                        StorageError::Network(format!("download_object: {}", e.without_url()))
+                    })?;
                 self.check_status(resp, &format!("download_object[{host}]"))
                     .await
             }
@@ -726,22 +735,32 @@ impl StorageProvider for QiniuProvider {
 
         // 流式落盘：分块写，不驻留整文件（内存红线，agents.md §2）。
         // 中途失败则清理半成品文件后响报（错误永不静默）。
-        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
-            StorageError::Io(format!(
-                "download_object: 创建本地文件 {} 失败: {e}",
-                dest.display()
-            ))
-        })?;
+        let guard = object_storage_core::PartialFileGuard::new(dest);
+        let mut file = tokio::fs::File::create(guard.temp_path())
+            .await
+            .map_err(|e| {
+                StorageError::Io(format!(
+                    "download_object: 创建本地文件 {} 失败: {e}",
+                    dest.display()
+                ))
+            })?;
         let mut total: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            // 下载 URL 带 `token=AK:签名`，reqwest 的 Display 会把整条 URL 拼进错误文本，
+            // 必须 without_url，否则签名会进 UI 与日志。
             let chunk = chunk.map_err(|e| {
-                StorageError::Network(format!("download_object: 接收数据中断: {e}"))
+                StorageError::Network(format!(
+                    "download_object: 接收数据中断: {}",
+                    e.without_url()
+                ))
             })?;
             if let Err(e) = file.write_all(&chunk).await {
-                return Err(
-                    Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
-                );
+                return Err(Self::download_cleanup_failed(
+                    guard.temp_path(),
+                    format!("写入本地文件失败: {e}"),
+                )
+                .await);
             }
             total += chunk.len() as u64;
             if let Some(cb) = &progress {
@@ -749,9 +768,17 @@ impl StorageProvider for QiniuProvider {
             }
         }
         if let Err(e) = file.flush().await {
-            return Err(
-                Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
-            );
+            return Err(Self::download_cleanup_failed(
+                guard.temp_path(),
+                format!("写入本地文件失败: {e}"),
+            )
+            .await);
+        }
+        if let Err(e) = guard.commit() {
+            return Err(StorageError::Io(format!(
+                "download_object: 写入目标文件 {} 失败: {e}",
+                dest.display()
+            )));
         }
         Ok(total)
     }

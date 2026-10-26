@@ -31,10 +31,11 @@ use gpui::{App, Hsla, SharedString};
 use gpui_component::{Theme, ThemeConfig, ThemeMode, highlighter::HighlightThemeStyle};
 use object_storage_persistence::{AppearanceMode, CODE_FONT_SIZE_DEFAULT, Settings};
 
+use crate::file_type::FileIconKind;
 use crate::tokens;
 
 /// 主色 hue：与亮色 primary 同族，供只按 hue 生成的语法/高亮色使用。
-const HUE_DEG: f32 = 221.0;
+const HUE_DEG: f32 = 227.0;
 /// 中性面色族 hue：统一冷灰，供代码高亮的中性层使用。
 const NEUTRAL_HUE: f32 = 225.0;
 
@@ -112,6 +113,9 @@ struct Palette {
     table_head: [f32; 4],
     table_row_border: [f32; 4],
     title_bar: [f32; 4],
+    /// 凹陷槽底色（标题栏面包屑/路径槽）：`ThemeConfig` 没有这一位，
+    /// 经 `theme::inset_background()` 下发（同 `file_icon` / `image_outline`）。
+    inset: [f32; 4],
     overlay: [f32; 4],
     window_border: [f32; 4],
     group_box: [f32; 4],
@@ -205,70 +209,73 @@ fn rgb(hex: u32) -> [f32; 4] {
     [(h / 6.).rem_euclid(1.), s, l, 1.]
 }
 
-/// 亮色：内容是白工作面，标题栏与侧栏是同一块略凹的中性 chrome。
+/// 亮色：内容是纯白工作面，侧栏与标题栏是**极浅灰** chrome（Blob0 平铺式：
+/// 内容区与窗口齐平，不做浮起卡片；chrome 只比白底凹一档，1px 分隔线划界）。
 ///
-/// 中性面一律等通道灰，避免冷灰色相漂进「有色」。品牌色用同一 hue 221
-/// 推导，选中染色与主 CTA 分开：`sidebar_accent` 是不透明淡底（侧栏行、
-/// 设置导航），`selection` 要扛过库对 alpha 的 ≤0.3 钳制后仍看得见。
+/// 中性面是低饱和冷灰（hue 215–235 带内）。品牌色用同一 hue 227 推导：
+/// 侧栏选中是**实心主色 pill**（白字，Blob0 式，直接用 `theme.primary`），
+/// `sidebar_accent` 淡底只留给弹层内选中（设置导航、服务商分段）；
+/// `selection` 要扛过库对 alpha 的 ≤0.3 钳制后仍看得见（对象列表选中）。
 /// `list_active` 故意保持在钳制后不可见——选中底色不要走它。
 fn light_palette() -> Palette {
-    let border = rgb(0xE6E6E6);
+    let border = rgb(0xE4E6EB);
     let canvas = rgb(0xFFFFFF);
-    let chrome = rgb(0xF2F2F2);
-    let ink = rgb(0x1A1A1A);
-    let brand = 221.;
+    let chrome = rgb(0xF5F6F8);
+    let ink = rgb(0x14151A);
+    let brand = 227.;
     Palette {
         background: canvas,
         foreground: ink,
-        muted: rgb(0xF6F6F6),
-        muted_foreground: rgb(0x6E6E6E),
+        muted: rgb(0xF5F6F8),
+        muted_foreground: rgb(0x686D76),
         border,
         // 侧栏比内容略凹，标题栏与侧栏同色，chrome 读成一整块。
         sidebar: chrome,
         sidebar_foreground: ink,
         sidebar_border: border,
         popover: canvas,
-        secondary: chrome,
-        secondary_hover: rgb(0xE8E8E8),
-        secondary_active: rgb(0xDEDEDE),
+        secondary: rgb(0xF5F6F8),
+        secondary_hover: rgb(0xECEEF2),
+        secondary_active: rgb(0xE2E5EA),
         // `input` 是控件边框，不是填充。必须明显深于白底，否则复选框没有边。
-        input: rgb(0xC8C8C8),
+        input: rgb(0xBDC2CC),
         list: canvas,
         list_even: canvas,
         list_head: canvas,
         table: canvas,
         table_even: canvas,
         table_head: canvas,
-        table_row_border: rgb(0xEEEEEE),
+        table_row_border: rgb(0xEFF0F3),
         title_bar: chrome,
+        inset: rgb(0xEAECF0),
         overlay: hsla(0., 0., 0., 0.40),
         window_border: border,
-        group_box: rgb(0xF6F6F6),
+        group_box: rgb(0xF5F6F8),
         group_box_foreground: ink,
-        description_list_label: rgb(0xF6F6F6),
+        description_list_label: rgb(0xF5F6F8),
         description_list_label_foreground: ink,
-        primary: hsl(brand, 0.78, 0.48),
-        primary_hover: hsl(brand, 0.78, 0.42),
-        primary_active: hsl(brand, 0.78, 0.36),
+        primary: hsl(brand, 0.78, 0.50),
+        primary_hover: hsl(brand, 0.78, 0.44),
+        primary_active: hsl(brand, 0.78, 0.38),
         primary_foreground: rgb(0xFFFFFF),
-        progress_bar: hsl(brand, 0.78, 0.48),
-        accent: hsl(brand, 0.78, 0.48),
+        progress_bar: hsl(brand, 0.78, 0.50),
+        accent: hsl(brand, 0.78, 0.50),
         accent_foreground: hsl(brand, 0.70, 0.36),
-        ring: hsl(brand, 0.78, 0.48),
+        ring: hsl(brand, 0.78, 0.50),
         // 不透明淡底。前景保持中性墨色：选中靠底色，不靠把文字染成主色。
-        sidebar_accent: hsl(brand, 0.40, 0.86),
+        sidebar_accent: hsl(brand, 0.42, 0.88),
         sidebar_accent_foreground: ink,
         list_active: hsl(brand, 0.25, 0.93),
-        list_active_border: hsl(brand, 0.78, 0.48),
+        list_active_border: hsl(brand, 0.78, 0.50),
         table_active: hsl(brand, 0.25, 0.93),
-        table_active_border: hsl(brand, 0.78, 0.48),
+        table_active_border: hsl(brand, 0.78, 0.50),
         selection: hsl(brand, 0.50, 0.62),
         link: hsl(brand, 0.80, 0.46),
         link_hover: hsl(brand, 0.80, 0.56),
         link_active: hsl(brand, 0.80, 0.38),
         drag_border: rgb(0x8A8A8A),
         drop_target: hsla(brand, 0.70, 0.48, 0.16),
-        row_hover: rgb(0xEFEFEF),
+        row_hover: rgb(0xF0F1F4),
         file_icon: rgb(0xE0A82E),
         danger: rgb(0xE5484D),
         danger_hover: hsl(357., 0.76, 0.66),
@@ -289,63 +296,65 @@ fn light_palette() -> Palette {
     }
 }
 
-/// 深色：侧栏与标题栏更凹，内容区略抬，工作面仍然是唯一的亮面。
+/// 深色：内容压到近黑，侧栏与标题栏略抬一档（Blob0 暗色同构：内容永远是最
+/// 「纯」的那一面，chrome 向中间灰靠一步），1px 分隔线划界，不做浮起卡片。
 fn dark_palette() -> Palette {
-    let border = rgb(0x2E2E2E);
-    let canvas = rgb(0x1C1C1C);
-    let chrome = rgb(0x141414);
-    let ink = rgb(0xE8E8E8);
-    let brand = 217.;
+    let border = rgb(0x26292E);
+    let canvas = rgb(0x0E0F11);
+    let chrome = rgb(0x17191C);
+    let ink = rgb(0xECEEF4);
+    let brand = 224.;
     Palette {
         background: canvas,
         foreground: ink,
-        muted: rgb(0x242424),
-        muted_foreground: rgb(0x8A8A8A),
+        muted: rgb(0x1B1D21),
+        muted_foreground: rgb(0x82858F),
         border,
         sidebar: chrome,
         sidebar_foreground: ink,
-        sidebar_border: rgb(0x2A2A2A),
-        popover: rgb(0x242424),
-        secondary: rgb(0x242424),
-        secondary_hover: rgb(0x2C2C2C),
-        secondary_active: rgb(0x333333),
+        sidebar_border: border,
+        popover: rgb(0x1B1D21),
+        secondary: rgb(0x1B1D21),
+        secondary_hover: rgb(0x212429),
+        secondary_active: rgb(0x292C33),
         // 暗色边框要在「input 混 30% 再叠到 background」之后仍看得见，见测试。
-        input: rgb(0x555555),
+        input: rgb(0x4E515B),
         list: canvas,
         list_even: canvas,
         list_head: canvas,
         table: canvas,
         table_even: canvas,
         table_head: canvas,
-        table_row_border: rgb(0x2A2A2A),
+        table_row_border: rgb(0x1D1F24),
         title_bar: chrome,
+        inset: rgb(0x101216),
         overlay: hsla(0., 0., 0., 0.55),
         window_border: border,
-        group_box: rgb(0x242424),
+        group_box: rgb(0x1B1D21),
         group_box_foreground: ink,
-        description_list_label: rgb(0x242424),
+        description_list_label: rgb(0x1B1D21),
         description_list_label_foreground: ink,
-        primary: hsl(brand, 0.85, 0.62),
-        primary_hover: hsl(brand, 0.85, 0.68),
-        primary_active: hsl(brand, 0.85, 0.54),
+        primary: hsl(brand, 0.85, 0.64),
+        primary_hover: hsl(brand, 0.85, 0.70),
+        primary_active: hsl(brand, 0.85, 0.56),
         primary_foreground: rgb(0xFFFFFF),
-        progress_bar: hsl(brand, 0.85, 0.62),
-        accent: hsl(brand, 0.85, 0.62),
-        accent_foreground: hsl(brand, 0.80, 0.72),
-        ring: hsl(brand, 0.85, 0.62),
-        sidebar_accent: hsl(brand, 0.35, 0.24),
+        progress_bar: hsl(brand, 0.85, 0.64),
+        accent: hsl(brand, 0.85, 0.64),
+        accent_foreground: hsl(brand, 0.80, 0.74),
+        ring: hsl(brand, 0.85, 0.64),
+        sidebar_accent: hsl(brand, 0.35, 0.26),
         sidebar_accent_foreground: ink,
         list_active: hsl(brand, 0.15, 0.18),
-        list_active_border: hsl(brand, 0.85, 0.62),
+        list_active_border: hsl(brand, 0.85, 0.64),
         table_active: hsl(brand, 0.15, 0.18),
-        table_active_border: hsl(brand, 0.85, 0.62),
-        selection: hsl(brand, 0.35, 0.40),
-        link: hsl(brand, 0.85, 0.68),
-        link_hover: hsl(brand, 0.85, 0.76),
-        link_active: hsl(brand, 0.85, 0.58),
+        table_active_border: hsl(brand, 0.85, 0.64),
+        selection: hsl(brand, 0.35, 0.42),
+        link: hsl(brand, 0.85, 0.70),
+        link_hover: hsl(brand, 0.85, 0.78),
+        link_active: hsl(brand, 0.85, 0.60),
         drag_border: rgb(0x8A8A8A),
         drop_target: hsla(brand, 0.70, 0.55, 0.22),
-        row_hover: rgb(0x2A2A2A),
+        row_hover: rgb(0x1F2227),
         file_icon: rgb(0xE0A82E),
         danger: rgb(0xFF6B6B),
         danger_hover: hsl(0., 1.0, 0.76),
@@ -420,6 +429,48 @@ pub fn file_icon_color(mode: ThemeMode) -> Hsla {
     };
     let [h, s, l, a] = palette.file_icon;
     gpui::hsla(h * 360., s, l, a)
+}
+
+/// 凹陷槽底色（标题栏面包屑/路径槽）：`ThemeConfig` 没有这一位，
+/// 与 `file_icon_color` 同一路径下发。
+///
+/// 取色方向随亮暗相反：亮色比 chrome **浅**（浅井）、暗色比 chrome **深**（深井），
+/// 都是为了让槽在 chrome 上读成「凹下去」，而不是又一块凸起的面。
+pub fn inset_background(mode: ThemeMode) -> Hsla {
+    let palette = if mode.is_dark() {
+        dark_palette()
+    } else {
+        light_palette()
+    };
+    let [h, s, l, a] = palette.inset;
+    gpui::hsla(h * 360., s, l, a)
+}
+
+/// 目录行图标的统一色（Blob0 参照：macOS 文件夹蓝；目录不靠类型分色，恒一色）。
+pub(crate) fn file_folder_color(mode: ThemeMode) -> Hsla {
+    let dark = mode.is_dark();
+    gpui::hsla(207. / 360., 0.85, if dark { 0.68 } else { 0.60 }, 1.)
+}
+
+/// 文件图标的按类型着色（Blob0 参照，2026-10 契约翻转：「类型即信息」——
+/// 媒体=粉、视频=紫、音频=薄荷、代码=青、压缩包=琥珀、表格=草绿、文档=浅蓝，
+/// 颜色帮你在列表里扫读，不承担状态语义；状态反馈仍只属于 status 族）。
+/// 未知类型用中性灰（不给没见过的类型塞语义）。亮/暗同色相，暗色提亮一档。
+/// 色值不进 `Palette`（非 ThemeConfig 语义字段），与 `file_icon_color` 同路径下发。
+pub(crate) fn file_type_icon_color(kind: FileIconKind, mode: ThemeMode) -> Hsla {
+    let dark = mode.is_dark();
+    let (h, s, l) = match kind {
+        FileIconKind::Generic => (225., 0.08, if dark { 0.62 } else { 0.55 }),
+        FileIconKind::Text => (210., 0.70, if dark { 0.66 } else { 0.56 }),
+        FileIconKind::Code => (187., 0.60, if dark { 0.50 } else { 0.42 }),
+        FileIconKind::Image => (334., 0.70, if dark { 0.66 } else { 0.60 }),
+        FileIconKind::Video => (270., 0.55, if dark { 0.68 } else { 0.62 }),
+        FileIconKind::Audio => (150., 0.55, if dark { 0.52 } else { 0.44 }),
+        FileIconKind::Archive => return file_icon_color(mode),
+        FileIconKind::Spreadsheet => (120., 0.45, if dark { 0.50 } else { 0.42 }),
+        FileIconKind::Font => (300., 0.45, if dark { 0.64 } else { 0.58 }),
+    };
+    gpui::hsla(h / 360., s, l, 1.)
 }
 
 /// 亮/暗两套主题配置。
@@ -526,8 +577,8 @@ fn config(
         // 这里写的是不透明色，实际渲染是它们按上述 alpha 叠在底色上——
         // list_active 源色 l=0.925 太淡，压到 0.2 后叠白底只剩约 2% 差异，
         // 选中态肉眼不可见（实测 249,249,252 vs 白 255,255,255）。
-        // 所以**列表选中态一律用 `selection`**（源色 l=0.80，压到 0.3 约
-        // (229,232,245)，与侧栏不透明的 `sidebar_accent` 观感一致），
+        // 所以**列表选中态一律用 `selection`**（源色 l=0.62，压到 0.3 约
+        // (212,218,241)，与侧栏不透明的 `sidebar_accent` 观感一致），
         // 不要用 list_active / table_active 做选中底色。
         c.list_active = Some(hex(p.list_active));
         c.list_active_border = Some(hex(p.list_active_border));
@@ -762,6 +813,7 @@ mod tests {
                 ("table_head", self.table_head),
                 ("table_row_border", self.table_row_border),
                 ("title_bar", self.title_bar),
+                ("inset", self.inset),
                 ("overlay", self.overlay),
                 ("window_border", self.window_border),
                 ("group_box", self.group_box),
@@ -967,6 +1019,43 @@ mod tests {
                 chroma > 0.05,
                 "{name}: file_icon 彩度过低（{chroma:.3}）——文件图标会退化成灰色"
             );
+        }
+    }
+
+    #[test]
+    fn file_type_colors_are_colored_but_generic_stays_neutral() {
+        // 按类型着色的契约翻转（Blob0 参照，2026-10）：可识别类型必须一眼有色
+        // （扫读媒体的卖点），未知类型必须保持中性灰（不给没见过的类型塞语义）。
+        // 亮/暗两套都要成立。
+        let colored = [
+            FileIconKind::Text,
+            FileIconKind::Code,
+            FileIconKind::Image,
+            FileIconKind::Video,
+            FileIconKind::Audio,
+            FileIconKind::Archive,
+            FileIconKind::Spreadsheet,
+            FileIconKind::Font,
+        ];
+        for kind in colored {
+            for (name, mode) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
+                let c = file_type_icon_color(kind, mode);
+                assert!(
+                    c.s >= 0.4,
+                    "{name}: {kind:?} 彩度 s={:.2} 太低——按类型着色会看不见",
+                    c.s
+                );
+            }
+        }
+        for (name, mode) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
+            let generic = file_type_icon_color(FileIconKind::Generic, mode);
+            assert!(
+                generic.s < 0.2,
+                "{name}: Generic 彩度 s={:.2} 偏高——未知类型不能带语义色",
+                generic.s
+            );
+            let folder = file_folder_color(mode);
+            assert!(folder.s >= 0.6, "{name}: 目录蓝不能退成灰");
         }
     }
 
