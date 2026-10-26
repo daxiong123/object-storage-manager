@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | 平台 | macOS 14 (Sonoma) 及以上，Apple Silicon (arm64) |
-| 当前版本 | 0.5.0 |
+| 当前版本 | 0.5.1 |
 | 支持的服务商 | 七牛 Kodo、阿里云 OSS、腾讯云 COS |
 | 技术栈 | Rust 2024 · GPUI (`gpui-pre`) · gpui-component · Tokio · reqwest + rustls · SQLite |
 
