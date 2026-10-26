@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <title>CloudStorage — Workbench v2 Components</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --cs-fg: #14151a;
+      --cs-muted: #5c6370;
+      --cs-surface: #fff;
+      --cs-border: #e2e5ec;
+      --cs-brand: #4361ee;
+      --cs-brand-muted: rgba(67, 97, 238, 0.14);
+      --cs-danger: #dc3545;
+      --cs-radius: 6px;
+      --cs-radius-lg: 10px;
+      --cs-font: "IBM Plex Sans", -apple-system, "PingFang SC", sans-serif;
+    }
+    body { font-family: var(--cs-font); font-size: 13px; color: var(--cs-fg); background: #eef0f4; padding: 32px; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    p.lead { color: var(--cs-muted); margin-bottom: 32px; max-width: 640px; line-height: 1.5; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; }
+    .panel {
+      background: var(--cs-surface);
+      border: 1px solid var(--cs-border);
+      border-radius: var(--cs-radius-lg);
+      padding: 20px;
+    }
+    .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cs-muted); margin-bottom: 16px; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .btn {
+      height: 32px; padding: 0 14px; border-radius: var(--cs-radius); font-size: 12px; font-family: inherit;
+      border: 1px solid var(--cs-border); background: #fff; cursor: default;
+    }
+    .btn-submit { background: var(--cs-brand); color: #fff; border-color: transparent; font-weight: 500; }
+    .btn-submit:disabled { opacity: 0.45; }
+    .btn-ghost { border-color: transparent; color: var(--cs-muted); }
+    .menu {
+      width: 200px;
+      background: #fff;
+      border: 1px solid var(--cs-border);
+      border-radius: var(--cs-radius-lg);
+      box-shadow: 0 8px 32px rgba(20,21,26,.12);
+      padding: 6px;
+    }
+    .menu-item {
+      padding: 8px 10px;
+      border-radius: var(--cs-radius);
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .menu-item:hover { background: #f4f5f8; }
+    .menu-item.danger { color: var(--cs-danger); }
+    .menu-sep { height: 1px; background: var(--cs-border); margin: 4px 6px; }
+    .menu kbd { font-size: 10px; color: var(--cs-muted); }
+    .modal-scene {
+      position: relative;
+      height: 280px;
+      background: rgba(20,21,26,.35);
+      border-radius: var(--cs-radius-lg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal {
+      width: min(400px, 90%);
+      background: #fff;
+      border-radius: var(--cs-radius-lg);
+      border: 1px solid var(--cs-border);
+      box-shadow: 0 24px 64px rgba(20,21,26,.2);
+      overflow: hidden;
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      font-size: 15px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--cs-border);
+    }
+    .modal-body { padding: 16px; }
+    .field label { display: block; font-size: 11px; color: var(--cs-muted); margin-bottom: 6px; }
+    .field input {
+      width: 100%; height: 32px; border: 1px solid var(--cs-border);
+      border-radius: var(--cs-radius); padding: 0 10px; font-family: inherit; font-size: 13px;
+    }
+    .field input:focus { outline: none; border-color: var(--cs-brand); box-shadow: 0 0 0 3px var(--cs-brand-muted); }
+    .hint { font-size: 11px; color: var(--cs-muted); margin-top: 10px; line-height: 1.4; }
+    .modal-foot {
+      display: flex; justify-content: flex-end; gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--cs-border);
+      background: #fafbfc;
+    }
+    .empty {
+      text-align: center;
+      padding: 48px 24px;
+      color: var(--cs-muted);
+    }
+    .empty .icon { font-size: 42px; margin-bottom: 12px; opacity: 0.5; }
+    .empty h3 { color: var(--cs-fg); font-size: 15px; margin-bottom: 6px; }
+    .provider-tabs {
+      display: flex; gap: 8px;
+    }
+    .provider-tab {
+      flex: 1; height: 36px; border-radius: var(--cs-radius);
+      border: 1px solid var(--cs-border);
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      font-size: 12px;
+    }
+    .provider-tab.on {
+      background: var(--cs-brand-muted);
+      border-color: var(--cs-brand);
+      font-weight: 500;
+    }
+    nav.top { margin-bottom: 24px; }
+    nav.top a { color: var(--cs-brand); text-decoration: none; margin-right: 16px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <nav class="top">
+    <a href="workbench-light.html">主界面（亮）</a>
+    <a href="workbench-dark.html">主界面（暗）</a>
+    <a href="README.md">说明文档</a>
+  </nav>
+  <h1>Workbench v2 — 组件</h1>
+  <p class="lead">与 GPUI 落代码对齐：`ui/menu.rs` 弹出卡片、`overlay.rs` 遮罩与 surface、对话框底栏「取消左 / 确认右」、添加账号分段控件选中态用 accent 底 + 对勾。</p>
+  <div class="grid">
+    <section class="panel">
+      <h2>按钮层级</h2>
+      <div class="btn-row">
+        <button class="btn btn-submit">确认修改</button>
+        <button class="btn btn-submit" disabled>确认修改</button>
+        <button class="btn">上传 ▾</button>
+        <button class="btn btn-ghost">取消</button>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>对象右键菜单</h2>
+      <div class="menu">
+        <div class="menu-item">打开预览 <kbd>Space</kbd></div>
+        <div class="menu-item">下载</div>
+        <div class="menu-item">复制链接</div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">重命名 <kbd>↵</kbd></div>
+        <div class="menu-item danger">删除 <kbd>⌘⌫</kbd></div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>服务商分段（添加账号）</h2>
+      <div class="provider-tabs">
+        <div class="provider-tab on">✓ 七牛</div>
+        <div class="provider-tab">阿里云</div>
+        <div class="provider-tab">腾讯云</div>
+      </div>
+      <p class="hint" style="margin-top:12px">等宽 120px 档位；选中用 sidebar_accent 底，不用 Secondary≈ghost 的不可见选中。</p>
+    </section>
+    <section class="panel" style="grid-column: 1 / -1">
+      <h2>重命名弹层</h2>
+      <div class="modal-scene">
+        <div class="modal">
+          <div class="modal-head">重命名 <span style="font-weight:400;color:var(--cs-muted);cursor:pointer">✕</span></div>
+          <div class="modal-body">
+            <p style="font-size:11px;color:var(--cs-muted);margin-bottom:12px">原路径：<strong style="color:var(--cs-fg)">cover-hero.webp</strong></p>
+            <div class="field">
+              <label>重命名</label>
+              <input value="cover-hero-v2.webp" />
+            </div>
+            <p class="hint">仅修改当前对象名称；目录内其他文件不受影响。</p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-ghost">取消</button>
+            <button class="btn btn-submit">确认修改</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>空态（未选 Bucket）</h2>
+      <div class="empty">
+        <div class="icon">☁</div>
+        <h3>选择一个空间</h3>
+        <p>在左侧选择账号与 Bucket，即可浏览对象。</p>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

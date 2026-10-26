@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CloudStorage — Workbench v2 (Light)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --cs-bg: #f4f5f8;
+      --cs-fg: #14151a;
+      --cs-muted: #5c6370;
+      --cs-chrome: #e8eaef;
+      --cs-chrome-fg: #1a1c22;
+      --cs-chrome-border: #d4d8e0;
+      --cs-surface: #ffffff;
+      --cs-border: #e2e5ec;
+      --cs-inset: #f0f1f5;
+      --cs-hover: rgba(20, 21, 26, 0.05);
+      --cs-selection: rgba(67, 97, 238, 0.12);
+      --cs-brand: #4361ee;
+      --cs-brand-fg: #ffffff;
+      --cs-brand-muted: rgba(67, 97, 238, 0.14);
+      --cs-radius: 6px;
+      --cs-radius-lg: 10px;
+      --cs-row: 36px;
+      --cs-sidebar: 240px;
+      --cs-font: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      --cs-mono: "IBM Plex Mono", ui-monospace, monospace;
+      --shadow-surface: 0 1px 0 rgba(20, 21, 26, 0.04), 0 12px 40px rgba(20, 21, 26, 0.06);
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      font-family: var(--cs-font);
+      font-size: 13px;
+      color: var(--cs-fg);
+      background: #0d0e12;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .window {
+      width: min(1180px, 100%);
+      height: min(720px, 90vh);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 24px 80px rgba(0,0,0,.45);
+      border: 1px solid #2a2d36;
+    }
+    .titlebar {
+      height: 44px;
+      background: var(--cs-chrome);
+      border-bottom: 1px solid var(--cs-chrome-border);
+      display: flex;
+      align-items: center;
+      padding: 0 12px 0 78px;
+      gap: 8px;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .traffic {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: flex;
+      gap: 8px;
+    }
+    .traffic span {
+      width: 12px; height: 12px; border-radius: 50%;
+    }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+    .icon-btn {
+      width: 28px; height: 28px;
+      border: none; background: transparent;
+      border-radius: var(--cs-radius);
+      color: var(--cs-muted);
+      cursor: default;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .icon-btn:hover { background: var(--cs-hover); color: var(--cs-fg); }
+    .path-inset {
+      flex: 1;
+      min-width: 0;
+      height: 30px;
+      background: var(--cs-inset);
+      border: 1px solid transparent;
+      border-radius: var(--cs-radius);
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      gap: 4px;
+      font-size: 12px;
+    }
+    .path-inset .crumb { color: var(--cs-muted); cursor: default; }
+    .path-inset .crumb:hover { color: var(--cs-brand); }
+    .path-inset .sep { color: #a8adb8; user-select: none; }
+    .path-inset .current { color: var(--cs-fg); font-weight: 500; }
+    .transfer-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--cs-surface);
+      border: 1px solid var(--cs-border);
+      font-size: 11px;
+      color: var(--cs-muted);
+    }
+    .transfer-pill .bar {
+      width: 64px; height: 4px;
+      background: var(--cs-border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .transfer-pill .bar i {
+      display: block; height: 100%; width: 62%;
+      background: var(--cs-brand);
+      border-radius: 2px;
+    }
+    .body {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      background: var(--cs-bg);
+    }
+    .sidebar {
+      width: var(--cs-sidebar);
+      background: var(--cs-chrome);
+      border-right: 1px solid var(--cs-chrome-border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar-scroll { flex: 1; overflow: auto; padding: 8px 0; }
+    .section-label {
+      padding: 10px 14px 4px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--cs-muted);
+    }
+    .account-row {
+      margin: 2px 8px;
+      padding: 8px 10px;
+      border-radius: var(--cs-radius);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      position: relative;
+      cursor: default;
+    }
+    .account-row.active {
+      background: var(--cs-brand-muted);
+    }
+    .account-row.active::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 6px; bottom: 6px;
+      width: 3px;
+      border-radius: 0 2px 2px 0;
+      background: var(--cs-brand);
+    }
+    .account-row .av {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      background: var(--cs-surface);
+      border: 1px solid var(--cs-border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px;
+    }
+    .account-row .meta { flex: 1; min-width: 0; }
+    .account-row .name { font-weight: 500; font-size: 13px; }
+    .account-row .sub { font-size: 11px; color: var(--cs-muted); }
+    .bucket {
+      margin: 1px 10px;
+      padding: 6px 10px 6px 28px;
+      border-radius: var(--cs-radius);
+      font-size: 12px;
+      color: var(--cs-chrome-fg);
+      cursor: default;
+    }
+    .bucket:hover { background: var(--cs-hover); }
+    .bucket.active {
+      background: var(--cs-selection);
+      font-weight: 500;
+    }
+    .sidebar-footer {
+      border-top: 1px solid var(--cs-chrome-border);
+      padding: 8px;
+      display: flex;
+      gap: 4px;
+    }
+    .footer-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px;
+      border-radius: var(--cs-radius);
+      color: var(--cs-muted);
+      font-size: 12px;
+      position: relative;
+    }
+    .footer-btn:hover { background: var(--cs-hover); color: var(--cs-fg); }
+    .badge {
+      position: absolute;
+      top: 4px; right: 12px;
+      min-width: 16px; height: 16px;
+      padding: 0 4px;
+      border-radius: 8px;
+      background: var(--cs-brand);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      margin: 10px 10px 10px 0;
+      background: var(--cs-surface);
+      border-radius: var(--cs-radius-lg);
+      border: 1px solid var(--cs-border);
+      box-shadow: var(--shadow-surface);
+      overflow: hidden;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--cs-border);
+      gap: 12px;
+    }
+    .toolbar-left { display: flex; gap: 6px; align-items: center; }
+    .btn {
+      height: 28px;
+      padding: 0 10px;
+      border-radius: var(--cs-radius);
+      font-size: 12px;
+      font-family: inherit;
+      border: 1px solid transparent;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: default;
+      background: transparent;
+      color: var(--cs-fg);
+    }
+    .btn-primary-outline {
+      border-color: var(--cs-border);
+      background: var(--cs-surface);
+      font-weight: 500;
+    }
+    .btn-primary-outline:hover { border-color: #c8cdd8; background: #fafbfc; }
+    .btn-ghost { color: var(--cs-muted); }
+    .btn-ghost:hover { background: var(--cs-hover); color: var(--cs-fg); }
+    .search-wrap {
+      display: flex;
+      align-items: center;
+      background: var(--cs-inset);
+      border-radius: var(--cs-radius);
+      padding: 0 4px 0 10px;
+      height: 28px;
+      width: 220px;
+      border: 1px solid transparent;
+    }
+    .search-wrap:focus-within {
+      border-color: var(--cs-brand);
+      box-shadow: 0 0 0 3px var(--cs-brand-muted);
+    }
+    .search-wrap input {
+      border: none; background: transparent;
+      flex: 1; font-size: 12px; font-family: inherit;
+      outline: none;
+    }
+    .search-wrap button {
+      width: 26px; height: 22px;
+      border: none; border-radius: 4px;
+      background: transparent;
+      color: var(--cs-muted);
+    }
+    .search-wrap button:hover { background: var(--cs-hover); }
+    .table-head {
+      display: grid;
+      grid-template-columns: 32px 1fr 88px 140px;
+      padding: 0 12px;
+      height: 32px;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--cs-muted);
+      border-bottom: 1px solid var(--cs-border);
+      background: #fafbfc;
+    }
+    .table-head .r { text-align: right; }
+    .list { flex: 1; overflow: auto; }
+    .row {
+      display: grid;
+      grid-template-columns: 32px 1fr 88px 140px;
+      padding: 0 12px;
+      height: var(--cs-row);
+      align-items: center;
+      font-size: 13px;
+      cursor: default;
+    }
+    .row:hover { background: var(--cs-hover); }
+    .row.selected { background: var(--cs-selection); }
+    .row .name-cell {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .row .name-cell span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-icon {
+      width: 20px; height: 20px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px;
+    }
+    .file-icon.folder { background: #fff4e0; color: #c47f17; }
+    .file-icon.img { background: #e8f4ff; color: #2b6cb0; }
+    .file-icon.code { background: #f0ebff; color: #5b4bb4; }
+    .row .meta { font-size: 12px; color: var(--cs-muted); font-variant-numeric: tabular-nums; }
+    .row .r { text-align: right; }
+    .statusbar {
+      height: 32px;
+      border-top: 1px solid var(--cs-border);
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--cs-muted);
+      background: #fafbfc;
+    }
+    .tag {
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--cs-border);
+      background: var(--cs-surface);
+      cursor: default;
+    }
+    .tag:hover { background: var(--cs-hover); }
+    .label-chip {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      padding: 8px 14px;
+      background: rgba(20,21,26,.88);
+      color: #fff;
+      font-size: 11px;
+      border-radius: 8px;
+      backdrop-filter: blur(8px);
+    }
+    a.switch { color: var(--cs-brand); text-decoration: none; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <header class="titlebar">
+      <div class="traffic" aria-hidden="true"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+      <button class="icon-btn" title="侧栏">☰</button>
+      <button class="icon-btn" title="后退">←</button>
+      <button class="icon-btn" title="前进">→</button>
+      <div class="path-inset">
+        <span class="crumb">media-assets</span><span class="sep">›</span>
+        <span class="crumb">photos</span><span class="sep">›</span>
+        <span class="current">2024</span>
+      </div>
+      <div class="transfer-pill">
+        <span>2 项传输中</span>
+        <div class="bar"><i></i></div>
+      </div>
+    </header>
+    <div class="body">
+      <aside class="sidebar">
+        <div class="sidebar-scroll">
+          <div class="section-label">账号</div>
+          <div class="account-row active">
+            <div class="av">🌐</div>
+            <div class="meta">
+              <div class="name">生产环境</div>
+              <div class="sub">七牛 · AK…8f2a</div>
+            </div>
+          </div>
+          <div class="account-row">
+            <div class="av">🏢</div>
+            <div class="meta">
+              <div class="name">阿里云备份</div>
+              <div class="sub">OSS · AK…19c0</div>
+            </div>
+          </div>
+          <div class="section-label">空间</div>
+          <div class="bucket active">media-assets</div>
+          <div class="bucket">static-cdn</div>
+          <div class="bucket">logs-archive</div>
+        </div>
+        <div class="sidebar-footer">
+          <div class="footer-btn">⇅ 传输<span class="badge">2</span></div>
+          <div class="footer-btn">⚙ 设置</div>
+        </div>
+      </aside>
+      <main class="content">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <button class="btn btn-primary-outline">↑ 上传 ▾</button>
+            <button class="btn btn-ghost">新建目录</button>
+            <button class="btn btn-ghost">下载</button>
+            <button class="btn btn-ghost">更多 ▾</button>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <div class="search-wrap">
+              <input type="text" placeholder="前缀搜索，回车提交" value="2024/" />
+              <button title="搜索">⌕</button>
+            </div>
+            <button class="icon-btn" title="刷新">↻</button>
+          </div>
+        </div>
+        <div class="table-head">
+          <span>☐</span>
+          <span>名称</span>
+          <span class="r">大小</span>
+          <span class="r">修改时间</span>
+        </div>
+        <div class="list">
+          <div class="row">
+            <span>☐</span>
+            <div class="name-cell"><div class="file-icon folder">📁</div><span>events/</span></div>
+            <span class="meta r">—</span>
+            <span class="meta r">—</span>
+          </div>
+          <div class="row selected">
+            <span>☑</span>
+            <div class="name-cell"><div class="file-icon img">🖼</div><span>cover-hero.webp</span></div>
+            <span class="meta r">248 KB</span>
+            <span class="meta r">2024-11-03 14:22</span>
+          </div>
+          <div class="row selected">
+            <span>☑</span>
+            <div class="name-cell"><div class="file-icon img">🖼</div><span>team-offsite.jpg</span></div>
+            <span class="meta r">4.2 MB</span>
+            <span class="meta r">2024-10-18 09:01</span>
+          </div>
+          <div class="row">
+            <span>☐</span>
+            <div class="name-cell"><div class="file-icon code">{}</div><span>manifest.json</span></div>
+            <span class="meta r">1.1 KB</span>
+            <span class="meta r">2024-09-02 16:40</span>
+          </div>
+        </div>
+        <div class="statusbar">
+          <span>已选 <strong style="color:var(--cs-fg)">2</strong> 项 · 本页 4 个对象</span>
+          <span class="tag">100 条/页 ▾</span>
+        </div>
+      </main>
+    </div>
+  </div>
+  <div class="label-chip">Workbench v2 · Light · <a class="switch" href="workbench-dark.html">暗色稿</a> · <a class="switch" href="components.html">组件</a></div>
+</body>
+</html>

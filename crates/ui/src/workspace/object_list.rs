@@ -30,7 +30,8 @@ impl WorkspaceView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    // 上传是本区的常用动作，用默认按钮而不是主色——主色留给对话框里的提交。
+                    // 上传是本区最常用的动作（Blob0 参照，2026-10 契约翻转）：
+                    // 用实心主色分裂按钮，不再「主色只给对话框提交」。
                     .child(
                         div()
                             .relative()
@@ -43,6 +44,7 @@ impl WorkspaceView {
                                         "上传"
                                     })
                                     .icon(Icon::new(IconName::ChevronDown))
+                                    .primary()
                                     .with_size(Size::Small)
                                     .disabled(self.uploading)
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -71,7 +73,6 @@ impl WorkspaceView {
                     .child(
                         Button::new("toolbar-create-folder")
                             .label("新建目录")
-                            .ghost()
                             .with_size(Size::Small)
                             .disabled(self.creating_folder)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -698,7 +699,7 @@ impl WorkspaceView {
                             .gap_2()
                             .child(
                                 Icon::new(IconName::Folder)
-                                    .text_color(crate::theme::file_icon_color(theme.mode)),
+                                    .text_color(crate::theme::file_folder_color(theme.mode)),
                             )
                             .child(div().min_w_0().truncate().child(label)),
                     )

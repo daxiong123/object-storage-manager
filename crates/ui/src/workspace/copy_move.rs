@@ -629,7 +629,7 @@ impl WorkspaceView {
                     )
                     .child(
                         Icon::new(IconName::Folder)
-                            .text_color(crate::theme::file_icon_color(theme.mode)),
+                            .text_color(crate::theme::file_folder_color(theme.mode)),
                     )
                     .child(
                         div()

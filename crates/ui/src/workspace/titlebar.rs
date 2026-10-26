@@ -315,11 +315,18 @@ impl WorkspaceView {
         // 以及路径右侧的空白，仍然留给窗口拖拽。
         let segments = breadcrumb_prefixes(self.current_prefix.as_deref());
         let at_root = segments.is_empty();
+        // 凹陷槽（Workbench v2）：整条面包屑坐在一条比 chrome 更浅（亮）/更深（暗）
+        // 的井里，当前位置读成「嵌在标题栏里的地址槽」，而不是直接浮在 chrome 上的
+        // 文字。槽体没有鼠标处理器，不拦截事件——窗口拖拽/双击缩放照旧冒泡到
+        // TitleBar（见上方注释），拦截仍只落在可点的段上。
         let mut path = h_flex()
             .id("title-breadcrumb")
             .flex_1()
             .min_w_0()
-            .h_full()
+            .h(tokens::text(28.))
+            .px_2()
+            .rounded(tokens::radius())
+            .bg(crate::theme::inset_background(theme.mode))
             .items_center()
             .gap_1()
             .overflow_hidden()
