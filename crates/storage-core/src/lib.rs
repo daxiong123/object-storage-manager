@@ -19,30 +19,51 @@ use std::sync::Arc;
 /// 调用方（传输引擎）负责节流通知 UI，本层每块都可回调。
 pub type ByteProgress = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
-/// 下载目标文件的清理守卫：下载 future 被丢弃（暂停/取消/挂起时传输引擎靠
-/// `JoinHandle::abort()` 终止任务）时，半截文件不会留在磁盘上。
-/// 下载完整成功后必须调用 [`PartialFileGuard::disarm`] 保留文件。
+/// 下载落盘守卫：数据先写到**本次尝试专属**的同目录临时文件，成功后原子 rename 到目标。
+///
+/// - 暂停/取消/挂起时传输引擎靠 `JoinHandle::abort()` 丢弃 future，守卫的 Drop 只删自己的
+///   临时文件，半截数据不会留在目标路径上；
+/// - 临时名带进程内唯一序号：两个下载共用同一目标路径时，取消较旧的一个不会误删较新一个
+///   已完成（或进行中）的产物，目标路径上的既有文件在成功前也不会被截断。
 pub struct PartialFileGuard {
-    path: Option<std::path::PathBuf>,
+    dest: std::path::PathBuf,
+    temp: std::path::PathBuf,
+    armed: bool,
 }
 
 impl PartialFileGuard {
-    pub fn new(path: &std::path::Path) -> Self {
+    pub fn new(dest: &std::path::Path) -> Self {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let temp = dest.with_file_name(format!(".{name}.{}-{seq}.part", std::process::id()));
         Self {
-            path: Some(path.to_path_buf()),
+            dest: dest.to_path_buf(),
+            temp,
+            armed: true,
         }
     }
 
-    /// 下载完成：保留文件。
-    pub fn disarm(mut self) {
-        self.path = None;
+    /// 本次尝试写入的临时文件路径。
+    pub fn temp_path(&self) -> &std::path::Path {
+        &self.temp
+    }
+
+    /// 下载完整成功：把临时文件原子地换到目标路径。
+    pub fn commit(mut self) -> std::io::Result<()> {
+        std::fs::rename(&self.temp, &self.dest)?;
+        self.armed = false;
+        Ok(())
     }
 }
 
 impl Drop for PartialFileGuard {
     fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(path);
+        if self.armed {
+            let _ = std::fs::remove_file(&self.temp);
         }
     }
 }
@@ -178,17 +199,29 @@ mod guard_tests {
     }
 
     #[test]
-    fn dropped_guard_removes_partial_file_but_disarmed_keeps_it() {
+    fn guard_writes_to_private_temp_and_commit_publishes_atomically() {
         let dir = std::env::temp_dir().join(format!("osm-guard-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let a = dir.join("a.part");
-        std::fs::write(&a, b"x").unwrap();
-        drop(PartialFileGuard::new(&a));
-        assert!(!a.exists(), "未解除武装的守卫应删除半截文件");
-        let b = dir.join("b.done");
-        std::fs::write(&b, b"x").unwrap();
-        PartialFileGuard::new(&b).disarm();
-        assert!(b.exists(), "disarm 后必须保留文件");
+        let dest = dir.join("a.bin");
+        std::fs::write(&dest, b"old").unwrap();
+
+        // 被丢弃（abort）的尝试：只删自己的临时文件，目标路径上的既有文件原样保留
+        let aborted = PartialFileGuard::new(&dest);
+        std::fs::write(aborted.temp_path(), b"partial").unwrap();
+        let aborted_temp = aborted.temp_path().to_path_buf();
+        // 另一个并发尝试：临时名必须不同
+        let other = PartialFileGuard::new(&dest);
+        assert_ne!(aborted.temp_path(), other.temp_path());
+        std::fs::write(other.temp_path(), b"new").unwrap();
+        drop(aborted);
+        assert!(!aborted_temp.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+
+        // 成功的尝试：commit 后目标内容为新内容，临时文件消失
+        let other_temp = other.temp_path().to_path_buf();
+        other.commit().unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!other_temp.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

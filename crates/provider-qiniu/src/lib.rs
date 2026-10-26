@@ -735,14 +735,15 @@ impl StorageProvider for QiniuProvider {
 
         // 流式落盘：分块写，不驻留整文件（内存红线，agents.md §2）。
         // 中途失败则清理半成品文件后响报（错误永不静默）。
-        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
-            StorageError::Io(format!(
-                "download_object: 创建本地文件 {} 失败: {e}",
-                dest.display()
-            ))
-        })?;
-        // 守卫：流中断（`?` 提前返回）与 future 被 abort 丢弃时都会删除半成品文件。
         let guard = object_storage_core::PartialFileGuard::new(dest);
+        let mut file = tokio::fs::File::create(guard.temp_path())
+            .await
+            .map_err(|e| {
+                StorageError::Io(format!(
+                    "download_object: 创建本地文件 {} 失败: {e}",
+                    dest.display()
+                ))
+            })?;
         let mut total: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -755,9 +756,11 @@ impl StorageProvider for QiniuProvider {
                 ))
             })?;
             if let Err(e) = file.write_all(&chunk).await {
-                return Err(
-                    Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
-                );
+                return Err(Self::download_cleanup_failed(
+                    guard.temp_path(),
+                    format!("写入本地文件失败: {e}"),
+                )
+                .await);
             }
             total += chunk.len() as u64;
             if let Some(cb) = &progress {
@@ -765,11 +768,18 @@ impl StorageProvider for QiniuProvider {
             }
         }
         if let Err(e) = file.flush().await {
-            return Err(
-                Self::download_cleanup_failed(dest, format!("写入本地文件失败: {e}")).await,
-            );
+            return Err(Self::download_cleanup_failed(
+                guard.temp_path(),
+                format!("写入本地文件失败: {e}"),
+            )
+            .await);
         }
-        guard.disarm();
+        if let Err(e) = guard.commit() {
+            return Err(StorageError::Io(format!(
+                "download_object: 写入目标文件 {} 失败: {e}",
+                dest.display()
+            )));
+        }
         Ok(total)
     }
 
