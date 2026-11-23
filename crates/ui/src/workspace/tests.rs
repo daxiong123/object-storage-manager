@@ -212,6 +212,78 @@ fn preview_kind_classifies_extensions() {
     assert_eq!(preview_kind("movie.mp4"), PreviewKind::System);
 }
 
+#[gpui::test]
+fn text_preview_shows_last_line_and_copies_full_json(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::init(cx);
+    });
+    let text = format!(r#"{{"data":"{}","tail":"结尾"}} "#, "x".repeat(11 * 1024));
+    let services = Arc::new(AppServices::open_at(":memory:").expect("打开临时库"));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        let mut view = WorkspaceView::new(services, cx);
+        view.selected_bucket = Some("test-bucket".into());
+        view.entries = vec![entry_object("config.json"), entry_object("other.txt")];
+        view.selected_object_key = Some("config.json".into());
+        view.preview_overlay_open = true;
+        view.preview_needs_focus = true;
+        view.previewing = true;
+        view
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+        view.update(cx, |view, cx| {
+            view.previewing = false;
+            view.preview_text = Some(text.clone());
+            cx.notify();
+        });
+        _ = window.draw(cx);
+    });
+    let position = view.read_with(cx, |view, cx| {
+        let editor = view.text_editor.as_ref().unwrap().read(cx);
+        assert_eq!(editor.value().len(), text.len());
+        editor.input_bounds().center()
+    });
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-10_000.))),
+        ..Default::default()
+    });
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+        let editor = view.read(cx).text_editor.as_ref().unwrap().read(cx);
+        let tail = editor
+            .range_to_bounds(&(text.len() - 2..text.len() - 1))
+            .expect("长行末尾没有布局");
+        let viewport = editor.input_bounds();
+        assert!(viewport.contains(&tail.center()), "长行末尾不在可视区域");
+        assert!(
+            viewport.bottom() - tail.bottom() < editor.line_height().unwrap(),
+            "滚动到底仍在文本末尾留下多余空白"
+        );
+    });
+
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    view.read_with(cx, |view, cx| {
+        assert!(view.selected_object_keys.is_empty(), "全选命中了对象列表");
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .expect("未复制到剪贴板");
+        assert_eq!(copied.len(), text.len());
+        assert!(copied == text, "剪贴板内容与原文不同");
+    });
+
+    cx.simulate_keystrokes("escape");
+    assert!(!view.read_with(cx, |view, _| view.preview_overlay_open));
+
+    cx.simulate_keystrokes("cmd-a");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected_object_keys.len()),
+        2
+    );
+}
+
 #[test]
 fn syntax_language_names_resolve_to_enabled_grammars() {
     // 这条守 Cargo.toml 里 gpui-component 的 feature：退回 `tree-sitter`（只带 JSON grammar）时，

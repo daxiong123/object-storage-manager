@@ -481,6 +481,7 @@ impl WorkspaceView {
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(language)
+                .scroll_beyond_last_line(Some(0))
                 .default_value(text)
         });
         // 订阅 Change：按键即重渲染，保存按钮的 dirty 禁用态实时刷新
@@ -515,6 +516,7 @@ impl WorkspaceView {
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(language)
+                .scroll_beyond_last_line(Some(0))
                 .default_value(text)
         });
         cx.subscribe_in(&editor, window, |_, _, event: &InputEvent, _, cx| {
@@ -998,11 +1000,21 @@ impl WorkspaceView {
         };
         let mask = overlay::mask(theme)
             .occlude()
-            .key_context("Overlay")
+            .key_context("Overlay ObjectPreview")
             .track_focus(&self.overlay_focus)
             .on_action(cx.listener(|this, _: &UnifiedDismiss, window, cx| {
                 this.close_preview_overlay(window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &gpui_component::input::SelectAll, window, cx| {
+                    if let Some(editor) = &this.text_editor {
+                        editor.update(cx, |editor, cx| {
+                            editor.focus(window, cx);
+                            editor.select_all(window, cx);
+                        });
+                    }
+                }),
+            )
             .on_action(cx.listener(Self::handle_select_object_prev))
             .on_action(cx.listener(Self::handle_select_object_next))
             .on_mouse_down(
@@ -1153,7 +1165,7 @@ impl WorkspaceView {
                             )
                             .child(
                                 Button::new("preview-overlay-copy-url")
-                                    .label("复制")
+                                    .label("复制链接")
                                     .ghost()
                                     .with_size(Size::Small)
                                     .disabled(self.copying_url)
