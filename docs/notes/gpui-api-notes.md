@@ -258,6 +258,10 @@ let win: *mut Object = msg_send![view, window]; // NSView.window → NSWindow
 - 0.6.1 将单行 `Input`、多行 `Textarea`、代码 `Editor` 分成独立组件。
 - 文本对象预览/编辑使用 `EditorState::new(...).language(...).default_value(...)` +
   `Editor::new(...)`；普通表单继续用 `InputState` + `Input`。
+- 编辑器默认允许滚过最后一行约半屏。文本预览用 `scroll_beyond_last_line(Some(0))`，
+  让滚动条到底时停在最后一行，避免长行 JSON 的尾部看起来像被截断。
+- 预览初始焦点在遮罩，方向键可切换对象。`ObjectPreview` context 将 ⌘A 交给编辑器并把焦点移进去，
+  后续 ⌘C 由编辑器复制选区。只绑 Workspace 的 ⌘A 会选中遮罩背后的对象列表。
 - 已启用 `tree-sitter-languages` 聚合 feature（30+ 语言 grammar，含 `tree-sitter` + `tree-sitter-json`），
   取代早先只留 JSON 的 `tree-sitter`：**该聚合 feature 不包含 XML grammar**，所以 `syntax_language`
   返回的 `xml` 只是显示名（mime 与预览标签），高亮回落纯文本。grammar 表由

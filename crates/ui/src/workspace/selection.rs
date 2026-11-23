@@ -261,7 +261,7 @@ impl WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.palette.is_some() || self.add_modal.is_some() {
+        if self.palette.is_some() || self.add_modal.is_some() || self.preview_overlay_open {
             return;
         }
         if self.selected_bucket.is_none() {

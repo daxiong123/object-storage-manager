@@ -107,6 +107,11 @@ pub fn bind_keys(cx: &mut App) {
         // 规范 §7：⌘A 全选当前对象列表。绑定在 Workspace context（非全局），
         // 命令面板/输入框聚焦时按键由组件原生响应链处理，不会被吞。
         KeyBinding::new("cmd-a", SelectObjectAll, Some("Workspace")),
+        KeyBinding::new(
+            "cmd-a",
+            gpui_component::input::SelectAll,
+            Some("ObjectPreview"),
+        ),
         // 对象列表：↑↓/←→ 移动主选，⇧ 扩选。Workspace 上下文，避免抢 Input。
         // Overlay 再绑一套：预览获得焦点后仍能切对象（⇧ 在预览里等同移动，不扩选）。
         KeyBinding::new("up", SelectObjectPrev, Some("Workspace")),
